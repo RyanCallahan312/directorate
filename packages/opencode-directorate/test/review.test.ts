@@ -1179,6 +1179,37 @@ test(
       ],
       [1, 399, 400, 200_000]
     );
+
+    // Later chunks render from their own start, numbered as the hunk would number them.
+    const mid = present(bigRegions[250]);
+    const tail = await run(renderRegions(regionsResult, [mid]));
+    assert.deepEqual([mid.newStart, mid.newEnd], [100_000, 100_399]);
+    assert.match(tail.text, /^\s+100000 \+line 99999$/mu);
+    assert.match(tail.text, /^\s+100399 \+line 100398$/mu);
+
+    const end = await run(
+      renderRegions(regionsResult, [present(bigRegions.at(-1))])
+    );
+
+    assert.match(end.text, /^\s+200000 \+line 199999$/mu);
+
+    const legacy = await run(
+      renderRegions(regionsResult, [
+        {
+          ...mid,
+          hunkStart: undefined,
+          newLine: undefined,
+          oldLine: undefined,
+          sectionStart: undefined,
+        },
+      ])
+    );
+
+    assert.equal(
+      legacy.text,
+      tail.text,
+      "regions from older seals render the same by scanning back"
+    );
   }
 );
 
@@ -1557,6 +1588,12 @@ test("listings: worktree seals list what was sealed; dependency directories list
   );
   assert.match(pkg, /^\.env {2}\(withheld\)$/mu);
   assert.match(pkg, /^index\.js$/mu);
+  symlinkSync(nodePath.dirname(dir), join(dir, "node_modules/up"));
+  assert.match(
+    await run(listFiles(seal, "node_modules")),
+    /^up\/ -> \(outside the repository\)$/mu,
+    "a link to the repository's parent is outside it"
+  );
 
   const liveResult2 = await run(
     readable(seal, "app/node_modules/pkg/index.js")
@@ -2313,6 +2350,27 @@ test("mode-only change after the seal: refresh captures it as a metadata region"
   );
   const fingerprintResult10 = await run(currentFingerprint(r.seal));
   assert.equal(fingerprintResult10.fingerprint, r.seal.fingerprint);
+});
+
+test("typechange refresh: an exec-bit change unreads only the section whose header changed", async () => {
+  const dir = repo({ "plain.ts": "p\n" });
+  symlinkSync("plain.ts", join(dir, "link"));
+  g(dir, "add", "link");
+  g(dir, "commit", "-qm", "link");
+  unlinkSync(join(dir, "link"));
+  write(dir, "link", "echo hi\n");
+  const seal = regions(await local(dir), () => ({ ownerRead: true }));
+  assert.equal(seal.regions.filter((x) => x.file === "link").length, 2);
+  fs.chmodSync(join(dir, "link"), 0o755);
+  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+  assert.equal(
+    r.newRegions.length,
+    1,
+    "the symlink deletion keeps its receipt"
+  );
+  const shown = await run(renderRegions(r.seal, r.newRegions));
+  assert.match(shown.text, /new file mode 100755/u);
+  assert.match(shown.text, /\+echo hi/u);
 });
 
 test("refresh uses the captured generation to reopen dependent findings", async () => {

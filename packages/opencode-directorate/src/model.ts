@@ -196,16 +196,22 @@ export type Actor = typeof ActorSchema.Type;
 const RegionSchema = Schema.Struct({
   disposition: opt(DispositionSchema),
   file: Schema.String,
+  /** Where a hunk chunk renders from: its `@@` line, and the old- and new-side numbers at patchStart. Older seals omit them. */
+  hunkStart: opt(Count),
   id: Schema.String,
   key: opt(Schema.String),
   newEnd: Count,
+  newLine: opt(Count),
   newStart: Count,
   note: opt(Schema.String),
   offsets: opt(Schema.Record(Schema.String, Count)),
+  oldLine: opt(Count),
   ownerRead: opt(Schema.Boolean),
   patchEnd: Count,
   patchStart: Count,
   readBy: since(list(Schema.String), []),
+  /** The line of the chunk's `diff --git` section header. Older seals omit it. */
+  sectionStart: opt(Count),
 });
 
 export type Region = typeof RegionSchema.Type;

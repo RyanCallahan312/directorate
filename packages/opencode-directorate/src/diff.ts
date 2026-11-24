@@ -117,6 +117,8 @@ interface Hunk {
   readonly newLines: number;
   readonly patchStart: number;
   readonly patchEnd: number;
+  /** The line of this hunk's own `diff --git` header: a typechange's second section has its own. */
+  readonly sectionStart: number;
 }
 
 type ParsedFile = FileEntry & {
@@ -187,7 +189,10 @@ export const assemble = (pieces: readonly Piece[]) => {
       newLines: number;
       patchStart: number;
       next: number;
+      sectionStart: number;
     }[] = [];
+
+    let sectionStart = patchStart;
 
     for (const line of kept) {
       const n = out.push(line);
@@ -197,6 +202,10 @@ export const assemble = (pieces: readonly Piece[]) => {
       }
 
       marks.push(n);
+
+      if (line.startsWith("diff --git ")) {
+        sectionStart = n;
+      }
 
       const m = line.startsWith("@@")
         ? /^@@ -\d+(?:,\d+)? \+(?<start>\d+)(?:,(?<count>\d+))? @@/u.exec(line)
@@ -208,6 +217,7 @@ export const assemble = (pieces: readonly Piece[]) => {
           newStart: m ? Number(m[1]) : 0,
           next: marks.length,
           patchStart: n,
+          sectionStart,
         });
       }
     }
@@ -249,19 +259,25 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
         continue;
       }
 
-      const header = lines
-        .slice(f.patchStart - 1, (f.hunks[0]?.patchStart ?? f.patchEnd + 1) - 1)
-        .filter((line) => !line.startsWith("index "))
-        .join("\n");
+      // A section's header as the reviewer sees it, without index IDs: a mode change alters the key, a re-hash does not.
+      const headerOf = (start: number, end: number) =>
+        lines
+          .slice(start - 1, end - 1)
+          .filter((line) => !line.startsWith("index "))
+          .join("\n");
 
-      const key = (start: number, end: number, hunk = "") =>
+      const key = (header: string, start: number, end: number, hunk = "") =>
         sha256(`${header}\0${hunk}\0${lines.slice(start - 1, end).join("\n")}`);
 
       if (!f.hunks.length) {
         regions.push({
           file: f.path,
           id: `R${(k += 1)}`,
-          key: yield* key(f.patchStart, f.patchEnd),
+          key: yield* key(
+            headerOf(f.patchStart, f.patchEnd + 1),
+            f.patchStart,
+            f.patchEnd
+          ),
           newEnd: 0,
           newStart: 0,
           patchEnd: f.patchEnd,
@@ -272,6 +288,9 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
       }
 
       for (const h of f.hunks) {
+        const hunkHeader = lines[h.patchStart - 1] ?? "";
+        const header = headerOf(h.sectionStart, h.patchStart);
+        let oldLine = Number(/^@@ -(?<old>\d+)/u.exec(hunkHeader)?.[1] ?? 0);
         let next = h.newStart;
 
         for (
@@ -280,23 +299,33 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
           s += REGION_MAX_PATCH_LINES
         ) {
           const e = Math.min(h.patchEnd, s + REGION_MAX_PATCH_LINES - 1);
+          const body = lines.slice(Math.max(s, h.patchStart + 1) - 1, e);
 
           // New-side lines in this chunk (the @@ line is not one); a removal-only chunk anchors at the hunk start.
-          const count = lines
-            .slice(Math.max(s, h.patchStart + 1) - 1, e)
-            .filter((l) => l.startsWith("+") || l.startsWith(" ")).length;
+          const count = body.filter(
+            (l) => l.startsWith("+") || l.startsWith(" ")
+          ).length;
+
+          const oldCount = body.filter(
+            (l) => l.startsWith("-") || l.startsWith(" ")
+          ).length;
 
           regions.push({
             file: f.path,
+            hunkStart: h.patchStart,
             id: `R${(k += 1)}`,
-            key: yield* key(s, e, lines[h.patchStart - 1]),
+            key: yield* key(header, s, e, hunkHeader),
             newEnd: count ? next + count - 1 : h.newStart,
+            newLine: next,
             newStart: count ? next : h.newStart,
+            oldLine,
             patchEnd: e,
             patchStart: s,
             readBy: [],
+            sectionStart: h.sectionStart,
           });
           next += count;
+          oldLine += oldCount;
         }
       }
     }

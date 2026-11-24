@@ -95,6 +95,7 @@ const regionTitle = (r: Region, isHunk: boolean): string => {
   return `### ${r.id} ${r.file}${suffix}`;
 };
 
+/** Numbers the region's hunk lines; regions without stored counters (older seals) count from the hunk's `@@` line. */
 const appendHunkLines = (
   body: string[],
   lines: readonly string[],
@@ -103,10 +104,17 @@ const appendHunkLines = (
   r: Region
 ) => {
   const m = /^@@ -(?<old>\d+)(?:,\d+)? \+(?<new>\d+)/u.exec(hunkHeader);
-  let o = m ? Number(m[1]) : 0;
-  let n = m ? Number(m[2]) : 0;
+  let o = Number(m?.[1] ?? 0);
+  let n = Number(m?.[2] ?? 0);
+  let from = hunkAt;
 
-  for (let p = hunkAt; p <= r.patchEnd; p += 1) {
+  if (r.oldLine !== undefined && r.newLine !== undefined) {
+    o = r.oldLine;
+    n = r.newLine;
+    from = r.patchStart;
+  }
+
+  for (let p = from; p <= r.patchEnd; p += 1) {
     const l = lines[p - 1] ?? "";
     const show = p >= r.patchStart;
 
@@ -143,6 +151,23 @@ const appendHunkLines = (
   }
 };
 
+/** The lines of a chunk's section and hunk headers; older seals do not store them, so they are found by scanning back. */
+const chunkStart = (r: Region, lines: readonly string[]) => {
+  let hdr = r.sectionStart ?? r.patchStart;
+
+  while (hdr > 1 && !lines[hdr - 1]?.startsWith("diff --git ")) {
+    hdr -= 1;
+  }
+
+  let hunkAt = r.hunkStart ?? r.patchStart;
+
+  while (hunkAt > hdr && !lines[hunkAt - 1]?.startsWith("@@")) {
+    hunkAt -= 1;
+  }
+
+  return { hdr, hunkAt };
+};
+
 const regionBody = Effect.fnUntraced(function* regionBody(
   seal: Seal,
   r: Region,
@@ -165,18 +190,7 @@ const regionBody = Effect.fnUntraced(function* regionBody(
     };
   }
 
-  let hdr = r.patchStart;
-
-  while (hdr > 1 && !lines[hdr - 1]?.startsWith("diff --git ")) {
-    hdr -= 1;
-  }
-
-  let hunkAt = r.patchStart;
-
-  while (hunkAt > hdr && !lines[hunkAt - 1]?.startsWith("@@")) {
-    hunkAt -= 1;
-  }
-
+  const { hdr, hunkAt } = chunkStart(r, lines);
   const hunkHeader = lines[hunkAt - 1];
   const isHunk = hunkHeader?.startsWith("@@") ?? false;
   const title = regionTitle(r, isHunk);
@@ -449,7 +463,11 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
 
         if (relTarget === undefined) {
           linkTarget = "(broken link)";
-        } else if (relTarget.startsWith("../") || paths.isAbsolute(relTarget)) {
+        } else if (
+          relTarget === ".." ||
+          relTarget.startsWith("../") ||
+          paths.isAbsolute(relTarget)
+        ) {
           linkTarget = "(outside the repository)";
         } else {
           linkTarget = relTarget;
