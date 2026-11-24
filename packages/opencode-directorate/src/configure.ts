@@ -60,12 +60,11 @@ const make = Effect.gen(function* () {
       });
       if (bad.length) return yield* failure(`Not written: ${bad.join("; ")}.`);
     }
-    const path = yield* store.write(scope, directory, settings);
-    const now = yield* store.load(directory);
+    const { path, effective } = yield* store.write(scope, directory, settings);
     return {
       path,
       removed: isUnset(settings),
-      effective: describe(now.effective) ?? "Directorate defaults",
+      effective: describe(effective) ?? "Directorate defaults",
     };
   });
   return { models, save, load: store.load };

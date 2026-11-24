@@ -1581,6 +1581,27 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
   );
 });
 
+test("directorate_configure rejects an invalid other scope before changing global settings", async () => {
+  const dir = repo();
+  const { call } = await harness(dir);
+  mkdirSync(join(dir, ".opencode"));
+  writeFileSync(join(dir, ".opencode/directorate.json"), "{invalid");
+  mkdirSync(join(home, ".opencode"), { recursive: true });
+  writeFileSync(globalSettings, '{"mode":"full"}\n');
+  for (const settings of [{ mode: "default" }, {}]) {
+    await assert.rejects(
+      call(
+        "directorate_configure",
+        { action: "write", scope: "global", settings },
+        "build",
+        "cfg"
+      ),
+      /is not valid Directorate settings/
+    );
+    assert.equal(readFileSync(globalSettings, "utf8"), '{"mode":"full"}\n');
+  }
+});
+
 test("directorate_configure: validated writes per scope; the project overrides global key by key; seals use the result", async () => {
   const dir = repo();
   const { call, sealOf, hooks, S } = await harness(dir);

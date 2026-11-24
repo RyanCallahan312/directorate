@@ -159,7 +159,7 @@ const make = Effect.gen(function* () {
     const project = projectFile ? yield* read(projectFile) : {};
     return { files, global, project, effective: merge(global, project) };
   });
-  /** Replaces one scope's file; settings with no key set remove it. */
+  /** Resolves effective settings before replacing or removing one scope's file. */
   const write = Effect.fn("Settings.write")(function* (
     scope: Scope,
     directory: string,
@@ -170,11 +170,18 @@ const make = Effect.gen(function* () {
       (yield* failure(
         `No project settings here: ${globalFile} is the global file. Write the global scope, or configure from a project.`
       ));
+    const other =
+      scope === "global" ? yield* file("project", directory) : globalFile;
+    const unchanged = other ? yield* read(other) : {};
+    const effective =
+      scope === "global"
+        ? merge(settings, unchanged)
+        : merge(unchanged, settings);
     const fail = (e: { message: string }) =>
       failure(`Cannot write ${at}: ${e.message}`);
     if (isUnset(settings)) {
       yield* fs.remove(at, { force: true }).pipe(Effect.catch(fail));
-      return at;
+      return { path: at, effective };
     }
     const text = yield* Schema.encodeEffect(SettingsJson)(settings).pipe(
       Effect.orDie
@@ -192,7 +199,7 @@ const make = Effect.gen(function* () {
         yield* fs.rename(tmp, at);
       })
     ).pipe(Effect.catch(fail));
-    return at;
+    return { path: at, effective };
   });
   return { file, load, write };
 });
