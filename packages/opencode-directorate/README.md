@@ -62,6 +62,10 @@ ln -s "$package/skills/directorate_lenses" "$config/skills/directorate_lenses"
 
 `directorate.example.json` is optional. Copy it as `directorate.json` into the global config directory only if you want those defaults and don't already have a settings file. Keep the live file separate: `/directorate-configure` replaces it on save.
 
+## Start a review
+
+Run `/directorate-review` from your normal OpenCode session. The agent uses the question tool to ask what to review, which mode to use, and whether to run a panel before dispatching `directorate_liaison`. You can supply details up front, for example `/directorate-review PR #123 in code-quality mode`, and the agent asks only for the remaining options.
+
 ## The review, as a state chart
 
 One Liaison session owns one review at a time. The seal (`seal.json`) is the state; tools move it along.

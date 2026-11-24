@@ -149,6 +149,25 @@ const register = Effect.fn("Directorate.register")(function* () {
   });
 
   yield* configureRpc();
+  yield* host.command.transform((editor) => {
+    editor.add({
+      description: "Choose options and start a Directorate review",
+      execute: ({ delivery, prompt, sessionID }) =>
+        host.session
+          .prompt({
+            ...prompt,
+            delivery,
+            sessionID,
+            text: `${prompt.text}
+
+Start a Directorate code review. Before dispatching, use the question tool to ask for any options not already supplied above. Ask what to review (current branch with local changes, uncommitted changes only, a PR, a commit or range, or specific paths), the mode (configured default, default, code-quality, or full), and whether to use the configured panel setting, a single-model review, or a panel. Offer an optional focus or time limit. If the target needs a PR number, ref, or path, ask for it. If the user cancels, do not start a review.
+
+Once the options are settled, dispatch directorate_liaison with the chosen target and options. Leave configured defaults unset rather than guessing them. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
+          })
+          .pipe(Effect.asVoid),
+      name: "directorate-review",
+    });
+  });
   yield* host.tool.transform((editor) => {
     const tool = tools(editor);
     readTools(tool);

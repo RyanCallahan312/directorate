@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, test } from "node:test";
 
+import { Session } from "@opencode/schema/session";
 import {
   Cause,
   ConfigProvider,
@@ -37,6 +38,17 @@ const stateConfig = ConfigProvider.layer(
   })
 );
 const plugin = (await import("../src/index.ts")).default;
+
+type HostContext = Parameters<typeof plugin.effect>[0];
+
+type CommandEditor = Parameters<
+  Parameters<HostContext["command"]["transform"]>[0]
+>[0];
+
+type CommandDefinition = Parameters<CommandEditor["add"]>[0];
+
+type SubmittedPrompt = Parameters<HostContext["session"]["prompt"]>[0];
+
 const tuiPlugin = (await import("../src/tui.ts")).default;
 const { DirectorateRpc } = await import("../src/rpc.ts");
 
@@ -129,8 +141,21 @@ async function harness(
   const notices: string[] = [];
   const notified = Deferred.makeUnsafe<string>();
   const rpcs = new Map<string, any>();
+  const commands = new Map<string, CommandDefinition>();
+  const prompts: SubmittedPrompt[] = [];
   const bus = eventBus();
+
   const ctx = {
+    command: {
+      transform: (register: (editor: CommandEditor) => void) =>
+        Effect.sync(() => {
+          register({
+            add: (definition) => {
+              commands.set(definition.name, definition);
+            },
+          });
+        }),
+    },
     location: { directory: dir },
     rpc: {
       register: (def: any, handlers: any) =>
@@ -185,6 +210,10 @@ async function harness(
           location: { directory: dir },
           parentID: parents.get(sessionID),
           agent: sessionAgents.get(sessionID),
+        }),
+      prompt: (input: SubmittedPrompt) =>
+        Effect.sync(() => {
+          prompts.push(input);
         }),
       interrupt: ({ sessionID }: any) =>
         Effect.sync(() => void interrupted.push(sessionID)),
@@ -352,6 +381,8 @@ async function harness(
     launch,
     scope,
     rpcs,
+    commands,
+    prompts,
     client,
   };
 }
@@ -427,6 +458,31 @@ test("registers fifteen tools, four hooks, and the settings RPC; tools assert pe
   assert.match(out, /local changes .* 2 files · 2 regions/s);
   assert.ok(sealOf(out));
   assert.deepEqual(asserted, ["directorate_liaison:directorate_seal"]);
+});
+
+test("/directorate-review submits a question-first prompt in the current session", async () => {
+  const { commands, prompts, S } = await harness(repo());
+  const review = commands.get("directorate-review");
+  assert.ok(review);
+
+  const sessionID = Session.ID.make(S("lead"));
+  const text = "Review PR #123";
+  const files = [{ uri: "file:///tmp/context.md" }];
+  await Effect.runPromise(
+    review.execute({ delivery: "queue", prompt: { files, text }, sessionID })
+  );
+
+  assert.equal(prompts.length, 1);
+  const [submitted] = prompts;
+  assert.ok(submitted);
+  assert.equal(submitted.sessionID, sessionID);
+  assert.equal(submitted.delivery, "queue");
+  assert.deepEqual(submitted.files, files);
+  assert.ok(submitted.text.startsWith(text));
+  assert.match(
+    submitted.text,
+    /question tool.*\s+Once the options are settled, dispatch directorate_liaison/u
+  );
 });
 
 test("worker tool limits are the agents' permission rules, which OpenCode applies by removing denied tools", () => {
