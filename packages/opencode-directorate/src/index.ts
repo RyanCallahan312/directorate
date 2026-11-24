@@ -13,6 +13,7 @@ import {
   Result,
   Schedule,
   Schema,
+  Semaphore,
   Stream,
 } from "effect";
 
@@ -357,6 +358,21 @@ const register = Effect.fn("Directorate.register")(function* register() {
       name: "directorate-review",
     });
   });
+
+  /** One seal start at a time per session, so two starts can't both find no active seal and each seal one. */
+  const starting = new Map<string, Semaphore.Semaphore>();
+
+  const startLock = (session: string) => {
+    let lock = starting.get(session);
+
+    if (!lock) {
+      lock = Semaphore.makeUnsafe(1);
+      starting.set(session, lock);
+    }
+
+    return lock;
+  };
+
   yield* host.tool.transform((editor) => {
     const tool = tools(editor);
     readTools(tool);
@@ -383,131 +399,155 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
         const a = actor(c);
 
-        // Checked before abandoning, so a bad re-check target never files the active review.
-        const earlier = input.recheck
-          ? yield* store.load(input.recheck)
-          : undefined;
+        return yield* startLock(a.session).withPermit(
+          Effect.gen(function* start() {
+            // Checked before abandoning, so a bad re-check target never files the active review.
+            const earlier = input.recheck
+              ? yield* store.load(input.recheck)
+              : undefined;
 
-        if (earlier) {
-          yield* recheckable(earlier);
-        }
+            if (earlier) {
+              yield* recheckable(earlier);
+            }
 
-        const prior = yield* sessions.active(a.session);
+            const prior = yield* sessions.active(a.session);
 
-        if (prior && prior.id !== input.resume) {
-          if (!input.abandon) {
-            return yield* failure(
-              `This session already holds an active containment seal ${prior.id}. Close it with directorate_report, or pass abandon: true to file its partial directive and start over.`
-            );
-          }
+            const replaced =
+              prior && prior.id !== input.resume ? prior : undefined;
 
-          yield* autoReport(prior.id, "abandoned for a new review", a.session);
-        }
-
-        if (earlier) {
-          const r = yield* recheckSeal({
-            budgetMinutes: input.budget_minutes,
-            ledger: yield* store.loadLedger(earlier.id),
-            owner: a,
-            prior: earlier,
-            question: input.question,
-          });
-
-          yield* sessions.bind(a.session, r.seal.id);
-          yield* sessions.record(a.session, r.seal);
-
-          return yield* done(r.seal, recheckSummary(earlier, r));
-        }
-
-        if (input.resume) {
-          const { resume } = input;
-
-          const { seal, previousOwner } = yield* store.withLock(
-            resume,
-            Effect.gen(function* openContainment() {
-              const s = yield* store.load(resume);
-
-              if (s.reportedAt) {
+            if (replaced) {
+              if (!input.abandon) {
                 return yield* failure(
-                  `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`
+                  `This session already holds an active containment seal ${replaced.id}. Close it with directorate_report, or pass abandon: true to file its partial directive and start over.`
                 );
               }
 
-              // A spent budget gets more time: half the original, at least 5 minutes, unless the caller names a budget.
-              const now = yield* DateTime.now;
+              if (replaced.ownerSession !== a.session) {
+                return yield* failure(
+                  `Only the owner of ${replaced.id} can abandon it.`
+                );
+              }
+            }
 
-              const minutes =
-                input.budget_minutes ??
-                (s.ownerSession === a.session ||
-                budget(s, DateTime.toEpochMillis(now)).phase === "normal"
-                  ? undefined
-                  : Math.max(5, Math.round(s.budgetMinutes / 2)));
+            // Filed only once the new review is open, so a target that can't be sealed keeps the active review; before binding, as closing it clears this session's record.
+            const abandonPrior = replaced
+              ? autoReport(replaced.id, "abandoned for a new review", a.session)
+              : Effect.void;
 
-              const taken: Seal =
-                minutes === undefined
-                  ? {
-                      ...s,
-                      owner: a.agent,
-                      ownerSession: a.session,
-                    }
-                  : {
-                      ...s,
-                      budgetMinutes: minutes,
-                      createdAt: now,
-                      deadline: DateTime.add(now, { minutes }),
-                      owner: a.agent,
-                      ownerSession: a.session,
-                    };
+            if (earlier) {
+              const r = yield* recheckSeal({
+                budgetMinutes: input.budget_minutes,
+                ledger: yield* store.loadLedger(earlier.id),
+                owner: a,
+                prior: earlier,
+                question: input.question,
+              });
 
-              yield* store.save(taken);
+              yield* abandonPrior;
+              yield* sessions.bind(a.session, r.seal.id);
+              yield* sessions.record(a.session, r.seal);
 
-              return { previousOwner: s.ownerSession, seal: taken };
-            })
-          );
+              return yield* done(r.seal, recheckSummary(earlier, r));
+            }
 
-          yield* sessions.takeOver(seal, previousOwner);
-          const cov = coverageSummary(seal);
+            if (input.resume) {
+              const { resume } = input;
 
-          return yield* done(
-            seal,
-            `Resumed containment \`${seal.id}\` (${seal.mode}): ${seal.description}. Observed ${cov.read}/${cov.total}; ${unresolved(yield* store.loadLedger(seal.id)).length} entries unresolved. Continue where it stopped: directorate_diff for unread regions, directorate_ledger_list for entries.`
-          );
-        }
+              const { seal, previousOwner } = yield* store.withLock(
+                resume,
+                Effect.gen(function* openContainment() {
+                  const s = yield* store.load(resume);
 
-        const repo =
-          input.repo ||
-          (yield* sessions.directory(a.session)) ||
-          host.location.directory;
+                  if (s.reportedAt) {
+                    return yield* failure(
+                      `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`
+                    );
+                  }
 
-        yield* store.gc().pipe(ignore("old seal cleanup failed", "Warn"));
-        const configured = (yield* settings.load(repo)).effective;
+                  // A spent budget gets more time: half the original, at least 5 minutes, unless the caller names a budget.
+                  const now = yield* DateTime.now;
 
-        const { mode, panel, budgetMinutes, lensesOff } = resolve(configured, {
-          budgetMinutes: input.budget_minutes,
-          mode: input.mode,
-          panel: input.panel,
-          panelModels: input.panel_models,
-        });
+                  const minutes =
+                    input.budget_minutes ??
+                    (s.ownerSession === a.session ||
+                    budget(s, DateTime.toEpochMillis(now)).phase === "normal"
+                      ? undefined
+                      : Math.max(5, Math.round(s.budgetMinutes / 2)));
 
-        const seal = yield* createSeal({
-          budgetMinutes,
-          lensesOff,
-          mode,
-          owner: a,
-          panel,
-          question: input.question,
-          repo,
-          target: input.target ?? {
-            kind: REVIEW_SCOPE_TARGET[
-              input.scope ?? configured.default_scope ?? DEFAULT_REVIEW_SCOPE
-            ],
-          },
-        });
+                  const taken: Seal =
+                    minutes === undefined
+                      ? {
+                          ...s,
+                          owner: a.agent,
+                          ownerSession: a.session,
+                        }
+                      : {
+                          ...s,
+                          budgetMinutes: minutes,
+                          createdAt: now,
+                          deadline: DateTime.add(now, { minutes }),
+                          owner: a.agent,
+                          ownerSession: a.session,
+                        };
 
-        yield* sessions.bind(a.session, seal.id);
-        yield* sessions.record(a.session, seal);
+                  yield* store.save(taken);
 
-        return yield* done(seal, sealSummary(seal));
+                  return { previousOwner: s.ownerSession, seal: taken };
+                })
+              );
+
+              yield* abandonPrior;
+              yield* sessions.takeOver(seal, previousOwner);
+              const cov = coverageSummary(seal);
+
+              return yield* done(
+                seal,
+                `Resumed containment \`${seal.id}\` (${seal.mode}): ${seal.description}. Observed ${cov.read}/${cov.total}; ${unresolved(yield* store.loadLedger(seal.id)).length} entries unresolved. Continue where it stopped: directorate_diff for unread regions, directorate_ledger_list for entries.`
+              );
+            }
+
+            const repo =
+              input.repo ||
+              (yield* sessions.directory(a.session)) ||
+              host.location.directory;
+
+            yield* store.gc().pipe(ignore("old seal cleanup failed", "Warn"));
+            const configured = (yield* settings.load(repo)).effective;
+
+            const { mode, panel, budgetMinutes, lensesOff } = resolve(
+              configured,
+              {
+                budgetMinutes: input.budget_minutes,
+                mode: input.mode,
+                panel: input.panel,
+                panelModels: input.panel_models,
+              }
+            );
+
+            const seal = yield* createSeal({
+              budgetMinutes,
+              lensesOff,
+              mode,
+              owner: a,
+              panel,
+              question: input.question,
+              repo,
+              target: input.target ?? {
+                kind: REVIEW_SCOPE_TARGET[
+                  input.scope ??
+                    configured.default_scope ??
+                    DEFAULT_REVIEW_SCOPE
+                ],
+              },
+            });
+
+            yield* abandonPrior;
+            yield* sessions.bind(a.session, seal.id);
+            yield* sessions.record(a.session, seal);
+
+            return yield* done(seal, sealSummary(seal));
+          })
+        );
       },
       input: Schema.Struct({
         abandon: optional(

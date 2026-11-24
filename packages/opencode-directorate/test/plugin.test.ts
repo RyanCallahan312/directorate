@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -3378,6 +3379,51 @@ test("one review per session; abandon saves and notifies; resume checks the sess
     call("directorate_report", { seal: second }),
     /Only the session that sealed/u
   );
+});
+
+test("simultaneous starts in one session seal one review; abandon keeps the active review when the new target fails", async () => {
+  const { call } = await harness(repo());
+
+  const start = () =>
+    call(
+      "directorate_seal",
+      { target: { kind: "local" } },
+      "directorate_liaison",
+      "racer"
+    );
+
+  const results = await Promise.allSettled([start(), start()]);
+  const won = results.filter((r) => r.status === "fulfilled");
+  const lost = results.filter((r) => r.status === "rejected");
+  assert.equal(won.length, 1);
+  assert.equal(lost.length, 1);
+  const winner = present(sealOf(present(won[0]).value.content));
+  assert.match(
+    String(lost[0]?.reason),
+    new RegExp(`already holds an active containment seal ${winner}`, "u")
+  );
+
+  const open = readdirSync(state)
+    .filter((id) => /^directorate-\d{14}-[0-9a-f]{6}$/u.test(id))
+    .map(sealJson)
+    .filter((s) => !s.reportedAt && s.ownerSession.startsWith("ses_racer"));
+
+  assert.deepEqual(
+    open.map((s) => s.id),
+    [winner]
+  );
+
+  // The new target is resolved before abandon files the active review.
+  await assert.rejects(
+    call(
+      "directorate_seal",
+      { abandon: true, target: { base: "no-such-ref", kind: "range" } },
+      "directorate_liaison",
+      "racer"
+    ),
+    /no-such-ref/u
+  );
+  assert.equal(sealJson(winner).reportedAt, undefined);
 });
 
 test("freshness: gate, refresh, reopened entries need re-anchoring, a second edit is stale", async () => {
