@@ -9,10 +9,10 @@ import { sha256 } from "./hash.ts";
 
 const IO_CONCURRENCY = 16;
 
-/** A working-tree path as captured: its bytes (a symlink as its link text) and mode, or absent. */
+/** A working-tree path as captured: its bytes (a symlink as its link text, a submodule as its commit) and mode, or absent. */
 interface LiveEntry {
   readonly buf?: Buffer;
-  readonly mode: "absent" | "link" | "exec" | "file";
+  readonly mode: "absent" | "link" | "exec" | "file" | "gitlink";
 }
 
 /** Missing is a fact about the worktree; any other filesystem error is not. */
@@ -64,13 +64,41 @@ const make = Effect.gen(function* make() {
       unreadable(path)
     );
 
-  /** Working-tree entry under the path policy; a leaf symlink is its link text. Unreadable files fail rather than read as deleted. */
+  /** A checked-out submodule's commit, as git's diff names it; undefined for a directory that is not its own checkout. */
+  const submodule = Effect.fnUntraced(function* submodule(abs: string) {
+    if ((yield* orMissing(fs.lstat(paths.join(abs, ".git")))) === undefined) {
+      return;
+    }
+
+    const head = (yield* git
+      .run(abs, ["rev-parse", "--verify", "-q", "HEAD"], [0, 1])
+      .pipe(Effect.orElseSucceed(() => ""))).trim();
+
+    return head || undefined;
+  });
+
+  /**
+   * Working-tree entry under the path policy; a leaf symlink is its link text, a checked-out submodule its commit.
+   * Unreadable files fail rather than read as deleted.
+   */
   const entry = Effect.fn("Worktree.entry")(
     function* entry(
       repo: string,
       path: string
     ): Effect.fn.Return<LiveEntry, PlatformError> {
       const { abs, st } = yield* stat(repo, path);
+
+      // An untracked nested repository is listed as `dir/`; only a tracked gitlink names its directory bare.
+      if (st?.type === "Directory" && !path.endsWith("/")) {
+        const head = yield* submodule(abs);
+
+        return head === undefined
+          ? { mode: "absent" }
+          : {
+              buf: Buffer.from(`Subproject commit ${head}\n`),
+              mode: "gitlink",
+            };
+      }
 
       if (st?.type === "SymbolicLink") {
         const link = yield* orMissing(fs.readLink(abs));
@@ -102,23 +130,25 @@ const make = Effect.gen(function* make() {
       ? Effect.succeed("deleted")
       : hash(e.buf).pipe(Effect.map((digest) => `${e.mode}:${digest}`));
 
-  /** Signature of every changed, non-secret path in the post-image. */
+  /** A secret-like path's signature: whether it is there, never its bytes. */
+  const signWithheld = (repo: string, path: string) =>
+    present(repo, path).pipe(
+      Effect.map((here) => (here ? "withheld" : "deleted"))
+    );
+
+  /** Signature of every changed path in the post-image; a secret-like one by name and status only. */
   const sigs = Effect.fn("Worktree.sigs")(function* sigs(
     repo: string,
     base: string,
     scope?: readonly string[]
   ) {
-    const names = (yield* git.changedNames(repo, base, scope)).filter(
-      (f) => !isSecret(f)
-    );
-
     const signed = yield* Effect.forEach(
-      names,
+      yield* git.changedNames(repo, base, scope),
       (f) =>
-        entry(repo, f).pipe(
-          Effect.flatMap(sign),
-          Effect.map((signature) => [f, signature] as const)
-        ),
+        (isSecret(f)
+          ? signWithheld(repo, f)
+          : entry(repo, f).pipe(Effect.flatMap(sign))
+        ).pipe(Effect.map((signature) => [f, signature] as const)),
       { concurrency: IO_CONCURRENCY }
     );
 
@@ -146,6 +176,7 @@ const make = Effect.gen(function* make() {
     fingerprintOf,
     present,
     sign,
+    signWithheld,
     sigs,
   };
 });

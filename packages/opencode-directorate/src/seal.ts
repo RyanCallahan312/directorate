@@ -78,7 +78,10 @@ interface Captured {
   regions: readonly Region[];
 }
 
-const gitFileMode = Match.type<"absent" | "link" | "exec" | "file">().pipe(
+const gitFileMode = Match.type<
+  "absent" | "link" | "exec" | "file" | "gitlink"
+>().pipe(
+  Match.when("gitlink", () => "160000"),
   Match.when("link", () => "120000"),
   Match.when("exec", () => "100755"),
   Match.orElse(() => "100644")
@@ -274,17 +277,17 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
             : deleted;
         }
 
-        const { buf } = yield* wt.entry(top, path);
+        const { buf, mode } = yield* wt.entry(top, path);
 
         if (buf === undefined) {
           return deleted;
         }
 
-        if (binary(buf)) {
+        if (mode === "gitlink" || binary(buf)) {
           return {
             file: {
               added: 0,
-              excluded: "binary",
+              excluded: mode === "gitlink" ? "submodule" : "binary",
               path,
               removed: 0,
               status,
@@ -413,10 +416,14 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
     ? yield* (yield* Git).changedNames(top, seal.baseSha, scope)
     : [];
 
-  // Sign every changed non-secret path, snapshotting those not withheld by name.
+  // Sign every changed path, snapshotting those not withheld by name; a secret-like path is signed by presence, never read.
   const signed = yield* Effect.forEach(
-    changed.filter((f) => !isSecret(f)),
+    changed,
     Effect.fnUntraced(function* signed(f) {
+      if (isSecret(f)) {
+        return [f, yield* wt.signWithheld(top, f)] as const;
+      }
+
       const e = yield* wt.entry(top, f);
 
       if (e.buf !== undefined && !exclusionReason(f)) {
@@ -446,17 +453,9 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
   yield* store.writeDiff(seal, text);
   const sigs = worktree ? Object.fromEntries(signed) : undefined;
 
-  // Secret paths have no signatures; check presence without reading their bytes.
-  const absentSecrets = yield* Effect.filter(
-    changed.filter(isSecret),
-    (path) => wt.present(top, path).pipe(Effect.map((present) => !present)),
-    { concurrency: IO_CONCURRENCY }
-  );
-
   const deleted = [
     ...new Set([
       ...signed.filter(([, sig]) => sig === "deleted").map(([f]) => f),
-      ...absentSecrets,
       ...(seal.target.kind === "paths"
         ? files.filter((f) => f.status === "deleted").map((f) => f.path)
         : []),

@@ -404,6 +404,31 @@ test("paths seal does not expose a base blob as the post-image of an absent spar
   );
 });
 
+test("paths seal serves the captured bytes of an assume-unchanged file, and later edits make it stale", async () => {
+  const dir = repo({ "src/a.ts": "committed\n", "src/b.ts": "same\n" });
+  write(dir, "src/a.ts", "local edit\n");
+  g(dir, "update-index", "--assume-unchanged", "src/a.ts");
+  assert.equal(g(dir, "diff", "--name-only", "HEAD"), "", "git hides it");
+
+  const seal = await run(
+    createSeal({ mode: "default", repo: dir, target: { kind: "paths" } })
+  );
+
+  assert.equal(
+    seal.files.find((f) => f.path === "src/a.ts")?.status,
+    "modified"
+  );
+  assert.equal(await run(sealedFile(seal, "src/a.ts")), "local edit\n");
+  write(dir, "src/a.ts", "later edit\n");
+  const later = await run(currentFingerprint(seal));
+  assert.notEqual(later.fingerprint, seal.fingerprint);
+  assert.equal(
+    await run(sealedFile(seal, "src/a.ts")),
+    "local edit\n",
+    "the snapshot, not the live file"
+  );
+});
+
 test("a recreated staged deletion is present in the sealed diff, listing and new-side read", async () => {
   const dir = repo({
     "src/a.ts": "context\noriginal\n",
@@ -1346,6 +1371,32 @@ test("mode changes count as drift; binary files compare by bytes", async () => {
   assert.notEqual(fingerprintResult4.fingerprint, seal.fingerprint);
 });
 
+test("a checked-out submodule signs its commit: moving it again after the seal is drift", async () => {
+  const sub = repo({ "lib.ts": "a\n" });
+
+  const commit = (c: string) => {
+    write(sub, "lib.ts", c);
+    g(sub, "commit", "-qam", c);
+
+    return g(sub, "rev-parse", "HEAD").trim();
+  };
+
+  const [b, c] = [commit("b\n"), commit("c\n")];
+  const dir = repo({ "x.ts": "x\n" });
+  g(dir, "clone", "-q", sub, "sub");
+  g(join(dir, "sub"), "checkout", "-q", "HEAD~2");
+  g(dir, "-c", "advice.addEmbeddedRepo=false", "add", "sub");
+  g(dir, "commit", "-qm", "sub at a");
+  g(join(dir, "sub"), "checkout", "-q", b);
+  const seal = await local(dir);
+  assert.notEqual(seal.sigs?.sub, "deleted");
+  assert.ok(!seal.deleted.includes("sub"));
+  g(join(dir, "sub"), "checkout", "-q", c);
+  const cur = await run(currentFingerprint(seal));
+  assert.notEqual(cur.fingerprint, seal.fingerprint);
+  assert.deepEqual(await run(changedSinceSeal(seal, cur)), ["sub"]);
+});
+
 // ---------- coverage ----------
 test("coverage: size-charged chunks, per-chunk line ranges, owner reads, explicit skips win", async () => {
   const big = `${Array.from(
@@ -1905,7 +1956,7 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
 });
 
 // ---------- freshness and refresh ----------
-test("freshness: committing the reviewed change is not drift; a real edit is; excluded files are ignored", async () => {
+test("freshness: committing the reviewed change is not drift; a real edit is; withheld files count by name, never by content", async () => {
   const dir = repo();
   write(dir, "src/math.ts", `${MATH}export const z = 1\n`);
   const seal = await local(dir);
@@ -1916,11 +1967,43 @@ test("freshness: committing the reviewed change is not drift; a real edit is; ex
   const fingerprintResult6 = await run(currentFingerprint(seal));
   assert.equal(fingerprintResult6.fingerprint, seal.fingerprint, "committing");
   write(dir, ".env", "X=1\n");
-  const fingerprintResult7 = await run(currentFingerprint(seal));
-  assert.equal(
-    fingerprintResult7.fingerprint,
+  const withSecret = await run(currentFingerprint(seal));
+  assert.notEqual(
+    withSecret.fingerprint,
     seal.fingerprint,
+    "adding a withheld file after the seal is drift"
+  );
+  assert.deepEqual(await run(changedSinceSeal(seal, withSecret)), [".env"]);
+  write(dir, ".env", "X=2\n");
+  const rewritten = await run(currentFingerprint(seal));
+  assert.equal(
+    rewritten.fingerprint,
+    withSecret.fingerprint,
     "secret files are not read, even for hashing"
+  );
+
+  const refreshed = await run(
+    refreshSeal(seal, { entries: [], notes: [] }).pipe(
+      Effect.map((r) => r.seal)
+    )
+  );
+
+  assert.equal(refreshed.sigs?.[".env"], "withheld");
+  assert.match(
+    assess(
+      regions(refreshed, () => ({ ownerRead: true })),
+      { entries: [], notes: [] },
+      {},
+      "normal"
+    ).reasons.join(","),
+    /secret-like file was withheld/u
+  );
+  rmSync(join(dir, ".env"));
+  const removed = await run(currentFingerprint(seal));
+  assert.equal(
+    removed.fingerprint,
+    seal.fingerprint,
+    "removing it again restores the sealed state"
   );
   write(dir, "package-lock.json", '{"v":3}\n');
   const fingerprintResult8 = await run(currentFingerprint(seal));

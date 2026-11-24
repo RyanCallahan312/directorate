@@ -254,13 +254,80 @@ const make = Effect.gen(function* make() {
       ...(paths ?? []),
     ]).pipe(Effect.map((out) => out.split("\0").filter(Boolean)));
 
+  /**
+   * Tracked files git is told not to check (assume-unchanged, or skip-worktree yet checked out) whose working bytes differ
+   * from `base`. git's diff trusts the flag and never lists them, so their bytes are compared here. An absent skip-worktree
+   * file is a sparse checkout, not a deletion.
+   */
+  const unwatched = Effect.fnUntraced(function* unwatched(
+    repo: string,
+    base: string,
+    paths?: readonly string[]
+  ) {
+    // ls-files -v tags skip-worktree files S (s when also assume-unchanged) and assume-unchanged files in lower case.
+    const flagged = (yield* run(repo, [
+      "ls-files",
+      "-v",
+      "-z",
+      "--",
+      ...(paths ?? []),
+    ]))
+      .split("\0")
+      .filter(Boolean)
+      .flatMap((line) => {
+        const tag = line.slice(0, 1);
+        const sparse = tag === "S" || tag === "s";
+
+        return sparse || tag !== tag.toUpperCase()
+          ? [{ path: line.slice(2), sparse }]
+          : [];
+      });
+
+    if (!flagged.length) {
+      return [];
+    }
+
+    const baseOids = new Map(
+      (yield* run(repo, [
+        "ls-tree",
+        "-z",
+        base,
+        "--",
+        ...flagged.map((f) => f.path),
+      ]))
+        .split("\0")
+        .filter(Boolean)
+        .map((line) => {
+          const tab = line.indexOf("\t");
+
+          return [line.slice(tab + 1), line.slice(0, tab).split(" ")[2]];
+        })
+    );
+
+    const changed = yield* Effect.filter(
+      flagged,
+      ({ path, sparse }) =>
+        // hash-object hashes the file as `git add` would store it; it exits 128 when the file is missing.
+        run(repo, ["hash-object", "--", path], [0, 128]).pipe(
+          Effect.map((out) => {
+            const oid = out.trim();
+
+            return oid ? oid !== baseOids.get(path) : !sparse;
+          })
+        ),
+      { concurrency: 8 }
+    );
+
+    return changed.map((f) => f.path);
+  });
+
   /** Tracked and untracked paths that differ from `base` in the working tree. */
   const changedNames = Effect.fn("Git.changedNames")(function* changedNames(
     repo: string,
     base: string,
     paths?: readonly string[]
   ) {
-    const [tracked, extra] = yield* Effect.all(
+    const [tracked, extra, hidden] = yield* Effect.all(
       [
         run(repo, [
           "diff",
@@ -272,12 +339,13 @@ const make = Effect.gen(function* make() {
           ...(paths ?? []),
         ]),
         untracked(repo, paths),
+        unwatched(repo, base, paths),
       ],
-      { concurrency: 2 }
+      { concurrency: 3 }
     );
 
     return [
-      ...new Set([...tracked.split("\0").filter(Boolean), ...extra]),
+      ...new Set([...tracked.split("\0").filter(Boolean), ...extra, ...hidden]),
     ].toSorted();
   });
 
