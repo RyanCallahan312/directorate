@@ -22,11 +22,14 @@ import {
   childName,
   childOutstanding,
   claimed,
+  enqueued,
   finished,
-  followedUp,
+  followUpPrompt,
+  inboxSettled,
+  launchTitle,
   launched,
   openSeat,
-  panelSeats,
+  missingSeats,
   resumed,
   returned,
   seatName,
@@ -291,7 +294,8 @@ const register = Effect.fn("Directorate.register")(function* () {
               const now = yield* DateTime.now;
               const minutes =
                 input.budget_minutes ??
-                (budget(s, DateTime.toEpochMillis(now)).phase === "normal"
+                (s.ownerSession === a.session ||
+                budget(s, DateTime.toEpochMillis(now)).phase === "normal"
                   ? undefined
                   : Math.max(5, Math.round(s.budgetMinutes / 2)));
               const taken: Seal = {
@@ -475,13 +479,11 @@ const register = Effect.fn("Directorate.register")(function* () {
                 ", "
               )}. Read them with directorate_diff, or record directorate_coverage dispositions. Calling directorate_report again files a <Partial/Incomplete> directive.`
           );
-          const missing = panelSeats(seal).filter(
-            (s) => s.status === "failed" || s.status === "not launched"
-          );
+          const missing = missingSeats(seal);
           yield* once(
             "panel",
             missing.map((s) => `${s.model}:${s.runs.length}`),
-            `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats returned no review: ${missing.map((s) => `${seatName(s.model)} (${s.status})`).join(", ")}. Launch one directorate_seat per missing seat without a model (The Directorate assigns it); leave a seat that failed twice. Calling directorate_report again reports without them.`
+            `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. Continue a partial seat in its existing session or launch a new directorate_seat without a model (The Directorate assigns it); leave a seat that failed twice. Calling directorate_report again files a partial review.`
           );
           const running = childOutstanding(seal);
           yield* once(
@@ -651,9 +653,8 @@ const register = Effect.fn("Directorate.register")(function* () {
       const seal = yield* sessions.active(ev.sessionID);
       if (!seal) return;
       const startedAt = yield* DateTime.now;
-      // A new Seat launched without a model takes the next open seat, chosen under the seal's lock so parallel launches
-      // take different seats. The seat's name goes into its title too, which is how its session finds this launch.
-      let seat: { model: string; description: string } | undefined;
+      // Assign seats under the seal lock so parallel launches take different models.
+      let launch: Child | undefined;
       yield* sessions
         .update(seal.id, (s) => {
           // A follow-up continues a child session: a new run of it, keeping the seat it was launched for.
@@ -661,50 +662,50 @@ const register = Effect.fn("Directorate.register")(function* () {
             ? s.children.findLast((c) => c.session === assignment.sessionID)
             : undefined;
           if (assignment.sessionID) {
-            return followedUp(s, {
+            launch = {
               call: ev.id,
               agent: assignment.agent,
               prompt: assignment.prompt ?? "",
               description: assignment.description ?? prior?.description,
               model: assignment.model ?? prior?.model,
               session: assignment.sessionID,
+              followUp: {},
               status: "launching",
               startedAt,
-            });
+            };
+            return launched(s, launch);
           }
           const model =
             assignment.agent === PANELIST && !assignment.model
               ? openSeat(s)
               : undefined;
-          seat = model
-            ? {
-                model,
-                description: `${assignment.description ?? "Directorate Seat"} · ${seatName(model)}`,
-              }
-            : undefined;
-          return launched(s, {
+          launch = {
             call: ev.id,
             agent: assignment.agent,
             prompt: assignment.prompt ?? "",
-            description: seat?.description ?? assignment.description,
-            model: seat?.model ?? assignment.model,
+            description: model
+              ? `${assignment.description ?? "Directorate Seat"} · ${seatName(model)}`
+              : assignment.description,
+            model: model ?? assignment.model,
             status: "launching",
             startedAt,
-          });
+          };
+          return launched(s, launch);
         })
         .pipe(
           ignore(`could not register ${assignment.agent} in ${seal.id}`, "Warn")
         );
-      if (seat && Predicate.isObject(ev.input))
-        ev.input = {
-          ...ev.input,
-          model: seat.model,
-          description: seat.description,
-        };
+      if (launch && Predicate.isObject(ev.input))
+        ev.input = launch.followUp
+          ? { ...ev.input, prompt: followUpPrompt(launch) }
+          : {
+              ...ev.input,
+              ...(launch.model ? { model: launch.model } : {}),
+              description: launchTitle(launch),
+            };
     })
   );
-  // The subagent tool returned. Its result names the child too; that matters only if session.created was missed (a plugin
-  // reload mid-launch).
+  // The subagent result is authoritative even if session.created was missed (a plugin reload mid-launch).
   yield* host.tool.hook(
     "execute.after",
     hook("executeAfter", function* (ev) {
@@ -732,7 +733,7 @@ const register = Effect.fn("Directorate.register")(function* () {
         .update(seal.id, (s) => {
           const launch = s.children.find((x) => x.call === ev.id);
           if (!launch) return undefined; // Not an Auditor, Seat, or Compliance of this review.
-          child = launch.session ?? meta.sessionID;
+          child = meta.sessionID ?? launch.session;
           return returned(s, ev.id, meta.sessionID, outcome, endedAt);
         })
         .pipe(ignore(`could not record subagent result in ${seal.id}`, "Warn"));
@@ -757,25 +758,26 @@ const register = Effect.fn("Directorate.register")(function* () {
       );
     yield* sessions.bind(sessionID, seal.id);
   });
-  // Completed or failed: the child's session went idle, or its execution failed or was interrupted.
-  const finishChild = Effect.fn("Directorate.finishChild")(function* (
+  const childEvent = Effect.fn("Directorate.childEvent")(function* (
     sessionID: string,
-    status: "completed" | "failed"
+    change: (s: Seal) => Seal | undefined
   ) {
     const id =
       (yield* sessions.boundTo(sessionID)) ??
       (yield* sessions.active(sessionID))?.id;
     if (!id) return;
-    const endedAt = yield* DateTime.now;
     yield* sessions
-      .update(id, (s) => finished(s, sessionID, status, endedAt))
-      .pipe(ignore(`could not finish ${sessionID} in ${id}`, "Warn"));
+      .update(id, change)
+      .pipe(ignore(`could not update ${sessionID} in ${id}`, "Warn"));
   });
   // One consumer, in event order: a child's session.created is always handled before its terminal events.
   yield* Stream.suspend(() =>
     host.event.subscribe({
       types: [
         "session.created",
+        "session.inbox.enqueued",
+        "session.inbox.delivered",
+        "session.inbox.cancelled",
         "session.idle",
         "session.execution.succeeded",
         "session.execution.failed",
@@ -783,21 +785,52 @@ const register = Effect.fn("Directorate.register")(function* () {
       ],
     })
   ).pipe(
-    Stream.runForEach((event) =>
-      event.type === "session.created"
-        ? event.data.parentID
+    Stream.runForEach((event) => {
+      const { sessionID } = event.data;
+      if (event.type === "session.created")
+        return event.data.parentID
           ? claimChild(
               event.data.sessionID,
               event.data.parentID,
               String(event.data.agent ?? ""),
               event.data.title
             )
-          : Effect.void
-        : finishChild(
-            event.data.sessionID,
-            /failed|interrupted/.test(event.type) ? "failed" : "completed"
+          : Effect.void;
+      if (event.type === "session.inbox.enqueued") {
+        const { inboxID, item } = event.data;
+        return item.type === "user" &&
+          item.payload.text.includes("\n\n[Directorate follow-up: ")
+          ? childEvent(sessionID, (s) =>
+              enqueued(s, sessionID, inboxID, item.payload.text)
+            )
+          : Effect.void;
+      }
+      const at = DateTime.makeUnsafe(event.created);
+      if (
+        event.type === "session.inbox.delivered" ||
+        event.type === "session.inbox.cancelled"
+      ) {
+        const { inboxID } = event.data;
+        return childEvent(sessionID, (s) =>
+          inboxSettled(
+            s,
+            sessionID,
+            inboxID,
+            event.type === "session.inbox.delivered",
+            at
           )
-    ),
+        );
+      }
+      return childEvent(sessionID, (s) =>
+        finished(
+          s,
+          sessionID,
+          /failed|interrupted/.test(event.type) ? "failed" : "completed",
+          at,
+          event.type !== "session.idle"
+        )
+      );
+    }),
     recover("event subscription failed"),
     Effect.repeat(Schedule.spaced("5 seconds")),
     Effect.forkScoped

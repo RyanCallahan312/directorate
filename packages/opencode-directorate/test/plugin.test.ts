@@ -97,11 +97,14 @@ function eventBus() {
   let current: Deferred.Deferred<void> | undefined;
   return {
     /** Resolves once the plugin has handled the event. */
-    emit: (event: unknown) =>
+    emit: (event: { type: string; data: unknown; created?: number }) =>
       Effect.runPromise(
         Effect.gen(function* () {
           const handled = yield* Deferred.make<void>();
-          yield* Queue.offer(queue, { event, handled });
+          yield* Queue.offer(queue, {
+            event: { created: Date.now(), ...event },
+            handled,
+          });
           yield* Deferred.await(handled);
         })
       ),
@@ -347,13 +350,14 @@ async function harness(
     st: "running" | "completed" | "failed",
     description?: string
   ) => {
-    await hooks["tool.execute.before"]({
+    const event = {
       tool: "subagent",
       sessionID: S("lead"),
       agent: "directorate_liaison",
       id: callId,
       input: { agent, prompt, description },
-    });
+    };
+    await hooks["tool.execute.before"](event);
     parents.set(S(child), S("lead"));
     await bus.emit({
       type: "session.created",
@@ -361,7 +365,7 @@ async function harness(
         sessionID: S(child),
         parentID: S("lead"),
         agent,
-        title: description,
+        title: event.input.description,
       },
     });
     return () =>
@@ -375,6 +379,42 @@ async function harness(
           metadata: { metadata: { sessionID: S(child), status: st } },
         },
       });
+  };
+  const followUp = async (
+    id: string,
+    agent: string,
+    child: string,
+    prompt: string
+  ) => {
+    const sessionID = S(child);
+    const event = {
+      tool: "subagent",
+      sessionID: S("lead"),
+      agent: "directorate_liaison",
+      id,
+      input: { agent, prompt, description: "again", sessionID },
+    };
+    await hooks["tool.execute.before"](event);
+    const data = { sessionID, inboxID: `inbox-${id}` };
+    return {
+      enqueue: () =>
+        bus.emit({
+          type: "session.inbox.enqueued",
+          data: {
+            ...data,
+            item: { type: "user", payload: { text: event.input.prompt } },
+          },
+        }),
+      deliver: () => bus.emit({ type: "session.inbox.delivered", data }),
+      returned: () =>
+        hooks["tool.execute.after"]({
+          tool: "subagent",
+          sessionID: S("lead"),
+          id,
+          status: "completed",
+          result: { metadata: { sessionID, status: "running" } },
+        }),
+    };
   };
   /** As the TUI's promise client: input decoded by the method's schema, JSON back, a failure thrown as { type, message }. */
   const client = {
@@ -412,6 +452,7 @@ async function harness(
     hooks,
     call,
     sealOf,
+    followUp,
     asserted,
     requests,
     interrupted,
@@ -1028,7 +1069,10 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
   ];
   assert.deepEqual(
     inputs.map((i) => [i.model, i.description]),
-    models.map((m) => [m, `Directorate Seat · ${m.slice(m.indexOf("/") + 1)}`])
+    models.map((m, i) => [
+      m,
+      `Directorate Seat · ${m.slice(m.indexOf("/") + 1)} · p${i + 1}`,
+    ])
   );
   assert.deepEqual(
     sealJson(seal).children.map((c: any) => [c.model, c.session]),
@@ -1935,8 +1979,49 @@ test("directorate_wait: the Liaison waits in its turn until a run finishes, and 
   );
 });
 
+test("a Seat that returns normally after reading only one region cannot make a complete panel review", async () => {
+  const { S, call, sealOf, launch, bus } = await harness(repo());
+  const model = "prov/alpha";
+  const seal = sealOf(
+    (
+      await call("directorate_seal", {
+        target: { kind: "local" },
+        panel_models: [model],
+      })
+    ).content
+  );
+  assert.ok(seal);
+  await call("directorate_diff", { seal });
+  const returned = await launch(
+    "seat",
+    "directorate_seat",
+    "Read the target",
+    "seat",
+    "running"
+  );
+  await returned();
+  await call(
+    "directorate_diff",
+    { seal, regions: ["R1"] },
+    "directorate_seat",
+    "seat"
+  );
+  await bus.emit({
+    type: "session.execution.succeeded",
+    data: { sessionID: S("seat") },
+  });
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Seats\).*1 regions unread/
+  );
+  const md = (await call("directorate_report", { seal })).content;
+  assert.match(md, /status: \*\*partial\*\*/);
+  assert.match(md, /Directorate Seat alpha: 1 of 2 regions unread/);
+});
+
 test("follow-ups to a subagent are new runs of its session: earlier runs keep their outcome, and directorate_wait reports the new run once", async () => {
-  const { S, call, sealOf, launch, bus, hooks } = await harness(repo());
+  const { S, call, sealOf, launch, bus, hooks, followUp } =
+    await harness(repo());
   const seal = sealOf(
     (
       await call("directorate_seal", {
@@ -1964,14 +2049,6 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "directorate_auditor",
     "scout"
   );
-  const followUp = (id: string, agent: string, child: string, prompt: string) =>
-    hooks["tool.execute.before"]({
-      tool: "subagent",
-      sessionID: S("lead"),
-      agent: "directorate_liaison",
-      id,
-      input: { agent, prompt, description: "again", sessionID: S(child) },
-    });
   const runs = () =>
     sealJson(seal).children.map((k: any) => [k.call, k.session, k.status]);
   await launch(
@@ -1994,11 +2071,18 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "b"
   );
   await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
-  await followUp("c2", "directorate_compliance", "b", "seal: x\nentries: [F2]");
+  const f2 = await followUp(
+    "c2",
+    "directorate_compliance",
+    "b",
+    "seal: x\nentries: [F2]"
+  );
   assert.deepEqual(runs(), [
     ["c1", S("b"), "completed"],
     ["c2", S("b"), "launching"],
   ]);
+  await f2.enqueue();
+  await f2.deliver();
   // The child working again belongs to the follow-up, not the earlier run.
   await hooks["tool.execute.before"]({
     tool: "directorate_read",
@@ -2021,7 +2105,10 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "directorate_compliance",
     "b"
   );
-  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
+  await bus.emit({
+    type: "session.execution.succeeded",
+    data: { sessionID: S("b") },
+  });
   const out = (await waiting).content;
   assert.equal(out.match(/^- /gm)?.length, 1, out);
   assert.match(
@@ -2030,7 +2117,14 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "only what this run recorded"
   );
   // A failed follow-up fails only itself.
-  await followUp("c3", "directorate_compliance", "b", "seal: x\nentries: [F2]");
+  const f3 = await followUp(
+    "c3",
+    "directorate_compliance",
+    "b",
+    "seal: x\nentries: [F2]"
+  );
+  await f3.enqueue();
+  await f3.deliver();
   await bus.emit({
     type: "session.execution.failed",
     data: { sessionID: S("b") },
@@ -2039,7 +2133,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     runs().map((r: any) => r[2]),
     ["completed", "completed", "failed"]
   );
-  // A follow-up to a child still running joins its run.
+  // Both calls can settle in the same busy period if it drains both prompts.
   await launch(
     "c4",
     "directorate_auditor",
@@ -2047,11 +2141,42 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "a",
     "running"
   );
-  await followUp("c5", "directorate_auditor", "a", "also check q2");
-  assert.deepEqual(
-    runs().map((r: any) => r[0]),
-    ["c1", "c2", "c3", "c4"]
+  const f5 = await followUp("c5", "directorate_auditor", "a", "also check q2");
+  await f5.enqueue();
+  await f5.deliver();
+  await bus.emit({
+    type: "session.execution.succeeded",
+    data: { sessionID: S("a") },
+  });
+  assert.deepEqual(runs().slice(-2), [
+    ["c4", S("a"), "completed"],
+    ["c5", S("a"), "completed"],
+  ]);
+});
+
+test("a queued terminal event from a background run cannot finish an undelivered follow-up, even in the same millisecond", async () => {
+  const { S, call, sealOf, launch, bus, followUp } = await harness(repo());
+  const seal = sealOf(
+    (await call("directorate_seal", { target: { kind: "local" } })).content
   );
+  assert.ok(seal);
+  const agent = "directorate_auditor";
+  const sessionID = S("a");
+  const first = await launch("first", agent, "question: first", "a", "running");
+  await first();
+  const next = await followUp("next", agent, "a", "question: next");
+  const oldEvent = {
+    created: Date.parse(sealJson(seal).children[1].startedAt),
+    data: { sessionID },
+  };
+  await next.enqueue();
+  await bus.emit({ ...oldEvent, type: "session.execution.succeeded" });
+  assert.equal(sealJson(seal).children[0].status, "completed");
+  await next.returned();
+  assert.equal(sealJson(seal).children[1].status, "running");
+  await next.deliver();
+  await bus.emit({ type: "session.execution.succeeded", data: { sessionID } });
+  assert.equal(sealJson(seal).children[1].status, "completed");
 });
 
 test("directorate_wait: a budget that locks while it waits says to report, not to wait again", async () => {
@@ -2223,7 +2348,7 @@ test("child events: a failure reported by the subagent tool beats an earlier idl
   assert.equal(sealJson(seal).children[0].status, "failed");
 });
 
-test("children link when their session is created: parallel launches by title; a finish before the after-hook stands", async () => {
+test("parallel launches with the same description link even when the second launch creates and returns first", async () => {
   const { S, call, sealOf, hooks, bus } = await harness(repo());
   const seal = sealOf(
     (
@@ -2233,24 +2358,25 @@ test("children link when their session is created: parallel launches by title; a
       })
     ).content
   );
-  const before = (id: string, description: string) =>
-    hooks["tool.execute.before"]({
+  const before = async (id: string) => {
+    const event = {
       tool: "subagent",
       sessionID: S("lead"),
       agent: "directorate_liaison",
       id,
       input: {
         agent: "directorate_auditor",
-        prompt: `question: ${description}`,
-        description,
+        prompt: `question: ${id}`,
+        description: "Check correctness",
       },
-    });
-  await before("c1", "alpha");
-  await before("c2", "beta");
-  for (const [child, title] of [
-    ["b", "beta"],
-    ["a", "alpha"],
-  ]) {
+    };
+    await hooks["tool.execute.before"](event);
+    return event.input.description;
+  };
+  const titleA = await before("c1");
+  const titleB = await before("c2");
+  assert.notEqual(titleA, titleB);
+  const create = async (child: string, title: string) => {
     parents.set(S(child), S("lead"));
     await bus.emit({
       type: "session.created",
@@ -2261,7 +2387,20 @@ test("children link when their session is created: parallel launches by title; a
         title,
       },
     });
-  }
+  };
+  const returned = (id: string, child: string) =>
+    hooks["tool.execute.after"]({
+      tool: "subagent",
+      sessionID: S("lead"),
+      id,
+      status: "completed",
+      result: {
+        metadata: { metadata: { sessionID: S(child), status: "running" } },
+      },
+    });
+  await create("b", titleB);
+  await returned("c2", "b");
+  await create("a", titleA);
   assert.deepEqual(
     sealJson(seal).children.map((c: any) => [c.call, c.session, c.status]),
     [
@@ -2271,17 +2410,12 @@ test("children link when their session is created: parallel launches by title; a
   );
   // The child finishes before the subagent tool returns; a background "running" result does not undo it.
   await bus.emit({ type: "session.idle", data: { sessionID: S("a") } });
-  await hooks["tool.execute.after"]({
-    tool: "subagent",
-    sessionID: S("lead"),
-    id: "c1",
-    status: "completed",
-    result: {
-      content: `<subagent sessionID="${S("a")}" state="running">`,
-      metadata: { metadata: { sessionID: S("a"), status: "running" } },
-    },
-  });
-  assert.equal(sealJson(seal).children[0].status, "completed");
+  await returned("c1", "a");
+  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
+  assert.deepEqual(
+    sealJson(seal).children.map((c: any) => c.status),
+    ["completed", "completed"]
+  );
 });
 
 test("after a plugin reload, a child's events reach its review through the parent session's record", async () => {
@@ -2385,7 +2519,10 @@ test("one review per session; abandon saves and notifies; resume checks the sess
       sealJson(first).autoReported &&
       sealJson(first).abandoned
   );
-  assert.match(notices[0], /abandoned for a new review/);
+  const notice = notices[0];
+  assert.ok(notice);
+  assert.match(notice, /abandoned for a new review/);
+  assert.doesNotMatch(notice, /time budget ran out/);
   const third = sealOf(
     (
       await call(
@@ -2405,6 +2542,13 @@ test("one review per session; abandon saves and notifies; resume checks the sess
     ),
     new RegExp(`already holds an active containment seal ${third}`)
   );
+  assert.ok(second);
+  shiftClock(second, 19, 20);
+  const before = sealJson(second);
+  await call("directorate_seal", { resume: second });
+  const after = sealJson(second);
+  assert.equal(after.createdAt, before.createdAt);
+  assert.equal(after.deadline, before.deadline);
   shiftClock(second, 30, 20);
   const resumed = (
     await call(

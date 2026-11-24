@@ -8,6 +8,7 @@ import {
   childName,
   childOutstanding,
   childQuestion,
+  missingSeats,
   panelSeats,
   seatName,
 } from "./children.ts";
@@ -27,11 +28,6 @@ const SEV_LABEL: Record<Severity, string> = {
 };
 export type Status = "complete" | "partial" | "stale";
 
-/** Panel seats with no completed review. */
-const missingSeats = (seal: Seal) =>
-  panelSeats(seal).filter(
-    (s) => s.status === "failed" || s.status === "not launched"
-  );
 /** For each confirmed entry, the panel seats that raised it or a duplicate of it. */
 function seatsRaising(seal: Seal, ledger: Ledger) {
   const seats = panelSeats(seal);
@@ -214,7 +210,7 @@ export function renderReport(input: {
       );
   for (const s of seatless)
     nr.push(
-      `- Directorate Seat ${seatName(s.model)}: ${s.status === "failed" ? "its review failed" : "never launched"}`
+      `- Directorate Seat ${seatName(s.model)}: ${s.status === "partial" ? `${s.unread} of ${seal.regions.length} regions unread` : s.status === "failed" ? "its review failed" : "never launched"}`
     );
   for (const n of ledger.notes.filter((n) => n.kind !== "assumption"))
     nr.push(
@@ -278,7 +274,7 @@ export function assess(
   const seatless = missingSeats(seal);
   if (seatless.length)
     partial(
-      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review`
+      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`
     );
   if (fresh.unverified) partial("freshness could not be verified");
   if (fresh.stale) {
@@ -345,7 +341,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* (
     assessed,
     ledger,
     { stale, unverified },
-    opts.auto ? "locked" : budget(seal, yield* Clock.currentTimeMillis).phase
+    budget(seal, yield* Clock.currentTimeMillis).phase
   );
   const status = opts.auto && a.status === "complete" ? "partial" : a.status;
   const md = renderReport({

@@ -223,11 +223,17 @@ const Child = Schema.Struct({
   call: Schema.String,
   agent: Schema.String,
   prompt: Schema.String,
-  /** The subagent call's description, which OpenCode uses as the child session's title. */
+  /** The human-readable part of the OpenCode child session's title. */
   description: opt(Schema.String),
   /** The model the launch named, which for a Directorate Seat is its seat. */
   model: opt(Schema.String),
   session: opt(Schema.String),
+  followUp: opt(
+    Schema.Struct({
+      inbox: opt(Schema.String),
+      delivered: opt(Schema.Boolean),
+    })
+  ),
   status: ChildStatus,
   startedAt: Time,
   endedAt: opt(Time),

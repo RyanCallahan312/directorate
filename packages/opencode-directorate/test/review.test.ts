@@ -29,6 +29,7 @@ import {
   renderRegions,
 } from "../src/browse.ts";
 import { budget, budgetLine } from "../src/budget.ts";
+import { childFailures } from "../src/children.ts";
 import { command } from "../src/command.ts";
 import {
   checkEvidence,
@@ -387,6 +388,41 @@ test("tool paths decode to the repository's form: contained, normalized, the roo
     assert.equal(path(bad)._tag, "None", bad);
   assert.deepEqual(
     [
+
+test("only a subsequent successful retry clears a failed question", async () => {
+  const seal = await local(repo());
+  const first = {
+    call: "first",
+    agent: scout.agent,
+    prompt: "question: same",
+    status: "completed",
+    startedAt: T0,
+  } as const;
+  const failed = {
+    ...first,
+    call: "failed",
+    prompt: "question: same\ncheck the guard",
+    status: "failed",
+  } as const;
+  const reviewed = { ...seal, regions: [], children: [first, failed] };
+  assert.deepEqual(childFailures(reviewed), [failed]);
+  assert.equal(
+    assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
+    "partial"
+  );
+  assert.equal(
+    assess(
+      {
+        ...reviewed,
+        children: [...reviewed.children, { ...first, call: "retry" }],
+      },
+      { entries: [], notes: [] },
+      {},
+      "normal"
+    ).status,
+    "complete"
+  );
+});
       path(" ./a//./b c.ts ").pipe((o) => o._tag === "Some" && o.value),
       path("a/../b").pipe((o) => o._tag === "Some" && o.value),
     ],
