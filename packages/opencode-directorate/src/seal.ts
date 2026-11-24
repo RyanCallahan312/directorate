@@ -12,7 +12,7 @@ import {
 } from "effect";
 import { Hex } from "effect/encoding";
 
-import { depsOf } from "./content.ts";
+import { depsOf, inDependencyDir, readable } from "./content.ts";
 import { isRead } from "./coverage.ts";
 import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
 import type { Piece } from "./diff.ts";
@@ -828,10 +828,14 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     return yield* store.create(
       id,
       Effect.gen(function* attempt() {
-        // A worktree seal keeps its ends, so only commit pairs re-resolve.
+        // A worktree seal keeps its base (committed fixes are not a new change) but records the HEAD it now sits on;
+        // only commit pairs re-resolve both ends.
         const cur: Pick<Current, "baseSha" | "headSha" | "baseTip"> =
           prior.postImage === "worktree"
-            ? { baseSha: prior.baseSha, headSha: prior.headSha }
+            ? {
+                baseSha: prior.baseSha,
+                headSha: yield* (yield* Git).head(prior.repo),
+              }
             : yield* currentFingerprint(prior).pipe(
                 Effect.mapError(
                   (e) =>
@@ -892,6 +896,24 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
         const reopened: string[] = [];
         const kept: string[] = [];
 
+        // Installed dependencies are read live from disk, outside any seal, so Git cannot say whether they changed:
+        // a confirmed finding that cites one is re-decided. One that is gone now counts as changed.
+        const live = new Set(
+          yield* Effect.filter(
+            new Set(
+              input.ledger.entries
+                .filter((e) => e.status === "confirmed")
+                .flatMap((e) => [...depsOf(e)].filter(inDependencyDir))
+            ),
+            (d) =>
+              readable(seal, d).pipe(
+                Effect.map((r) => r.live),
+                Effect.orElseSucceed(() => true)
+              ),
+            { concurrency: IO_CONCURRENCY }
+          )
+        );
+
         // What the earlier review left behind: verified findings, and entries filed but never cleared.
         const entries = input.ledger.entries.flatMap((e): Entry[] => {
           let status: "confirmed" | "unverified" | undefined;
@@ -913,8 +935,9 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           };
 
           const why = moved(e);
+          const onDisk = [...depsOf(e)].filter((d) => live.has(d));
 
-          if (status === "confirmed" && !why) {
+          if (status === "confirmed" && !why && !onDisk.length) {
             kept.push(carried.id);
 
             return [carried];
@@ -928,8 +951,10 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             reason = `unverified in ${prior.id}; decide it on the current code`;
           } else if (why?.gone) {
             reason = `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`;
+          } else if (why) {
+            reason = `code it rests on changed since ${prior.id} (${why.files}); decide whether it is still present (re-anchor) or resolved`;
           } else {
-            reason = `code it rests on changed since ${prior.id} (${why?.files}); decide whether it is still present (re-anchor) or resolved`;
+            reason = `it rests on installed dependencies read from disk (${onDisk.join(", ")}), which may have changed since ${prior.id}; decide whether it is still present (re-anchor) or resolved`;
           }
 
           return [reopen(carried, reason)];

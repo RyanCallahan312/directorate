@@ -3674,6 +3674,44 @@ test("ledger listing is repository-local, including outside Git", async () => {
   );
 });
 
+test("ledger listing names the most recently reported seal, however many newer seals are unreported", async () => {
+  const h = await harness(repo());
+
+  const { content } = await h.call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const base = JSON.parse(
+    readFileSync(path.join(state, h.sealOf(content), "seal.json"), "utf-8")
+  );
+
+  const put = (id: string, reportedAt?: string) => {
+    mkdirSync(path.join(state, id));
+    writeFileSync(
+      path.join(state, id, "seal.json"),
+      JSON.stringify({ ...base, id, reportedAt })
+    );
+  };
+
+  // Reported in the reverse of their creation order, then buried under newer unreported seals.
+  const later = "directorate-20250101000000-a00001";
+  put(later, "2025-03-02T00:00:00.000Z");
+  put("directorate-20250102000000-a00002", "2025-03-01T00:00:00.000Z");
+
+  for (let i = 0; i < 10; i += 1) {
+    put(`directorate-2099010100000${i}-b0000${i}`);
+  }
+
+  const listed = await h.call("directorate_ledger_list", {});
+  assert.match(
+    listed.content,
+    new RegExp(
+      `^Latest reported seal \\(re-check this one\\): \`${later}\``,
+      "u"
+    )
+  );
+});
+
 test("after a plugin reload, the session's unreported seal is found even after an abandon; strangers are not bound", async () => {
   const dir = repo();
   const h1 = await harness(dir, "reload");

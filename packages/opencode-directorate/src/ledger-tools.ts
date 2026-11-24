@@ -299,19 +299,33 @@ export const ledgerTools = (tool: DefineTool) => {
           .root(dir)
           .pipe(Effect.orElseSucceed(Function.constUndefined));
 
-        const seals = repo ? yield* store.list({ limit: 10, repo }) : [];
+        const all = repo ? yield* store.list({ repo }) : [];
+        const seals = all.slice(0, 10);
+
+        const [latest] = all
+          .filter((s) => s.reportedAt)
+          .toSorted(
+            (a, b) =>
+              (b.reportedAt?.epochMilliseconds ?? 0) -
+              (a.reportedAt?.epochMilliseconds ?? 0)
+          );
 
         if (!seals.length) {
           return { content: "No Directorate seals found for this repository." };
         }
 
+        // Recent seals can all be unreported, so the latest reported one is named on its own.
         return {
-          content: seals
-            .map(
+          content: [
+            latest
+              ? `Latest reported seal (re-check this one): \`${latest.id}\`, reported ${DateTime.formatIso(latest.reportedAt ?? latest.createdAt)}.`
+              : "No reported seal for this repository.",
+            "",
+            ...seals.map(
               (s) =>
                 `- \`${s.id}\` ${s.mode} · ${s.description} · created ${DateTime.formatIso(s.createdAt)}${s.reportedAt ? ` · reported${s.autoReported ? " automatically" : ""}` : " · unreported"}`
-            )
-            .join("\n"),
+            ),
+          ].join("\n"),
         };
       }
 

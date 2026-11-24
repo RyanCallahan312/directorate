@@ -2755,6 +2755,33 @@ test("interrupting a mutation releases its lock", async () => {
   );
 });
 
+test("an orphaned mutation lock is taken over", async () => {
+  const seal = await local(repo());
+  const lock = join(state, seal.id, "mutation.lock");
+
+  const takeOver = store.pipe(
+    Effect.flatMap((st) =>
+      st.withLock(seal.id, Effect.void).pipe(Effect.timeout("1 second"))
+    )
+  );
+
+  // A lock without a holder record, left long ago.
+  mkdirSync(lock);
+  const old = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(lock, old, old);
+  await run(takeOver);
+  assert.equal(fs.existsSync(lock), false);
+
+  // A fresh lock whose holder process is gone.
+  mkdirSync(lock);
+  writeFileSync(
+    join(lock, "holder"),
+    JSON.stringify({ at: Date.now(), pid: 2 ** 22 + 1, token: "x" })
+  );
+  await run(takeOver);
+  assert.equal(fs.existsSync(lock), false);
+});
+
 test("mutation lock excludes a separate process", async () => {
   const seal = await local(repo());
   const exec = promisify(execFile);
@@ -3013,6 +3040,11 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
     sealed.baseSha,
     "committing the fixes is not a new change"
   );
+  assert.match(
+    await run(history(r.seal, { kind: "log" })),
+    /\bfix\b/u,
+    "a worktree re-check records the current HEAD"
+  );
   assert.equal(r.seal.panel, undefined);
   assert.deepEqual(r.files, ["src/math.ts"]);
   const byFile = (f: string) => r.seal.regions.filter((x) => x.file === f);
@@ -3059,6 +3091,44 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
   assert.equal(entriesResult.entries.length, 3);
   const reportedAtResult = await run(loadSeal(sealed.id));
   assert.ok(reportedAtResult.reportedAt, "the earlier seal stays reported");
+});
+
+test("re-check: reopens a confirmed finding whose verdict cites an installed dependency", async () => {
+  const dir = repo({ ".gitignore": "node_modules/\n", "src/math.ts": MATH });
+  write(dir, "src/math.ts", `${MATH}export const z = 1\n`);
+  write(dir, "node_modules/lib/index.js", "module.exports = 1\n");
+  const sealed = await local(dir);
+
+  const ledger: Ledger = {
+    entries: [
+      entry("F1", {
+        severity: "important",
+        status: "confirmed",
+        verdicts: [confirmedBy(refuter, ["node_modules/lib/index.js:1"])],
+      }),
+      entry("F2", {
+        severity: "important",
+        status: "confirmed",
+        verdicts: [confirmedBy(refuter, ["src/math.ts:2"])],
+      }),
+    ],
+    notes: [],
+  };
+
+  const prior = { ...sealed, reportedAt: T0 };
+  await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
+
+  // Only the installed dependency changes: Git sees nothing.
+  write(dir, "node_modules/lib/index.js", "module.exports = 2\n");
+  const r = await run(recheckSeal({ ledger, owner: lead, prior }));
+
+  assert.deepEqual(r.files, []);
+  assert.deepEqual(r.reopened, ["F1"]);
+  assert.deepEqual(r.kept, ["F2"]);
+  assert.match(
+    r.ledger.entries[0]?.staleReason ?? "",
+    /installed dependencies .*node_modules\/lib\/index\.js/u
+  );
 });
 
 test("re-check verdicts: only carried entries resolve, only Compliance decides carried verified findings, nobody resolves their own", () => {

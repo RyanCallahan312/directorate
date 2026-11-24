@@ -11,6 +11,7 @@ import {
   Option,
   Path,
   Predicate,
+  Random,
   Schedule,
   Schema,
 } from "effect";
@@ -26,6 +27,29 @@ export { StateRoot } from "./state-root.ts";
 const KEEP_DAYS = 14;
 const IO_CONCURRENCY = 16;
 const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/u;
+
+/** A mutation lock older than this is orphaned: far above the longest locked section (git calls stop at 120 s). */
+const LOCK_STALE_MS = 10 * 60_000;
+
+const LockHolder = Schema.fromJsonString(
+  Schema.Struct({ at: Schema.Finite, pid: Schema.Finite, token: Schema.String })
+);
+
+const decodeHolder = Schema.decodeUnknownOption(LockHolder);
+const encodeHolder = Schema.encodeSync(LockHolder);
+
+/** Whether a process exists; EPERM means it does, under another user. */
+const alive = (pid: number) =>
+  Effect.sync(() => {
+    try {
+      process.kill(pid, 0);
+
+      return true;
+    } catch (error) {
+      // SAFETY: process.kill throws only Node system errors, which carry a code.
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  });
 
 const decodeSeal = Schema.decodeEffect(SealJson);
 const decodeLedger = Schema.decodeEffect(LedgerJson);
@@ -79,17 +103,85 @@ const make = Effect.gen(function* make() {
     }
 
     const path = file(id, "mutation.lock");
+    const holderFile = paths.join(path, "holder");
+
+    const readHolder = (dir = path) =>
+      fs
+        .readFileString(paths.join(dir, "holder"))
+        .pipe(Effect.orElseSucceed(Function.constUndefined));
+
+    /**
+     * Moves an orphaned lock aside: its holder process is gone or it is older than LOCK_STALE_MS (by mtime, for a lock
+     * without a holder record). A lock taken anew between the check and the rename is put back.
+     */
+    const reclaim = Effect.fnUntraced(function* reclaim() {
+      const now = yield* Clock.currentTimeMillis;
+      const text = yield* readHolder();
+      const holder = Option.getOrUndefined(decodeHolder(text));
+
+      const stale = holder
+        ? now - holder.at > LOCK_STALE_MS || !(yield* alive(holder.pid))
+        : now -
+            ((yield* fs.stat(path).pipe(
+              Effect.map((st) => Option.getOrUndefined(st.mtime)?.getTime()),
+              Effect.orElseSucceed(Function.constUndefined)
+            )) ?? now) >
+          LOCK_STALE_MS;
+
+      if (!stale) {
+        return;
+      }
+
+      const aside = `${path}.stale-${yield* Random.nextIntBetween(0, 0xff_ff_ff)}`;
+
+      if (
+        !(yield* fs.rename(path, aside).pipe(
+          Effect.as(true),
+          Effect.orElseSucceed(() => false)
+        ))
+      ) {
+        return;
+      }
+
+      yield* (
+        (yield* readHolder(aside)) === text
+          ? fs.remove(aside, { force: true, recursive: true })
+          : fs.rename(aside, path)
+      ).pipe(Effect.ignore);
+    });
 
     const acquire = Effect.acquireRelease(
-      fs.makeDirectory(path).pipe(
-        Effect.catchReason(
-          "PlatformError",
-          "AlreadyExists",
-          () => Effect.fail(new LockBusy()),
-          (_, e) => failure(`${id}: ${e.message}`)
+      Effect.gen(function* lock() {
+        yield* fs.makeDirectory(path).pipe(
+          Effect.catchReason(
+            "PlatformError",
+            "AlreadyExists",
+            () => reclaim().pipe(Effect.andThen(Effect.fail(new LockBusy()))),
+            (_, e) => failure(`${id}: ${e.message}`)
+          )
+        );
+
+        const holder = encodeHolder({
+          at: yield* Clock.currentTimeMillis,
+          pid: process.pid,
+          token: String(yield* Random.nextInt),
+        });
+
+        // Without a holder record the lock is judged by its age alone.
+        yield* fs.writeFileString(holderFile, holder).pipe(Effect.ignore);
+
+        return holder;
+      }),
+      // A lock reclaimed from this holder belongs to its new holder now.
+      (holder) =>
+        readHolder().pipe(
+          Effect.flatMap((text) =>
+            text === undefined || text === holder
+              ? fs.remove(path, { force: true, recursive: true })
+              : Effect.void
+          ),
+          Effect.orDie
         )
-      ),
-      () => fs.remove(path, { recursive: true }).pipe(Effect.orDie)
     );
 
     // Retry outside acquisition: a waiting fiber can stop, but mkdir and release registration are atomic.

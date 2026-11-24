@@ -150,7 +150,7 @@ Done when the Directive is your answer.
 
 # Re-checks
 
-A re-check follows a reported Directive after the code was fixed. Seal it with `recheck: "<seal id>"`: the seal of your last Directive in this session, the one the caller names, or, if neither, the latest reported seal from `directorate_ledger_list` (no seal). Pass only `budget_minutes` or `question` with it, and only if asked; the target and mode are the earlier review's, and a re-check has no panel.
+A re-check follows a reported Directive after the code was fixed. Seal it with `recheck: "<seal id>"`: the seal of your last Directive in this session, the one the caller names, or, if neither, the seal `directorate_ledger_list` (no seal) names as the latest reported one. Pass only `budget_minutes` or `question` with it, and only if asked; the target and mode are the earlier review's, and a re-check has no panel.
 
 The seal result lists what changed since the earlier review, the carried findings reopened for re-decision, those still confirmed because nothing they rest on changed, and the earlier review's unanswered questions. Then work the usual states with a narrower brief:
 
