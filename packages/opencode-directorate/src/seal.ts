@@ -652,12 +652,27 @@ const carryRegions = (
   onto: readonly Region[],
   keep: (r: Region) => boolean = () => true
 ) => {
-  const byKey = new Map(
-    from.flatMap((r) => (r.key && keep(r) ? [[r.key, r] as const] : []))
-  );
+  const byKey = Map.groupBy(from, (r) => r.key);
+  const matches = new Map<Region, Region>();
+
+  for (const [key, regions] of Map.groupBy(onto, (r) => r.key)) {
+    const previous = key ? byKey.get(key) : undefined;
+
+    // Identical chunks have the same key. Pair occurrences in order, including unread ones;
+    // if their counts changed, none can be matched unambiguously.
+    if (previous?.length === regions.length) {
+      for (const [i, r] of regions.entries()) {
+        const p = previous[i];
+
+        if (p && keep(p)) {
+          matches.set(r, p);
+        }
+      }
+    }
+  }
 
   return onto.map((r): Region => {
-    const p = r.key ? byKey.get(r.key) : undefined;
+    const p = matches.get(r);
 
     return p
       ? {

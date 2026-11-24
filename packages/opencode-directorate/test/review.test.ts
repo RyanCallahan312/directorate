@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -930,6 +931,36 @@ test("SHA-256 repositories: a first-commit-to-be and a root commit seal against 
   );
 });
 
+test("a shallow boundary is not a root commit when sealing a commit review", async () => {
+  const dir = repo({ "gone.txt": "gone\n", "kept.txt": "kept\n" });
+  g(dir, "rm", "gone.txt");
+  g(dir, "commit", "-qm", "delete a file");
+  const shallow = join(dir, "shallow");
+  g(dir, "clone", "-q", "--depth=1", pathToFileURL(dir).href, shallow);
+
+  const reviewCommit = () =>
+    run(
+      createSeal({
+        mode: "default",
+        owner: lead,
+        repo: shallow,
+        target: { commit: "HEAD", kind: "commit" },
+      })
+    );
+
+  await assert.rejects(
+    reviewCommit(),
+    /first parent is not available.*Deepen/u
+  );
+
+  g(shallow, "fetch", "-q", "--deepen=1");
+  const seal = await reviewCommit();
+  assert.deepEqual(
+    seal.files.map((f) => [f.path, f.status]),
+    [["gone.txt", "deleted"]]
+  );
+});
+
 test("reading a sealed blob fails when git fails, instead of reading as a missing file", async () => {
   const dir = repo();
 
@@ -1048,36 +1079,6 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
     run(loadLedger(seal.id)),
     /damaged; refusing to treat it as empty/u
   );
-});
-
-test("listSeals ages seals by createdAt, which resume moves, not by the date in their id", async () => {
-  const dir = repo();
-  write(dir, "src/math.ts", `${MATH}// edit\n`);
-  const seal = await local(dir);
-
-  const json = JSON.parse(
-    readFileSync(join(state, seal.id, "seal.json"), "utf-8")
-  );
-
-  const resumed = "directorate-20200101000000-abcabc";
-  mkdirSync(join(state, resumed));
-  writeFileSync(
-    join(state, resumed, "seal.json"),
-    JSON.stringify({ ...json, id: resumed })
-  );
-  writeFileSync(
-    join(state, seal.id, "seal.json"),
-    JSON.stringify({ ...json, createdAt: "2020-01-01T00:00:00.000Z" })
-  );
-
-  const mapResult = await run(
-    store.pipe(Effect.flatMap((st) => st.list({ maxAgeMs: 2 * 86_400_000 })))
-  );
-
-  const ids = new Set(mapResult.map((s) => s.id));
-
-  assert.ok(ids.has(resumed), "an old id resumed recently is listed");
-  assert.ok(!ids.has(seal.id), "an old createdAt is not");
 });
 
 const root = process.getuid?.() === 0;
@@ -1275,6 +1276,17 @@ test("coverage: size-charged chunks, per-chunk line ranges, owner reads, explici
     ["R2"],
     "reviewed needs a reader"
   );
+});
+
+test("blank context lines are numbered even when Git is configured to suppress their prefix", async () => {
+  const dir = repo({ "sample.txt": "before\n\nold\nafter\n" });
+  g(dir, "config", "diff.suppressBlankEmpty", "true");
+  write(dir, "sample.txt", "before\n\nnew\nafter\n");
+
+  const seal = await local(dir);
+  const { text } = await run(renderRegions(seal, seal.regions));
+  assert.match(text, /^\s+3 \+new$/mu);
+  assert.equal(present(seal.regions[0]).newEnd, 4);
 });
 
 test("renderRegions: old and new line numbers, a byte-bounded page with continuation", async () => {
@@ -2644,6 +2656,29 @@ const confirmedBy = (by: Actor, evidence: string[]): Verdict => ({
   rationale: "",
   severity: "important",
   verdict: "confirmed",
+});
+
+test("re-check: identical chunks carry only their own read receipts", async () => {
+  const dir = repo();
+  write(dir, "repeated.txt", "repeat\n".repeat(1199));
+  const sealed = await local(dir);
+  assert.equal(sealed.regions.length, 3);
+
+  const prior = {
+    ...regions(sealed, (_, i) =>
+      i < 2 ? { ownerRead: true, readBy: ["owner"] } : {}
+    ),
+    reportedAt: T0,
+  };
+
+  const next = await run(
+    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+  );
+
+  assert.deepEqual(
+    coverageSummary(next.seal).unread.map((r) => r.id),
+    ["R3"]
+  );
 });
 
 test("re-check: keeps the base and unchanged reads, carries verified findings and leads, reopens what the fixes touched", async () => {

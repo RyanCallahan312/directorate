@@ -3,7 +3,6 @@
 import {
   Clock,
   Context,
-  DateTime,
   Effect,
   Exit,
   FileSystem,
@@ -212,39 +211,18 @@ const make = Effect.gen(function* make() {
       Effect.orElseSucceed((): number | undefined => undefined)
     );
 
-  /** Seals in the store, newest first. `maxAgeMs` is measured from createdAt, which resuming moves. */
+  /** Seals in the store, newest first. */
   const list = Effect.fn("Store.list")(function* list(
-    opts: { repo?: string | undefined; limit?: number; maxAgeMs?: number } = {}
+    opts: { repo?: string; limit?: number } = {}
   ) {
-    const now = yield* Clock.currentTimeMillis;
-
-    const young = (millis: number | undefined) =>
-      opts.maxAgeMs === undefined ||
-      (millis !== undefined && now - millis <= opts.maxAgeMs);
-
     const seals = yield* Effect.forEach(
       yield* ids,
-      Effect.fnUntraced(function* seals(id) {
-        // createdAt is never later than the seal's last write, so seals not written since the cutoff are skipped unread.
-        if (
-          opts.maxAgeMs !== undefined &&
-          !young(yield* modified(file(id, "seal.json")))
-        ) {
-          return;
-        }
-
-        return yield* load(id).pipe(
-          Effect.orElseSucceed(Function.constUndefined)
-        );
-      }),
+      (id) => load(id).pipe(Effect.orElseSucceed(Function.constUndefined)),
       { concurrency: IO_CONCURRENCY }
     );
 
     const out = seals.filter(
-      (s): s is Seal =>
-        s !== undefined &&
-        (!opts.repo || s.repo === opts.repo) &&
-        young(DateTime.toEpochMillis(s.createdAt))
+      (s): s is Seal => s !== undefined && (!opts.repo || s.repo === opts.repo)
     );
 
     return opts.limit ? out.slice(0, opts.limit) : out;

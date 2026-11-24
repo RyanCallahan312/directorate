@@ -218,7 +218,7 @@ flowchart LR
    - the disabled lenses
 3. **Save.** Escape steps back, and leaving with unsaved changes asks first.
 
-Each row shows the current value, or what an unset key falls back to.
+Each row shows the current value, or what an unset key falls back to. If another client saves changes to the same file while your dialog is open, reopen the dialog before applying your changes.
 
 ```mermaid
 flowchart LR

@@ -1,5 +1,5 @@
 // Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
-import { DateTime, Effect, Schema } from "effect";
+import { DateTime, Effect, Function, Schema } from "effect";
 
 import { actorName } from "./children.ts";
 import { checkEvidence, checkQuote } from "./content.ts";
@@ -25,7 +25,7 @@ import {
   VerdictKind,
 } from "./model.ts";
 import type { Entry } from "./model.ts";
-import { Sessions } from "./session.ts";
+import { Host, Sessions } from "./session.ts";
 import { Store } from "./store.ts";
 import {
   actor,
@@ -291,15 +291,15 @@ export const ledgerTools = (tool: DefineTool) => {
       const sessions = yield* Sessions;
 
       if (!input.seal) {
-        const dir = yield* sessions.directory(c.sessionID);
+        const dir =
+          (yield* sessions.directory(c.sessionID)) ??
+          (yield* Host).location.directory;
 
-        const repo = dir
-          ? yield* (yield* Git)
-              .root(dir)
-              .pipe(Effect.orElseSucceed((): string | undefined => undefined))
-          : undefined;
+        const repo = yield* (yield* Git)
+          .root(dir)
+          .pipe(Effect.orElseSucceed(Function.constUndefined));
 
-        const seals = yield* store.list({ limit: 10, repo });
+        const seals = repo ? yield* store.list({ limit: 10, repo }) : [];
 
         if (!seals.length) {
           return { content: "No Directorate seals found for this repository." };

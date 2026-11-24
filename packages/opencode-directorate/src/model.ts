@@ -566,6 +566,39 @@ export type Settings = typeof SettingsSchema.Type;
 export const seatRef = (s: Seat) =>
   s.variant ? `${s.model}#${s.variant}` : s.model;
 
+/** Drops unset fields and empty sections, but keeps an explicit empty disabled-lens list. */
+export const normalizeSettings = (s: Settings): Settings => {
+  const b = s.budget_minutes;
+
+  const budgets = {
+    ...(b?.["code-quality"] !== undefined && {
+      "code-quality": b["code-quality"],
+    }),
+    ...(b?.default !== undefined && { default: b.default }),
+    ...(b?.full !== undefined && { full: b.full }),
+  };
+
+  const p = s.panel;
+
+  const panel = {
+    ...(p?.enabled !== undefined && { enabled: p.enabled }),
+    ...(p?.models?.length && { models: p.models }),
+  };
+
+  return {
+    ...(Object.keys(budgets).length && { budget_minutes: budgets }),
+    ...(s.default_scope && { default_scope: s.default_scope }),
+    ...(s.lenses?.disabled !== undefined && {
+      lenses: { disabled: s.lenses.disabled },
+    }),
+    ...(s.mode && { mode: s.mode }),
+    ...(Object.keys(panel).length && { panel }),
+  };
+};
+
 /** No key set: writing these settings removes the file. */
 export const isUnset = (s: Settings) =>
-  Object.values(s).every((v) => v === undefined);
+  Object.keys(normalizeSettings(s)).length === 0;
+
+export const sameSettings = (a: Settings, b: Settings) =>
+  JSON.stringify(normalizeSettings(a)) === JSON.stringify(normalizeSettings(b));

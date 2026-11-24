@@ -8,7 +8,7 @@ import { SettingsSchema, SettingsScopeSchema } from "./model.ts";
 
 const std = Schema.toStandardSchemaV1;
 
-/** Why the server refused: a settings file it cannot read, or a model or thinking level OpenCode cannot run. */
+/** Why the server refused: an unreadable or changed settings file, or a model or thinking level OpenCode cannot run. */
 const rejected = { rejected: std(Schema.Struct({})) };
 
 /** What the settings method returns. */
@@ -54,7 +54,11 @@ export const DirectorateRpc = Rpc.define({
     write: {
       errors: rejected,
       input: std(
-        Schema.Struct({ scope: SettingsScopeSchema, settings: SettingsSchema })
+        Schema.Struct({
+          previous: Schema.optionalKey(SettingsSchema),
+          scope: SettingsScopeSchema,
+          settings: SettingsSchema,
+        })
       ),
       output: std(WriteResultSchema),
     },

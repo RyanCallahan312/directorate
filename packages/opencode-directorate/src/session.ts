@@ -15,6 +15,7 @@ import {
 import { childOutstanding } from "./children.ts";
 import { ignore } from "./error.ts";
 import { Host } from "./host.ts";
+import { PANELIST, REFUTER, SCOUT } from "./model.ts";
 import type { Seal } from "./model.ts";
 import { Store } from "./store.ts";
 
@@ -22,6 +23,7 @@ export { Host } from "./host.ts";
 
 const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
+const CHILD_ROLES = new Set([SCOUT, PANELIST, REFUTER]);
 
 /** A host session id, or none for anything else (hook events are typed loosely). */
 const asSessionID = Schema.decodeUnknownOption(Session.ID);
@@ -78,44 +80,60 @@ const make = Effect.gen(function* make() {
       : undefined;
   });
 
-  /** The unreported seal this session belongs to: cached, else recorded on the session, else on its parent (a child). */
+  /** The unreported seal this session belongs to, recovered from persisted records after reload. */
   const active = Effect.fn("Sessions.active")(function* active(
     sessionID: string
   ) {
     const cached = yield* boundTo(sessionID);
 
-    const parent = Effect.fnUntraced(function* parent() {
-      const parentID = (yield* info(sessionID))?.parentID;
+    const loadActive = (id: string | undefined) =>
+      id
+        ? store.load(id).pipe(
+            Effect.orElseSucceed(Function.constUndefined),
+            Effect.map((s) =>
+              s && !s.reportedAt && participant(s, sessionID) ? s : undefined
+            )
+          )
+        : Effect.undefined;
 
-      return parentID ? yield* recordedSeal(parentID) : undefined;
-    });
+    const bound = yield* loadActive(cached);
 
-    const id = cached ?? (yield* recordedSeal(sessionID)) ?? (yield* parent());
-
-    if (!id) {
-      return;
-    }
-
-    const s = yield* store
-      .load(id)
-      .pipe(Effect.orElseSucceed(Function.constUndefined));
-
-    if (s && !s.reportedAt && participant(s, sessionID)) {
-      if (!cached) {
-        yield* bind(sessionID, s.id);
-      }
-
-      return s;
+    if (bound) {
+      return bound;
     }
 
     // Unbind only if no other fiber rebound the session while the seal loaded.
     if (cached) {
       yield* Ref.update(bindings, (m) =>
-        Option.getOrUndefined(HashMap.get(m, sessionID)) === id
+        Option.getOrUndefined(HashMap.get(m, sessionID)) === cached
           ? HashMap.remove(m, sessionID)
           : m
       );
     }
+
+    let seal = yield* loadActive(yield* recordedSeal(sessionID));
+
+    if (!seal) {
+      const child = yield* info(sessionID);
+
+      if (child?.parentID) {
+        seal = yield* loadActive(yield* recordedSeal(child.parentID));
+
+        // After takeover the host's parent link is unchanged, but the former Liaison no longer records this seal.
+        if (!seal && CHILD_ROLES.has(String(child.agent))) {
+          seal = (yield* store.list()).find(
+            (s) =>
+              !s.reportedAt && s.children.some((ch) => ch.session === sessionID)
+          );
+        }
+      }
+    }
+
+    if (seal) {
+      yield* bind(sessionID, seal.id);
+    }
+
+    return seal;
   });
 
   /** The seal, with a participating session bound to it. */

@@ -33,7 +33,7 @@ import {
 import type { Types } from "effect";
 import { TestClock } from "effect/testing";
 
-import { SealJson } from "../src/model.ts";
+import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, SealJson } from "../src/model.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
 
 const present = <T>(value: T | null | undefined): T => {
@@ -261,7 +261,9 @@ interface Hooks {
   "tool.execute.before"?: (event: ToolBeforeEvent) => Promise<void>;
 }
 
-type RpcMethodInput = { scope: string; settings: ToolInput } | undefined;
+type RpcMethodInput =
+  | { previous?: ToolInput; scope: string; settings: ToolInput }
+  | undefined;
 
 type RpcMethodOutput = SettingsView | WriteResult;
 
@@ -594,6 +596,7 @@ const harness = async (
 
     await present(hooks["tool.execute.before"])(event);
     parents.set(S(child), S("lead"));
+    sessionAgents.set(S(child), agent);
     await bus.emit({
       data: {
         agent,
@@ -2200,6 +2203,95 @@ test("directorate_configure rejects an invalid other scope before changing globa
   });
 });
 
+test("settings dialogs do not save unchanged drafts or overwrite changes saved by another client", async () => {
+  const dir = repo();
+  const first = await harness(dir);
+  const second = await harness(dir);
+  const write = present(first.client.rpc(DirectorateRpc).write);
+  const staleWrite = present(second.client.rpc(DirectorateRpc).write);
+
+  await write({
+    previous: {},
+    scope: "global",
+    settings: { default_scope: "local" },
+  });
+  await assert.rejects(
+    staleWrite({
+      previous: {},
+      scope: "global",
+      settings: { budget_minutes: { full: 80 } },
+    }),
+    { message: /changed since this dialog opened/u, type: "rejected" }
+  );
+  assert.deepEqual(JSON.parse(readFileSync(globalSettings, "utf-8")), {
+    default_scope: "local",
+  });
+
+  const noChanges = tui(second.client, dir, [
+    pick("Global Charter"),
+    (d) => {
+      writeFileSync(globalSettings, '{"default_scope":"repository"}\n');
+
+      return pick("Save (no changes)")(d);
+    },
+  ]);
+
+  await noChanges.run();
+  assert.equal(noChanges.left(), 0);
+  assert.deepEqual(noChanges.alerts, []);
+  assert.equal(
+    readFileSync(globalSettings, "utf-8"),
+    '{"default_scope":"repository"}\n'
+  );
+});
+
+test("settings show keeps an explicit empty lens override but not empty sections", async () => {
+  const dir = repo();
+  const { call } = await harness(dir);
+
+  const cfg = (input: ToolInput) =>
+    call("directorate_configure", input, "build", "cfg");
+
+  await cfg({
+    action: "write",
+    scope: "global",
+    settings: { lenses: { disabled: ["ux"] } },
+  });
+  await cfg({
+    action: "write",
+    scope: "project",
+    settings: { budget_minutes: {}, lenses: { disabled: [] }, panel: {} },
+  });
+  const project = path.join(dir, ".opencode", "directorate.json");
+  assert.deepEqual(JSON.parse(readFileSync(project, "utf-8")), {
+    lenses: { disabled: [] },
+  });
+  const { content } = await cfg({ action: "show" });
+  assert.match(
+    content,
+    /^Project .*:\s+```json\n\{\n\s+"lenses": \{\n\s+"disabled": \[\]/mu
+  );
+  assert.match(content, /^Effective: Directorate defaults\.$/mu);
+});
+
+test("the example settings use the built-in full panel budget", async () => {
+  const { call } = await harness(repo());
+  mkdirSync(path.dirname(globalSettings), { recursive: true });
+  writeFileSync(
+    globalSettings,
+    readFileSync(new URL("../directorate.example.json", import.meta.url))
+  );
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  assert.match(
+    content,
+    new RegExp(`budget ${DEFAULT_BUDGET.full * PANEL_BUDGET_FACTOR} min`, "u")
+  );
+});
+
 test("directorate_configure: validated writes per scope; the project overrides global key by key; seals use the result", async () => {
   const dir = repo();
   const { call, hooks, S } = await harness(dir);
@@ -2284,7 +2376,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
 
   assert.match(
     p,
-    /\.opencode\/directorate\.json \(keys not shown[\s\S]*"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/u
+    /\.opencode\/directorate\.json:[\s\S]*"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/u
   );
   const contentResult21 = await cfg({ action: "show", find: "ALP" });
   const shown = contentResult21.content;
@@ -3097,6 +3189,43 @@ test("after a plugin reload, a child's events reach its review through the paren
   assert.equal(present(sealJson(seal).children[0]).status, "failed");
 });
 
+test("a child still reports completion after a Liaison takeover and plugin reload", async () => {
+  const dir = repo();
+  const first = await harness(dir, "takeover");
+
+  const { content } = await first.call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+
+  const returned = await first.launch(
+    "c1",
+    "directorate_auditor",
+    "question: q1",
+    "a",
+    "running"
+  );
+
+  await returned();
+  await first.call(
+    "directorate_seal",
+    { resume: seal },
+    "directorate_liaison",
+    "next"
+  );
+  assert.equal(entries.get(first.S("lead"))?.has("directorate-seal"), false);
+  assert.equal(present(sealJson(seal).children[0]).status, "running");
+  await Effect.runPromise(Scope.close(first.scope, Exit.void));
+
+  const reloaded = await harness(dir, "takeover");
+  await reloaded.bus.emit({
+    data: { sessionID: first.S("a") },
+    type: "session.execution.succeeded",
+  });
+  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+});
+
 test("hooks write the seal only for changes: unrelated subagents and running auditors' tool calls leave it alone", async () => {
   const { S, call, launch, hooks, bus } = await harness(repo());
 
@@ -3497,6 +3626,54 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   assert.equal(e3.effect, "allow");
 });
 
+test("the report gate does not ask for Seat dispatches during drain", async () => {
+  const { call } = await harness(repo());
+
+  const { content } = await call("directorate_seal", {
+    budget_minutes: 10,
+    panel_models: ["prov/alpha"],
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+  await call("directorate_diff", { seal });
+  shiftClock(seal, 7);
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Seats\).*Seats can no longer be launched or continued during drain/u
+  );
+  const report = await call("directorate_report", { seal });
+  assert.match(report.content, /status: \*\*partial\*\*/u);
+});
+
+test("ledger listing is repository-local, including outside Git", async () => {
+  const first = await harness(repo());
+  const second = await harness(repo());
+
+  const makeSeal = async (h: typeof first) => {
+    const { content } = await h.call("directorate_seal", {
+      target: { kind: "local" },
+    });
+
+    return sealOf(content);
+  };
+
+  const own = await makeSeal(first);
+  const other = await makeSeal(second);
+  const { content } = await first.call("directorate_ledger_list", {});
+  assert.ok(content.includes(own));
+  assert.ok(!content.includes(other));
+
+  const dir = mkdtempSync(path.join(tmpdir(), "directorate-no-repo-"));
+  dirs.push(dir);
+  const outside = await harness(dir);
+  const empty = await outside.call("directorate_ledger_list", {});
+  assert.equal(
+    empty.content,
+    "No Directorate seals found for this repository."
+  );
+});
+
 test("after a plugin reload, the session's unreported seal is found even after an abandon; strangers are not bound", async () => {
   const dir = repo();
   const h1 = await harness(dir, "reload");
@@ -3543,7 +3720,7 @@ test("after a plugin reload, the session's unreported seal is found even after a
 });
 
 test(
-  "the scoped watchdog uses Effect time and saves the report after the grace period",
+  "the scoped watchdog recovers an overdue seal after a three-day shutdown",
   { timeout: 10_000 },
   async () => {
     const dir = repo();
@@ -3568,7 +3745,7 @@ test(
           start + 120_000
         );
         yield* Scope.close(h.scope, Exit.void);
-        yield* TestClock.adjust("239 seconds");
+        yield* TestClock.adjust("3 days");
         assert.equal(sealJson(seal).reportedAt, undefined);
 
         const reloaded = yield* Effect.tryPromise(() =>

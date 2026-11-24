@@ -1,11 +1,6 @@
 {
   "default_scope": "branch",
   "mode": "full",
-  "budget_minutes": {
-    "default": 8,
-    "code-quality": 10,
-    "full": 15
-  },
   "panel": {
     "enabled": true,
     "models": [

@@ -24,7 +24,7 @@ import { optional, str } from "./tool.ts";
 import type { DefineTool } from "./tool.ts";
 
 const show = (label: string, file: string, s: Settings) =>
-  `${label} (${file}): ${describe(s) ? `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\`` : "not set"}`;
+  `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;
 
 const REVIEW_ROLES = new Set([REVIEWER, SCOUT, PANELIST, REFUTER]);
 const MAX_LISTED = 40;
@@ -56,9 +56,10 @@ const make = Effect.gen(function* make() {
   const save = Effect.fn("Directorate.saveSettings")(function* save(
     scope: SettingsScope,
     directory: string,
-    settings: Settings
+    input: Settings,
+    previous?: Settings
   ) {
-    const seats = settings.panel?.models ?? [];
+    const seats = input.panel?.models ?? [];
 
     if (seats.length) {
       const available = yield* models(directory);
@@ -84,12 +85,18 @@ const make = Effect.gen(function* make() {
       }
     }
 
-    const { path, effective } = yield* store.write(scope, directory, settings);
+    const { path, effective, removed, settings } = yield* store.write(
+      scope,
+      directory,
+      input,
+      previous
+    );
 
     return {
       effective: describe(effective) ?? "Directorate defaults",
       path,
-      removed: isUnset(settings),
+      removed,
+      settings,
     };
   });
 
@@ -133,7 +140,7 @@ export const configureTool = (tool: DefineTool) => {
 
         const stored = out.removed
           ? `Removed ${out.path}.`
-          : `Wrote ${out.path} (keys not shown were not recognized and were dropped):\n\`\`\`json\n${JSON.stringify(input.settings, null, 2)}\n\`\`\``;
+          : `Wrote ${out.path}:\n\`\`\`json\n${JSON.stringify(out.settings, null, 2)}\n\`\`\``;
 
         return { content: `${stored}\nEffective settings: ${out.effective}.` };
       }
@@ -232,10 +239,15 @@ export const configureRpc = Effect.fn("Directorate.configureRpc")(
               project: now.project,
             };
           }).pipe(Effect.mapError((e) => c.error("rejected", e.message, {}))),
-        write: ({ scope, settings }, c) =>
-          directorate
-            .save(scope, directory, settings)
-            .pipe(Effect.mapError((e) => c.error("rejected", e.message, {}))),
+        write: ({ previous, scope, settings }, c) =>
+          directorate.save(scope, directory, settings, previous).pipe(
+            Effect.map(({ effective, path, removed }) => ({
+              effective,
+              path,
+              removed,
+            })),
+            Effect.mapError((e) => c.error("rejected", e.message, {}))
+          ),
       })
       .pipe(
         ignore(

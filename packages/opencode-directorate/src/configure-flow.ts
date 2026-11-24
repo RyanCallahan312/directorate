@@ -10,8 +10,10 @@ import {
   DEFAULT_REVIEW_SCOPE,
   LENSES,
   ModeSchema,
+  normalizeSettings,
   PANEL_BUDGET_FACTOR,
   ReviewScopeSchema,
+  sameSettings,
   seatRef,
 } from "./model.ts";
 import type {
@@ -68,6 +70,7 @@ export interface Dialogs {
 export interface Backend {
   settings: () => Promise<SettingsView>;
   write: (input: {
+    readonly previous: Settings;
     readonly scope: SettingsScope;
     readonly settings: Settings;
   }) => Promise<WriteResult>;
@@ -146,58 +149,6 @@ const panelDescription = (base: Settings, draft: Settings): string => {
 
   return draft.panel.enabled ? "on" : "off";
 };
-
-const tidyBudgets = (
-  budgets: Settings["budget_minutes"]
-): Settings["budget_minutes"] => {
-  if (!budgets) {
-    return undefined;
-  }
-
-  const next: NonNullable<Settings["budget_minutes"]> = {
-    ...(budgets["code-quality"] !== undefined && {
-      "code-quality": budgets["code-quality"],
-    }),
-    ...(budgets.default !== undefined && { default: budgets.default }),
-    ...(budgets.full !== undefined && { full: budgets.full }),
-  };
-
-  return Object.keys(next).length ? next : undefined;
-};
-
-const tidyPanel = (panel: Settings["panel"]): Settings["panel"] => {
-  if (!panel) {
-    return undefined;
-  }
-
-  const next: NonNullable<Settings["panel"]> = {
-    ...(panel.enabled !== undefined && { enabled: panel.enabled }),
-    ...(panel.models && panel.models.length > 0 && { models: panel.models }),
-  };
-
-  return Object.keys(next).length ? next : undefined;
-};
-
-const tidyLenses = (lenses: Settings["lenses"]): Settings["lenses"] =>
-  lenses?.disabled === undefined ? undefined : { disabled: lenses.disabled };
-
-/** Drops keys left unset and sections left empty, so they fall through again; a panel needs at least one seat. */
-const tidy = (s: Settings): Settings => {
-  const budgets = tidyBudgets(s.budget_minutes);
-  const panel = tidyPanel(s.panel);
-  const lenses = tidyLenses(s.lenses);
-
-  return {
-    ...(budgets && { budget_minutes: budgets }),
-    ...(s.default_scope && { default_scope: s.default_scope }),
-    ...(lenses && { lenses }),
-    ...(s.mode && { mode: s.mode }),
-    ...(panel && { panel }),
-  };
-};
-
-const same = (a: Settings, b: Settings) =>
-  JSON.stringify(tidy(a)) === JSON.stringify(tidy(b));
 
 const choose = <V>(
   dialog: Dialogs,
@@ -666,8 +617,9 @@ const saveSettings = async (
 ): Promise<boolean> => {
   try {
     const out = await ctx.directorate.write({
+      previous: ctx.now[ctx.scope],
       scope: ctx.scope,
-      settings: tidy(draft),
+      settings: draft,
     });
 
     ctx.dialog.toast({
@@ -710,7 +662,7 @@ const runMenu = async (
   draft: Settings,
   at?: Item
 ): Promise<void> => {
-  const changed = !same(draft, ctx.now[ctx.scope]);
+  const changed = !sameSettings(draft, ctx.now[ctx.scope]);
 
   const item = await ctx.dialog.select<Item>({
     current: at,
@@ -727,14 +679,14 @@ const runMenu = async (
   }
 
   if (item === "save") {
-    if (await saveSettings(ctx, draft)) {
+    if (!changed || (await saveSettings(ctx, draft))) {
       return;
     }
 
     return runMenu(ctx, draft, item);
   }
 
-  const next = tidy(await MENU_ACTIONS[item](ctx, draft));
+  const next = normalizeSettings(await MENU_ACTIONS[item](ctx, draft));
 
   return runMenu(ctx, next, item);
 };

@@ -51,7 +51,17 @@ const make = Effect.gen(function* make() {
   ) {
     const output = yield* exec(
       "git",
-      ["-c", "core.quotepath=off", "-C", repo, ...args],
+      [
+        "-c",
+        "core.quotepath=off",
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "-c",
+        "diff.submodule=short",
+        "-C",
+        repo,
+        ...args,
+      ],
       { env: GIT_ENV(env), timeout: 120_000 }
     ).pipe(
       Effect.catch((error) =>
@@ -146,6 +156,32 @@ const make = Effect.gen(function* make() {
     }
 
     return out;
+  });
+
+  /** Reads the actual first parent: revision traversal treats shallow boundary commits as roots. */
+  const parentOf = Effect.fn("Git.parentOf")(function* parentOf(
+    repo: string,
+    commit: string
+  ) {
+    const [, firstHeader] = (yield* run(repo, [
+      "cat-file",
+      "commit",
+      commit,
+    ])).split("\n", 2);
+
+    if (!firstHeader?.startsWith("parent ")) {
+      return yield* emptyTree(repo);
+    }
+
+    const parent = firstHeader.slice("parent ".length);
+
+    if (!(yield* hasCommit(repo, parent))) {
+      return yield* failure(
+        `Cannot review commit ${commit.slice(0, 10)}: its first parent is not available. Deepen the clone's history and seal again.`
+      );
+    }
+
+    return parent;
   });
 
   const defaultBranch = Effect.fn("Git.defaultBranch")(function* defaultBranch(
@@ -277,9 +313,7 @@ const make = Effect.gen(function* make() {
     /** HEAD, or the empty tree in a repository with no commits yet. */
     head: (repo: string) => commitOrEmpty(repo, "HEAD"),
     isIgnored,
-    /** The commit's parent, or the empty tree for a root commit. */
-    parentOf: (repo: string, commit: string) =>
-      commitOrEmpty(repo, `${commit}^`),
+    parentOf,
     pr,
     revParse,
     root,

@@ -14,7 +14,14 @@ import {
 
 import { failure } from "./error.ts";
 import { Git } from "./git.ts";
-import { DEFAULT_PANEL, isUnset, seatRef, SettingsSchema } from "./model.ts";
+import {
+  DEFAULT_PANEL,
+  isUnset,
+  normalizeSettings,
+  sameSettings,
+  seatRef,
+  SettingsSchema,
+} from "./model.ts";
 import type { Mode, Settings, SettingsScope as Scope } from "./model.ts";
 
 const SettingsJson = Schema.fromJsonString(SettingsSchema, { space: 2 });
@@ -66,7 +73,9 @@ export const resolve = (
 };
 
 /** One line for a model: the effective settings, or nothing when no file sets anything. */
-export const describe = (s: Settings): string | undefined => {
+export const describe = (settings: Settings): string | undefined => {
+  const s = normalizeSettings(settings);
+
   const parts = [
     s.mode && `mode ${s.mode}`,
     s.default_scope && `scope ${s.default_scope}`,
@@ -139,15 +148,18 @@ const make = Effect.gen(function* make() {
   });
 
   const read = Effect.fn("Settings.read")(function* read(at: string) {
-    if (!(yield* fs.exists(at).pipe(Effect.orElseSucceed(() => false)))) {
+    const text = yield* fs.readFileString(at).pipe(
+      Effect.catchReason(
+        "PlatformError",
+        "NotFound",
+        () => Effect.undefined,
+        (_, error) => failure(`Cannot read ${at}: ${error.message}`)
+      )
+    );
+
+    if (text === undefined) {
       return {};
     }
-
-    const text = yield* fs
-      .readFileString(at)
-      .pipe(
-        Effect.catch((error) => failure(`Cannot read ${at}: ${error.message}`))
-      );
 
     return yield* decodeSettings(text, STRICT).pipe(
       Effect.catch((error) =>
@@ -177,13 +189,17 @@ const make = Effect.gen(function* make() {
   const write = Effect.fn("Settings.write")(function* write(
     scope: Scope,
     directory: string,
-    settings: Settings
+    input: Settings,
+    previous?: Settings
   ) {
     const at =
       (yield* file(scope, directory)) ??
       (yield* failure(
         `No project settings here: ${globalFile} is the global file. Write the global scope, or configure from a project.`
       ));
+
+    const settings = normalizeSettings(input);
+    const removed = isUnset(settings);
 
     const other =
       scope === "global" ? yield* file("project", directory) : globalFile;
@@ -198,32 +214,56 @@ const make = Effect.gen(function* make() {
     const fail = (e: { message: string }) =>
       failure(`Cannot write ${at}: ${e.message}`);
 
-    if (isUnset(settings)) {
-      yield* fs.remove(at, { force: true }).pipe(Effect.catch(fail));
-
-      return { effective, path: at };
-    }
-
-    const text = yield* Schema.encodeEffect(SettingsJson)(settings).pipe(
-      Effect.orDie
-    );
-
     yield* fs
       .makeDirectory(path.dirname(at), { recursive: true })
       .pipe(Effect.catch(fail));
-    yield* Effect.scoped(
-      Effect.gen(function* replaceFile() {
-        const tmp = yield* fs.makeTempFileScoped({
-          directory: path.dirname(at),
-          prefix: ".directorate-settings-",
-        });
+    const lock = `${at}.lock`;
+    yield* Effect.acquireUseRelease(
+      fs.makeDirectory(lock).pipe(
+        Effect.catchReason(
+          "PlatformError",
+          "AlreadyExists",
+          () =>
+            failure(
+              `Settings are busy. Retry the save; if all writers have stopped, remove the lock directory at ${lock}.`
+            ),
+          (_, error) => fail(error)
+        )
+      ),
+      () =>
+        Effect.gen(function* replaceFile() {
+          if (previous && !sameSettings(previous, yield* read(at))) {
+            return yield* failure(
+              `Settings at ${at} changed since this dialog opened. Reopen /directorate-configure and reapply your changes.`
+            );
+          }
 
-        yield* fs.writeFileString(tmp, `${text}\n`);
-        yield* fs.rename(tmp, at);
-      })
-    ).pipe(Effect.catch(fail));
+          if (removed) {
+            return yield* fs
+              .remove(at, { force: true })
+              .pipe(Effect.catch(fail));
+          }
 
-    return { effective, path: at };
+          const text = yield* Schema.encodeEffect(SettingsJson)(settings).pipe(
+            Effect.orDie
+          );
+
+          yield* Effect.scoped(
+            Effect.gen(function* atomicWrite() {
+              const tmp = yield* fs.makeTempFileScoped({
+                directory: path.dirname(at),
+                prefix: ".directorate-settings-",
+              });
+
+              yield* fs.writeFileString(tmp, `${text}\n`);
+              yield* fs.rename(tmp, at);
+            })
+          ).pipe(Effect.catch(fail));
+        }),
+      () => fs.remove(lock, { recursive: true }).pipe(Effect.orDie)
+    );
+
+    return { effective, path: at, removed, settings };
   });
 
   return { file, load, write };

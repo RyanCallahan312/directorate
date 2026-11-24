@@ -671,7 +671,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
             yield* once(
               "panel",
               missing.map((s) => `${s.model}:${s.runs.length}`),
-              `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. Continue a partial seat in its existing session or launch a new directorate_seat without a model (The Directorate assigns it); leave a seat that failed twice. Calling directorate_report again files a partial review.`
+              `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. ${phase === "drain" ? "Seats can no longer be launched or continued during drain." : "Continue a partial seat in its existing session or launch a new directorate_seat without a model (The Directorate assigns it); leave a seat that failed twice."} Calling directorate_report again files a partial review.`
             );
             const running = childOutstanding(seal);
             yield* once(
@@ -1159,10 +1159,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
       now >= DateTime.toEpochMillis(seal.deadline) + GRACE_MS;
 
     if (myRepo) {
-      for (const seal of yield* store.list({
-        maxAgeMs: 2 * 86_400_000,
-        repo: myRepo,
-      })) {
+      for (const seal of yield* store.list({ repo: myRepo })) {
         if (overdue(seal)) {
           ids.add(seal.id);
         }
