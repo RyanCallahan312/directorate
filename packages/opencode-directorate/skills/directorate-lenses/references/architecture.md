@@ -2,7 +2,7 @@
 
 Ask: does each responsibility sit at the boundary that owns it, and does the whole solution fit the goal, or do local fixes hide a shared cause?
 
-Scope: ownership of data, state, policy, and lifecycles across modules, services, and entry points. The lead owns the overall approach (the report's Approach line); this lens answers scout-sized structural questions. It runs in `full`, and in `code-quality` when the change is structural: it moves ownership, changes dependency direction, adds a public boundary, or adds a lifecycle (a worker, a cache, a connection, a scope). A structural flaw that already causes wrong behavior is a defect in any mode.
+Scope: ownership of data, state, policy, and lifecycles across modules, services, and entry points. The lead owns the overall approach (the report's Approach line); this lens answers Auditor-sized structural questions. It runs in `full`, and in `code-quality` when the change is structural: it moves ownership, changes dependency direction, adds a public boundary, or adds a lifecycle (a worker, a cache, a connection, a scope). A structural flaw that already causes wrong behavior is a defect in any mode.
 
 ## Where defects hide
 

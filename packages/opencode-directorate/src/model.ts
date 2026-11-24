@@ -52,7 +52,7 @@ const orLegacyTrue = <S extends Schema.Top>(schema: S, value: S["Encoded"]) =>
 const Time = Schema.DateTimeUtcFromString;
 
 export const Mode = Schema.Literals(["default", "code-quality", "full"]);
-/** The review lenses: one playbook each under the directorate_lenses skill's references/. */
+/** The review lenses: one playbook each under the directorate-lenses skill's references/. */
 export const LENSES = [
   "correctness",
   "security",
@@ -217,7 +217,7 @@ const Child = Schema.Struct({
   prompt: Schema.String,
   /** The subagent call's description, which OpenCode uses as the child session's title. */
   description: opt(Schema.String),
-  /** The model the launch named, which for a panelist is its seat. */
+  /** The model the launch named, which for a Directorate Seat is its seat. */
   model: opt(Schema.String),
   session: opt(Schema.String),
   status: ChildStatus,
@@ -264,7 +264,7 @@ const Seal = Schema.Struct({
   staleFiles: opt(list(Schema.String)),
   freshnessUnverified: opt(Schema.String),
   question: opt(Schema.String),
-  /** A panel review's seats: one model per panelist. */
+  /** A panel review's Directorate Seats: one model per Seat. */
   panel: opt(list(Schema.String)),
   /** Lenses the settings turned off for this review. */
   lensesOff: opt(list(Schema.String)),
@@ -374,7 +374,7 @@ export const LineRef = Schema.String.pipe(
   )
 );
 export const isUrl = (ref: string) => /^https?:\/\//.test(ref.trim());
-/** A model as the subagent tool takes it; whether it is available is checked when the panelist launches. */
+/** A model as the subagent tool takes it; whether it is available is checked when the Directorate Seat launches. */
 export const ModelRef = Schema.String.check(
   Schema.makeFilter(
     (m: string) =>

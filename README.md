@@ -16,7 +16,7 @@ bun run format      # apply formatting and safe lint fixes
 
 ## Dogfood in OpenCode
 
-After `bun run build`, launch `opencode` from the workspace root. The project config loads the local plugin. To run reviews, follow the [package setup](packages/opencode-directorate/README.md#install-from-a-checkout) to link its agents and skill. Try: “Use The Directorate to review my local changes in default mode with one model.” Use `/directorate-configure` to change settings for this project.
+After `bun run build`, launch `opencode` from the workspace root. The project config loads the local plugin, which registers its bundled agents and skill. Try: “Use The Directorate to review my local changes in default mode with one model.” Use `/directorate-configure` to change settings for this project.
 
 Add workspace packages under `packages/`. TypeScript packages can extend `tsconfig.base.json`.
 

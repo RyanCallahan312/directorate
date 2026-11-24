@@ -1,6 +1,6 @@
 # Triage: from the change to the questions that matter
 
-For directorate_liaison, and for directorate_seat (which answers its questions itself instead of sending scouts). Triage turns the sealed change into the few falsifiable questions that could change the verdict, and picks the lens that answers each. A holistic review covers every seam the change touches; it does not run every lens.
+For directorate_liaison, and for directorate_seat (which answers its questions itself instead of sending Auditors). Triage turns the sealed change into the few falsifiable questions that could change the verdict, and picks the lens that answers each. A holistic review covers every seam the change touches; it does not run every lens.
 
 ## 1. Map the change
 
@@ -49,14 +49,14 @@ Check these yourself or send a question for them; no single lens owns them:
 
 ## 4. Choosing what to send
 
-- Trace yourself first: the main path, one failure path, and the rollout seam. Send a scout only for a question you cannot settle in a few reads and whose answer could change the verdict.
-- One question and one lens per scout. Make it answerable with yes or no, and name the suspected guard or sink at `path:line`.
+- Trace yourself first: the main path, one failure path, and the rollout seam. Send an Auditor only for a question you cannot settle in a few reads and whose answer could change the verdict.
+- One question and one lens per Auditor. Make it answerable with yes or no, and name the suspected guard or sink at `path:line`.
   - Good: "Can a non-owner reach `updateInvoice` through `POST /invoices/batch` without the owner check at `invoices.ts:88`?"
   - Bad: "Check the security of the invoice changes."
-- Typical counts: default, 0 to 2 scouts. In code-quality, add a quality question when the change adds machinery. In full, add architecture, ops, docs, and ux questions where the change touches them.
+- Typical counts: default, 0 to 2 Auditors. In code-quality, add a quality question when the change adds machinery. In full, add architecture, ops, docs, and ux questions where the change touches them.
 - A lens you did not choose is not a gap. A seam you did not check is: if it could change the verdict and you cannot check it, record a `directorate_note` kind `limit`.
-- When a scout's handoff names an adjacent question, send another scout only if its answer could change the verdict; otherwise note it.
+- When an Auditor's handoff names an adjacent question, send another Auditor only if its answer could change the verdict; otherwise note it.
 
 ## 5. Deciding minor entries yourself
 
-Before you confirm a minor scout entry, read the entry's lens file and check its "Not a finding" list and calibration. Retrace the trigger, path, and consequence on the sealed code. Two scouts agreeing is not proof.
+Before you confirm a minor Auditor or Seat entry, read the entry's lens file and check its "Not a finding" list and calibration. Retrace the trigger, path, and consequence on the sealed code. Two Auditors or Seats agreeing is not proof.

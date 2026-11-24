@@ -51,14 +51,7 @@ Add the absolute path in `$package` to the `plugins` array in `~/.config/opencod
 }
 ```
 
-OpenCode loads the plugin code but does not automatically discover its bundled Markdown. Link the agents and skill into OpenCode's global discovery directories (skip any links already managed by your dotfiles):
-
-```sh
-config="$HOME/.config/opencode"
-mkdir -p "$config/agents" "$config/skills"
-ln -s "$package"/agents/directorate_*.md "$config/agents/"
-ln -s "$package/skills/directorate_lenses" "$config/skills/directorate_lenses"
-```
+The plugin registers its four agents and the `directorate-lenses` skill when it loads. No separate installation is required. If you previously linked the bundled files into OpenCode's config directory, remove those links to let the plugin supply the definitions; existing definitions with the same IDs take precedence.
 
 `directorate.example.json` is optional. Copy it as `directorate.json` into the global config directory only if you want those defaults and don't already have a settings file. Keep the live file separate: `/directorate-configure` replaces it on save.
 

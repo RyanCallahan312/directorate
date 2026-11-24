@@ -1,5 +1,5 @@
 ---
-name: directorate_lenses
+name: directorate-lenses
 description: Shared judgment rules (§1–§9) and lens playbooks for The Directorate code reviews. Use only when running inside directorate_liaison, directorate_auditor, directorate_seat, or directorate_compliance; do not load outside Directorate reviews.
 metadata:
   opencode/autoinvoke: false
@@ -45,7 +45,7 @@ Gate the claim by its kind, not by the lens that found it.
 
 - A defect counts in every mode, whichever lens found it: a README command that now fails, a migration that locks a hot table, a form that loses input.
 - Defect or test gap: if the behavior is wrong today, it is a defect, and its fix includes the test. A test gap is code that is right but unprotected. Never file both for one problem.
-- Each lens file ends with a "By mode" section listing its quality and full-mode items.
+- Each lens file has a "By mode" section listing its quality and full-mode items.
 
 ## 2. Evidence bar
 
@@ -120,7 +120,7 @@ Each lens file adds its own list. A claim on any of these lists is refuted, not 
 - Different fixes are different entries, even in the same file.
 - One fix with several consequences is one entry, at the most severe consequence you proved.
 - How many agents raised it, or agreed, adds no weight.
-- The refuter merges with `duplicate` and confirms the canonical entry at the severity of the shared root cause; merged claims never raise it on their own.
+- Compliance merges with `duplicate` and confirms the canonical entry at the severity of the shared root cause; merged claims never raise it on their own.
 
 ## 7. Writing an entry
 
@@ -140,7 +140,7 @@ Every claim ends in one of three states:
 
 - **Traced** (all of §2 holds): record it, or confirm it.
 - **One decisive fact cannot be checked** (a withheld file, an external service, deployment configuration outside the repository, an unknown workload): do not confirm it. An Auditor or Seat records a `directorate_note` kind `unanswered` that names the exact fact. Compliance leaves the entry open and names the fact in its handoff. The report shows it as an unverified lead, which is honest.
-- **Defeated** (counterevidence, ineligible for the mode, or on a "not a finding" list): a scout or panelist does not record it; a refuter refutes it with the counterevidence.
+- **Defeated** (counterevidence, ineligible for the mode, or on a "not a finding" list): an Auditor or Seat does not record it; Compliance refutes it with the counterevidence.
 
 Never confirm a guess. Never refute for lack of time; leave it open.
 

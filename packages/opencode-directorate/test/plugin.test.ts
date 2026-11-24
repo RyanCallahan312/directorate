@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, test } from "node:test";
 
+import { Agent, Skill } from "@opencode/plugin/effect";
 import { Session } from "@opencode/schema/session";
 import {
   Cause,
@@ -24,6 +25,7 @@ import {
   Schema,
   Scope,
   Stream,
+  type Types,
 } from "effect";
 import { TestClock } from "effect/testing";
 
@@ -129,7 +131,8 @@ async function harness(
   ids?: string,
   run = Effect.runPromise,
   deny: (request: { action: string; resources: string[] }) => boolean = () =>
-    false
+    false,
+  existing?: { agent: Types.DeepMutable<Agent.Info>; skill: Skill.Info }
 ) {
   const tag = ids ?? `h${++uid}`;
   const S = (name: string) => `ses_${name}-${tag}`;
@@ -142,10 +145,45 @@ async function harness(
   const notified = Deferred.makeUnsafe<string>();
   const rpcs = new Map<string, any>();
   const commands = new Map<string, CommandDefinition>();
+  const agents = new Map<string, Types.DeepMutable<Agent.Info>>();
+  const skills = new Map<string, Skill.Info>();
+  if (existing) {
+    agents.set(existing.agent.id, structuredClone(existing.agent));
+    skills.set(existing.skill.id, structuredClone(existing.skill));
+  }
   const prompts: SubmittedPrompt[] = [];
   const bus = eventBus();
 
   const ctx = {
+    agent: {
+      transform: (register: Parameters<HostContext["agent"]["transform"]>[0]) =>
+        Effect.sync(() =>
+          register({
+            list: () => [...agents.values()],
+            get: (id) => agents.get(id),
+            default: () => {},
+            remove: () => {},
+            update: (id, update) => {
+              const agent =
+                agents.get(id) ?? Agent.Info.default(Agent.ID.make(id));
+              update(agent);
+              agents.set(id, agent);
+            },
+          })
+        ),
+    },
+    skill: {
+      transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
+        Effect.sync(() =>
+          register({
+            list: () => [...skills.values()],
+            get: (id) => skills.get(id),
+            update: () => {},
+            remove: () => {},
+            add: (skill) => void skills.set(skill.id, skill),
+          })
+        ),
+    },
     command: {
       transform: (register: (editor: CommandEditor) => void) =>
         Effect.sync(() => {
@@ -368,6 +406,8 @@ async function harness(
   };
   return {
     S,
+    agents,
+    skills,
     tools,
     hooks,
     call,
@@ -460,6 +500,62 @@ test("registers fifteen tools, four hooks, and the settings RPC; tools assert pe
   assert.deepEqual(asserted, ["directorate_liaison:directorate_seal"]);
 });
 
+test("the plugin registers bundled review agents and skill without discovery files", async () => {
+  const { agents, skills } = await harness(repo());
+  assert.deepEqual(
+    [...agents.values()].map(({ id, mode, hidden }) => [id, mode, hidden]),
+    [
+      ["directorate_liaison", "all", false],
+      ["directorate_auditor", "subagent", true],
+      ["directorate_seat", "subagent", true],
+      ["directorate_compliance", "subagent", true],
+    ]
+  );
+  for (const agent of agents.values()) {
+    assert.ok(agent.system?.startsWith("# "));
+  }
+  const skill = skills.get("directorate-lenses");
+  assert.ok(skill);
+  assert.equal(skill.autoinvoke, false);
+  assert.match(skill.content, /^# Directorate lenses/);
+  assert.ok(statSync(join(skill.path, "../references/triage.md")).isFile());
+});
+
+test("bundled registration preserves existing agent and skill overrides", async () => {
+  const dir = repo();
+  const agent: Types.DeepMutable<Agent.Info> = {
+    ...Agent.Info.default(Agent.ID.make("directorate_liaison")),
+    system: "Custom review instructions",
+  };
+  const skill = Skill.Info.make({
+    autoinvoke: true,
+    content: "Custom lens instructions",
+    id: Skill.ID.make("directorate-lenses"),
+    name: Skill.Name.make("Custom lenses"),
+    path: Skill.Info.fields.path.make(join(dir, "SKILL.md")),
+  });
+
+  const { agents, skills } = await harness(
+    dir,
+    undefined,
+    undefined,
+    undefined,
+    {
+      agent,
+      skill,
+    }
+  );
+
+  assert.deepEqual(agents.get(agent.id), agent);
+  assert.deepEqual(skills.get(skill.id), skill);
+  assert.deepEqual([...agents.keys()].sort(), [
+    "directorate_auditor",
+    "directorate_compliance",
+    "directorate_liaison",
+    "directorate_seat",
+  ]);
+});
+
 test("/directorate-review submits a question-first prompt in the current session", async () => {
   const { commands, prompts, S } = await harness(repo());
   const review = commands.get("directorate-review");
@@ -485,42 +581,54 @@ test("/directorate-review submits a question-first prompt in the current session
   );
 });
 
-test("worker tool limits are the agents' permission rules, which OpenCode applies by removing denied tools", () => {
+test("registered agents receive their role-specific tool permissions", async () => {
+  const { agents } = await harness(repo());
   const allowed = (agent: string) => {
-    const md = readFileSync(
-      new URL(`../agents/${agent}.md`, import.meta.url),
-      "utf8"
-    );
-    const rules = [
-      ...md.matchAll(
-        /\{\s*action: "?([\w*]+)"?,\s*resource: "?([^",}]+)"?,\s*effect: (\w+),?\s*\}/gu
-      ),
-    ].map((m) => m.slice(1));
+    const rules = agents.get(agent)?.permissions;
+    assert.ok(rules, `${agent} is registered`);
     assert.deepEqual(
       rules[0],
-      ["*", "*", "deny"],
+      { action: "*", effect: "deny", resource: "*" },
       `${agent} denies everything first`
     );
+    assert.ok(
+      rules.some(
+        ({ action, effect, resource }) =>
+          action === "skill" &&
+          effect === "allow" &&
+          resource === "directorate-lenses"
+      ),
+      `${agent} can load the lens skill`
+    );
     // Direct file access reaches only the lens references; code is read through the sealed directorate_* tools.
-    for (const [action, resource, effect] of rules)
+    for (const { action, resource, effect } of rules) {
       if (
         effect === "allow" &&
         (action === "read" || action === "external_directory")
       ) {
         assert.ok(
-          resource === "~/.config/opencode/skills/directorate_lenses/*" ||
-            (action === "read" &&
-              resource ===
-                ".opencode/skills/directorate_lenses/references/*.md"),
+          (action === "read" &&
+            resource === "*/skills/directorate-lenses/references/*.md") ||
+            (action === "external_directory" &&
+              resource === "*/skills/directorate-lenses/*"),
           `${agent}: ${action} is limited to the lens skill`
         );
       }
+    }
+    for (const action of ["webfetch", "websearch"]) {
+      assert.deepEqual(
+        rules.findLast((rule) => rule.action === action),
+        { action, effect: "allow", resource: "*" },
+        `${agent}: ${action} is available without per-action approval`
+      );
+    }
+    assert.ok(rules.every((rule) => rule.effect !== "ask"));
     return rules
       .filter(
-        ([action, , effect]) =>
+        ({ action, effect }) =>
           action.startsWith("directorate_") && effect === "allow"
       )
-      .map(([action]) => action)
+      .map(({ action }) => action)
       .sort();
   };
   const read = [
@@ -533,7 +641,11 @@ test("worker tool limits are the agents' permission rules, which OpenCode applie
   ];
   assert.deepEqual(
     allowed("directorate_auditor"),
-    [...read, "directorate_ledger_add", "directorate_note"].sort()
+    [
+      ...read.filter((t) => t !== "directorate_ledger_list"),
+      "directorate_ledger_add",
+      "directorate_note",
+    ].sort()
   );
   assert.deepEqual(
     allowed("directorate_compliance"),
@@ -548,7 +660,7 @@ test("worker tool limits are the agents' permission rules, which OpenCode applie
       "directorate_note",
     ].sort()
   );
-  allowed("directorate_liaison");
+  assert.deepEqual(allowed("directorate_liaison"), ["directorate_*"]);
 });
 
 test("ownership: only the sealing session may cover, refresh, or report", async () => {

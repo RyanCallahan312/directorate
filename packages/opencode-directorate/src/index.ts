@@ -17,6 +17,7 @@ import {
 } from "effect";
 
 import { budget, budgetNotice } from "./budget.ts";
+import { registerBundled } from "./bundled.ts";
 import {
   childName,
   childOutstanding,
@@ -148,6 +149,7 @@ const register = Effect.fn("Directorate.register")(function* () {
     );
   });
 
+  yield* registerBundled();
   yield* configureRpc();
   yield* host.command.transform((editor) => {
     editor.add({
