@@ -154,7 +154,7 @@ export function ledgerTools(tool: DefineTool) {
   tool({
     name: "directorate_ledger_verdict",
     description:
-      "Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), or duplicate (of an open or confirmed entry). directorate_liaison decides only minor entries raised by others and may withdraw its own open entries; directorate_compliance decides everything else and may re-decide. Refuting an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.",
+      "Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), duplicate (of an open or confirmed entry), or, in a re-check, resolved (a finding carried from the earlier review no longer holds; evidence = the lines that fix it). directorate_liaison decides only minor entries raised by others and may withdraw its own open entries; directorate_compliance decides everything else, including every carried verified finding, and may re-decide. Refuting or resolving an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.",
     input: Schema.Struct({
       seal: str,
       id: str,
@@ -295,15 +295,20 @@ export function ledgerTools(tool: DefineTool) {
           (!input.status || e.status === input.status) &&
           (!input.ids?.length || input.ids.includes(e.id))
       );
+      /** A re-check's carried entry: what it was in the earlier review. */
+      const carried = (e: Entry) =>
+        e.carried
+          ? ` · carried: ${e.carried.status} as ${e.carried.id} in ${seal.recheckOf}`
+          : "";
       const rows = input.brief
         ? pick.map(
             (e) =>
-              `- ${e.id} [${e.status}] ${currentSeverity(e)} · ${e.title} — ${e.anchor.path}:${e.anchor.line} · by ${actorName(seal, e.raisedBy)}`
+              `- ${e.id} [${e.status}] ${currentSeverity(e)} · ${e.title} — ${e.anchor.path}:${e.anchor.line} · by ${actorName(seal, e.raisedBy)}${carried(e)}`
           )
         : pick.map((e) =>
             [
               `### ${e.id} [${e.status}] ${currentSeverity(e)} ${e.kind} · ${e.lens} · ${e.title}`,
-              `anchor: ${e.anchor.path}:${e.anchor.line}${e.anchor.endLine !== e.anchor.line ? `-${e.anchor.endLine}` : ""} (${e.anchor.side} side) · raised by ${actorName(seal, e.raisedBy)}${e.staleReason ? `\nSTALE: ${e.staleReason}` : ""}`,
+              `anchor: ${e.anchor.path}:${e.anchor.line}${e.anchor.endLine !== e.anchor.line ? `-${e.anchor.endLine}` : ""} (${e.anchor.side} side) · raised by ${actorName(seal, e.raisedBy)}${carried(e)}${e.staleReason ? `\nSTALE: ${e.staleReason}` : ""}`,
               `quote:\n\`\`\`\n${e.quote}\n\`\`\``,
               `trigger: ${e.trigger}`,
               `consequence: ${e.consequence}`,

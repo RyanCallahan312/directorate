@@ -12,12 +12,13 @@ import {
 import { Hex } from "effect/encoding";
 
 import { depsOf } from "./content.ts";
+import { isRead } from "./coverage.ts";
 import { assemble, buildRegions, type Piece, RawDiff, shown } from "./diff.ts";
 import { failure, ReviewError } from "./error.ts";
 import { exclusionReason, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
-import { reopen } from "./ledger.ts";
+import { reopen, unresolved } from "./ledger.ts";
 import {
   type Actor,
   DEFAULT_BUDGET,
@@ -621,3 +622,152 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(function* (
     reopened,
   };
 });
+
+/** A re-check's budget when the caller names none: half its mode's default, at least RECHECK_MIN_MINUTES. */
+const RECHECK_MIN_MINUTES = 10;
+
+/** Only a reported review can be re-checked; an unreported one is resumed. */
+export const recheckable = (prior: Seal) =>
+  prior.reportedAt
+    ? Effect.void
+    : failure(
+        `${prior.id} has not been reported. Resume it with resume: "${prior.id}" instead of re-checking it.`
+      );
+
+/**
+ * A new review of a reported seal's target as it stands now, while the reported Directive is left as it was. The base is
+ * kept, so committing fixes is not a new change. Regions read in the earlier review whose content did not change keep
+ * their receipts; skimmed and skipped ones are read again. Its verified findings and unverified leads carry over as new
+ * entries: open again where the code they rest on changed (or always, for leads), still confirmed where it did not. A
+ * re-check runs without a panel: it is a targeted pass, not a second independent review.
+ */
+export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
+  function* (input: {
+    prior: Seal;
+    ledger: Ledger;
+    owner?: Actor;
+    budgetMinutes?: number | undefined;
+    question?: string | undefined;
+    beforeCapture?: () => Effect.Effect<void>;
+  }) {
+    const { prior } = input;
+    yield* recheckable(prior);
+    const store = yield* Store;
+    const createdAt = yield* DateTime.now;
+    const id = yield* sealId(createdAt);
+    const budgetMinutes =
+      input.budgetMinutes ??
+      Math.max(RECHECK_MIN_MINUTES, Math.round(DEFAULT_BUDGET[prior.mode] / 2));
+    return yield* store.create(
+      id,
+      Effect.gen(function* () {
+        // A worktree seal keeps its ends, so only commit pairs re-resolve.
+        const cur: Pick<Current, "baseSha" | "headSha" | "baseTip"> =
+          prior.postImage === "worktree"
+            ? { baseSha: prior.baseSha, headSha: prior.headSha }
+            : yield* currentFingerprint(prior).pipe(
+                Effect.mapError(
+                  (e) =>
+                    new ReviewError({
+                      message: `Cannot re-resolve ${prior.id}'s target: ${e.message}`,
+                    })
+                ),
+                Effect.flatMap((c) =>
+                  c.unfetched
+                    ? failure(
+                        `${c.unfetched}. Ask the user to fetch it, then re-check again.`
+                      )
+                    : Effect.succeed(c)
+                )
+              );
+        const captured = yield* capture(
+          {
+            id,
+            repo: prior.repo,
+            owner: input.owner?.agent ?? REVIEWER,
+            ownerSession: input.owner?.session ?? "",
+            mode: prior.mode,
+            target: prior.target,
+            description: describedAt(prior, cur),
+            baseSha: cur.baseSha,
+            headSha: cur.headSha,
+            baseTip: cur.baseTip ?? prior.baseTip,
+            postImage: prior.postImage,
+            fingerprint: "",
+            gen: 0,
+            createdAt,
+            deadline: DateTime.add(createdAt, { minutes: budgetMinutes }),
+            budgetMinutes,
+            refreshes: 0,
+            files: [],
+            regions: [],
+            deleted: [],
+            children: [],
+            gates: {},
+            question: input.question ?? prior.question,
+            lensesOff: prior.lensesOff,
+            recheckOf: prior.id,
+          },
+          scopeOf(prior.target.paths),
+          input.beforeCapture
+        );
+        const changed = new Set(yield* changedBetween(prior, captured));
+        const seal: Seal = {
+          ...captured,
+          regions: carryRegions(prior.regions, captured.regions, isRead),
+        };
+        const moved = movedUnder(prior, captured, changed);
+        const open = new Set(unresolved(input.ledger));
+        const reopened: string[] = [];
+        const kept: string[] = [];
+        // What the earlier review left behind: verified findings, and entries filed but never cleared.
+        const entries = input.ledger.entries.flatMap((e): Entry[] => {
+          const status =
+            e.status === "confirmed"
+              ? ("confirmed" as const)
+              : open.has(e)
+                ? ("unverified" as const)
+                : undefined;
+          if (!status) return [];
+          const carried: Entry = {
+            ...e,
+            id: `F${reopened.length + kept.length + 1}`,
+            carried: { id: e.id, status },
+          };
+          const why = moved(e);
+          if (status === "confirmed" && !why) {
+            kept.push(carried.id);
+            return [carried];
+          }
+          reopened.push(carried.id);
+          return [
+            reopen(
+              carried,
+              status === "unverified"
+                ? `unverified in ${prior.id}; decide it on the current code`
+                : why?.gone
+                  ? `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`
+                  : `code it rests on changed since ${prior.id} (${why?.files}); decide whether it is still present (re-anchor) or resolved`
+            ),
+          ];
+        });
+        const ledger: Ledger = { entries, notes: [] };
+        yield* store.saveBoth(seal, ledger);
+        return {
+          seal,
+          ledger,
+          files: [...changed],
+          reopened,
+          kept,
+          unanswered: input.ledger.notes
+            .filter((n) => n.kind === "unanswered")
+            .map((n) => n.text),
+        };
+      }).pipe(
+        settled(
+          "Files kept changing while sealing (3 attempts). Wait until edits stop, then seal again."
+        )
+      )
+    );
+  }
+);

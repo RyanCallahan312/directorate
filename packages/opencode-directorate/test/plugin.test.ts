@@ -731,6 +731,49 @@ test("/directorate-review forwards free-form requests and only offers setup ques
     /Use --scope branch/u
   );
   assert.equal(prompts.length, count);
+
+  await Effect.runPromise(
+    review.execute({
+      delivery: "queue",
+      prompt: {
+        text: "--recheck directorate-20260101000000-abcdef focus on the lock",
+      },
+      sessionID,
+    })
+  );
+  const recheck = prompts.at(-1)?.text ?? "";
+  assert.ok(
+    recheck.startsWith(
+      "focus on the lock\n\nRe-check `directorate-20260101000000-abcdef` after fixes"
+    )
+  );
+  assert.match(recheck, /send that session a follow-up/u);
+  assert.match(recheck, /pass recheck: "directorate-20260101000000-abcdef"/u);
+  await Effect.runPromise(
+    review.execute({
+      delivery: "queue",
+      prompt: { text: "--recheck" },
+      sessionID,
+    })
+  );
+  assert.match(
+    prompts.at(-1)?.text ?? "",
+    /^Re-check the latest Directive after fixes\./u
+  );
+  assert.match(
+    prompts.at(-1)?.text ?? "",
+    /latest reported seal with directorate_ledger_list/u
+  );
+  await assert.rejects(
+    Effect.runPromise(
+      review.execute({
+        delivery: "queue",
+        prompt: { text: "--recheck=oops" },
+        sessionID,
+      })
+    ),
+    /Use --recheck alone/u
+  );
 });
 
 test("a whole-file directory target includes unchanged files but excludes files outside it", async () => {
@@ -3086,4 +3129,132 @@ test("directorate_diff stays inside OpenCode's output cut (50 KiB, 2,000 lines),
     s.regions.length
   );
   assert.ok(calls > 10, `paged in ${calls} calls`);
+});
+
+test("re-check: the same Liaison session re-seals a reported review, Compliance resolves the fixed finding, and the Directive compares", async () => {
+  const dir = repo();
+  const { call, sealOf } = await harness(dir);
+  const first = sealOf(
+    (await call("directorate_seal", { target: { kind: "local" } })).content
+  )!;
+  await call("directorate_diff", { seal: first });
+  await call(
+    "directorate_ledger_add",
+    add(first),
+    "directorate_auditor",
+    "scout"
+  );
+  await call(
+    "directorate_ledger_verdict",
+    {
+      seal: first,
+      id: "F1",
+      verdict: "confirmed",
+      rationale: "r",
+      evidence: ["src/a.ts:2"],
+    },
+    "directorate_compliance",
+    "ref"
+  );
+  const before = (await call("directorate_report", { seal: first })).content;
+  assert.match(before, /Division by zero/);
+
+  writeFileSync(
+    join(dir, "src/a.ts"),
+    "export const a = 2\nexport const div = (x: number, y: number) => (y ? x / y : 0)\n"
+  );
+  await assert.rejects(
+    call("directorate_seal", { recheck: first, mode: "full" }),
+    /reuses the earlier review's target and mode/
+  );
+  await assert.rejects(
+    call("directorate_seal", { resume: first }),
+    /pass recheck: "directorate-/
+  );
+  const sealed = (await call("directorate_seal", { recheck: first })).content;
+  assert.match(
+    sealed,
+    new RegExp(
+      `Containment sealed \`directorate-[^\`]+\`, a re-check of \`${first}\``
+    )
+  );
+  assert.match(sealed, /Changed since the earlier review: src\/a\.ts/);
+  assert.match(
+    sealed,
+    /Reopened for re-decision[^\n]*\n- F1 \(important, F1 in the earlier review\) Division by zero/
+  );
+  const seal = sealOf(sealed)!;
+  assert.notEqual(seal, first);
+  assert.equal(sealJson(seal).recheckOf, first);
+  assert.match(
+    (await call("directorate_ledger_list", { seal, brief: true })).content,
+    new RegExp(`F1 \\[open\\].* · carried: confirmed as F1 in ${first}`)
+  );
+  assert.ok(
+    sealJson(seal).regions.some(
+      (r: any) => r.file === "src/b.ts" && r.ownerRead
+    ),
+    "src/b.ts did not change, so it is not read again"
+  );
+
+  await assert.rejects(
+    call("directorate_ledger_verdict", {
+      seal,
+      id: "F1",
+      verdict: "resolved",
+      rationale: "guarded",
+      evidence: ["src/a.ts:2"],
+    }),
+    /route it to directorate_compliance/
+  );
+  await call("directorate_diff", { seal });
+  await call(
+    "directorate_ledger_verdict",
+    {
+      seal,
+      id: "F1",
+      verdict: "resolved",
+      rationale: "y is checked before dividing",
+      evidence: ["src/a.ts:2"],
+    },
+    "directorate_compliance",
+    "ref2"
+  );
+  const md = (await call("directorate_report", { seal })).content;
+  assert.match(
+    md,
+    /<Approved\/Tolerated> — Prior Findings Resolved\*\* · status: \*\*complete\*\*/
+  );
+  assert.match(md, new RegExp(`re-check of \`${first}\``));
+  assert.match(
+    md,
+    /### Resolved Since `directorate-[^`]+`\n- Division by zero — was `src\/a\.ts:2` \(important, F1\); resolved by/
+  );
+  assert.equal(
+    (await call("directorate_report", { seal: first })).content,
+    before,
+    "the earlier Directive is unchanged"
+  );
+
+  // A bad re-check target fails before abandon files the session's active review.
+  const active = sealOf(
+    (
+      await call(
+        "directorate_seal",
+        { target: { kind: "local" } },
+        "directorate_liaison",
+        "lead9"
+      )
+    ).content
+  )!;
+  await assert.rejects(
+    call(
+      "directorate_seal",
+      { recheck: active, abandon: true },
+      "directorate_liaison",
+      "lead9"
+    ),
+    /has not been reported/
+  );
+  assert.equal(sealJson(active).reportedAt, undefined);
 });

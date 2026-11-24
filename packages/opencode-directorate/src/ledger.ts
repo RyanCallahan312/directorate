@@ -53,16 +53,23 @@ export function verdictError(
 ): string | undefined {
   if (by.agent !== REVIEWER && by.agent !== REFUTER)
     return `Only ${REVIEWER} or ${REFUTER} may record verdicts (you are ${by.agent}).`;
+  if (input.verdict === "resolved" && !entry.carried)
+    return `${entry.id} is new in this review; resolved applies only to findings carried from the review this one re-checks. Refute it instead if it does not hold.`;
+  // A verified finding was confirmed by Compliance (or within its rules); only Compliance may overturn or re-confirm it.
+  if (entry.carried?.status === "confirmed" && by.agent !== REFUTER)
+    return `${entry.id} carries a verified finding from the earlier review; route it to ${REFUTER} to decide whether it is still present, resolved, or was wrong.`;
+  // Resolving claims the fix works, which needs the same independence as confirming.
+  const affirms = input.verdict === "confirmed" || input.verdict === "resolved";
   const own = by.session === entry.raisedBy.session;
-  if (own && input.verdict === "confirmed")
-    return `${entry.id} was raised in this session. A different session must confirm it: ${REFUTER} for the Liaison's own entries.`;
+  if (own && affirms)
+    return `${entry.id} was raised in this session. A different session must ${input.verdict === "resolved" ? "resolve" : "confirm"} it: ${REFUTER} for the Liaison's own entries.`;
   if (own && entry.status !== "open")
     return `${entry.id} is ${entry.status}; you can only withdraw your own open entries.`;
   if (by.agent === REVIEWER && !own) {
     if (entry.status !== "open")
       return `${entry.id} is ${entry.status}. Only ${REFUTER} may re-decide a decided entry.`;
-    if (entry.raisedBy.agent === REVIEWER && input.verdict === "confirmed")
-      return `${entry.id} was raised by ${REVIEWER}; only ${REFUTER} may confirm it.`;
+    if (entry.raisedBy.agent === REVIEWER && affirms)
+      return `${entry.id} was raised by ${REVIEWER}; only ${REFUTER} may ${input.verdict === "resolved" ? "resolve" : "confirm"} it.`;
     const sev = currentSeverity(entry);
     if (sev !== "minor")
       return `${entry.id} is ${sev}. Any verdict on a blocking or important entry needs ${REFUTER}; route it there with your evidence.`;
@@ -76,7 +83,9 @@ export function verdictError(
   if (!input.evidence.length)
     return input.verdict === "refuted"
       ? "refuted needs counterevidence (path:line of the guard, caller, or test that defeats it)."
-      : "a verdict needs at least one deciding evidence reference (path:line).";
+      : input.verdict === "resolved"
+        ? "resolved needs the lines that fix it (path:line of the new guard, check, or test)."
+        : "a verdict needs at least one deciding evidence reference (path:line).";
   if (input.verdict === "duplicate") {
     const target = ledger.entries.find((e) => e.id === input.of);
     if (!target) return `duplicate needs "of": an existing entry id.`;
@@ -109,10 +118,11 @@ export const reopen = (e: Entry, reason: string): Entry => ({
   status: "open",
   staleReason: reason,
 });
-/** After `targetId` was refuted, entries merged into it are open questions again. */
+/** After `targetId` was refuted or resolved, entries merged into it are open questions again. */
 function reopenDuplicatesOf(
   ledger: Ledger,
-  targetId: string
+  targetId: string,
+  how: "refuted" | "resolved"
 ): { ledger: Ledger; reopened: string[] } {
   const reopened: string[] = [];
   const entries = ledger.entries.map((d) => {
@@ -120,12 +130,12 @@ function reopenDuplicatesOf(
     reopened.push(d.id);
     return reopen(
       d,
-      `the entry it duplicated (${targetId}) was refuted; decide it on its own`
+      `the entry it duplicated (${targetId}) was ${how}; decide it on its own`
     );
   });
   return { ledger: { ...ledger, entries }, reopened };
 }
-/** The ledger with a decided entry in place; refuting it reopens its duplicates. */
+/** The ledger with a decided entry in place; refuting or resolving it reopens its duplicates. */
 export function decide(
   ledger: Ledger,
   entry: Entry
@@ -134,7 +144,7 @@ export function decide(
     ...ledger,
     entries: ledger.entries.map((e) => (e.id === entry.id ? entry : e)),
   };
-  return entry.status === "refuted"
-    ? reopenDuplicatesOf(next, entry.id)
+  return entry.status === "refuted" || entry.status === "resolved"
+    ? reopenDuplicatesOf(next, entry.id, entry.status)
     : { ledger: next, reopened: [] };
 }

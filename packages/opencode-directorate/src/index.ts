@@ -58,7 +58,7 @@ import {
 import { platformLayer } from "./platform.ts";
 import { readTools } from "./read-tools.ts";
 import { finalize } from "./report.ts";
-import { createSeal, refreshSeal } from "./seal.ts";
+import { createSeal, recheckable, recheckSeal, refreshSeal } from "./seal.ts";
 import { Host, Sessions } from "./session.ts";
 import { describe, resolve, SettingsStore } from "./settings.ts";
 import { Store } from "./store.ts";
@@ -91,7 +91,7 @@ const LOCKED_TOOLS: Record<string, string[]> = {
 const GRACE_MS = 120_000;
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
 const LIAISON_ONLY =
-  "Only directorate_liaison runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch directorate_liaison with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another.";
+  "Only directorate_liaison runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch directorate_liaison with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another. To re-check after fixes, send that session a follow-up asking for a re-check, or dispatch a new Liaison with the seal id from the Directive's Containment line.";
 
 /** An Auditor, Seat, or Compliance launch, as the subagent tool's input; with a sessionID it continues an existing child. */
 const decodeAssignment = Schema.decodeUnknownOption(
@@ -110,6 +110,102 @@ const decodeChildMeta = Schema.decodeUnknownOption(
     status: Schema.optional(Schema.String),
   })
 );
+
+/** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
+const RECHECK_FIXED = [
+  "resume",
+  "scope",
+  "target",
+  "mode",
+  "panel",
+  "panel_models",
+  "repo",
+] as const;
+
+/** What a new seal tells the Liaison: its ends, the changed files and their regions, and what to do next. */
+function sealSummary(seal: Seal) {
+  const changedFiles = seal.files.filter((f) => f.status !== "unchanged");
+  const regionIds = Map.groupBy(seal.regions, (r) => r.file);
+  const rows = changedFiles.slice(0, 300).map(
+    (f) =>
+      `| ${f.path}${f.oldPath ? ` (from ${f.oldPath})` : ""} | ${f.status} | +${f.added} −${f.removed} | ${
+        regionIds
+          .get(f.path)
+          ?.map((r) => r.id)
+          .join(" ") || "—"
+      } | ${f.excluded ?? ""} |`
+  );
+  const unchanged = seal.files.length - changedFiles.length;
+  return [
+    `Containment sealed \`${seal.id}\`: ${seal.description}.`,
+    `base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
+    seal.lensesOff
+      ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
+      : undefined,
+    seal.panel && seal.regions.length
+      ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} directorate_seat subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
+      : undefined,
+    "",
+    "| File | Status | Lines | Regions | Excluded |",
+    "|---|---|---|---|---|",
+    ...rows,
+    changedFiles.length > rows.length
+      ? `| … ${changedFiles.length - rows.length} more files | | | | |`
+      : undefined,
+    unchanged
+      ? `\n${unchanged} unchanged files in scope (whole-file regions; directorate_ls lists them).`
+      : undefined,
+    "",
+    seal.regions.length
+      ? "Next: read every region with directorate_diff (call it with only the seal to get the next unread chunk)."
+      : "Nothing to review in this target. Inform the requester, or seal a different target.",
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
+}
+
+/** What a re-check seal tells the Liaison: what changed, which carried findings to re-decide, and what was left open. */
+function recheckSummary(
+  earlier: Seal,
+  r: Effect.Success<ReturnType<typeof recheckSeal>>
+) {
+  const cov = coverageSummary(r.seal);
+  const carried = (ids: readonly string[]) =>
+    r.ledger.entries
+      .filter((e) => ids.includes(e.id))
+      .map(
+        (e) =>
+          `- ${e.id} (${currentSeverity(e)}, ${e.carried?.id} in the earlier review) ${e.title}`
+      )
+      .join("\n");
+  return [
+    `Containment sealed \`${r.seal.id}\`, a re-check of \`${earlier.id}\` (${r.seal.mode}): ${r.seal.description}.`,
+    `base ${r.seal.baseSha.slice(0, 12)} · head ${r.seal.postImage === "commit" ? r.seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${r.seal.regions.length} regions, ${cov.read} already read in the earlier review and unchanged · ${cov.unread.length} to read · budget ${r.seal.budgetMinutes} min.`,
+    earlier.panel
+      ? "The earlier review had a panel; a re-check runs without Directorate Seats."
+      : undefined,
+    r.seal.lensesOff
+      ? `Lenses disabled by directorate.json: ${r.seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
+      : undefined,
+    "",
+    r.files.length
+      ? `Changed since the earlier review: ${r.files.join(", ")}`
+      : "Nothing changed since the earlier review: its findings stand unless a change elsewhere fixes one.",
+    r.reopened.length
+      ? `\nReopened for re-decision (route to directorate_compliance):\n${carried(r.reopened)}`
+      : undefined,
+    r.kept.length
+      ? `\nStill confirmed (nothing they rest on changed; route one to directorate_compliance only if a change elsewhere may fix it):\n${carried(r.kept)}`
+      : undefined,
+    r.unanswered.length
+      ? `\nUnanswered in the earlier review (answer them if the change touched them, else note them again):\n${r.unanswered.map((t) => `- ${t}`).join("\n")}`
+      : undefined,
+    "",
+    "Next: read the unread regions with directorate_diff, look for new defects only in code changed since the earlier review, and route the reopened findings to directorate_compliance: confirmed (re-anchored) if still present, resolved with the fixing lines if fixed, refuted if it never held.",
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
+}
 
 const register = Effect.fn("Directorate.register")(function* () {
   const host = yield* Host;
@@ -160,8 +256,34 @@ const register = Effect.fn("Directorate.register")(function* () {
   yield* host.command.transform((editor) => {
     editor.add({
       description:
-        "Start a Directorate review [request or --scope branch|local|repository]",
+        "Start a Directorate review [request, --scope branch|local|repository, or --recheck <seal>]",
       execute: ({ delivery, prompt, sessionID }) => {
+        const again =
+          /^\s*--recheck(?=\s|=|$)(?:(?:=|\s+)(?<seal>directorate-\S+))?/u.exec(
+            prompt.text
+          );
+        if (again) {
+          const seal = again.groups?.seal;
+          const rest = prompt.text.slice(again[0].length).trim();
+          if (rest.startsWith("="))
+            return failure(
+              "Use --recheck alone for the latest Directive, or --recheck <seal id> (directorate-…)."
+            );
+          const which = seal ? `\`${seal}\`` : "the latest Directive";
+          return host.session
+            .prompt({
+              ...prompt,
+              delivery,
+              sessionID,
+              text: [
+                rest,
+                `Re-check ${which} after fixes${rest ? `, with the request above as its focus` : ""}. If you dispatched the directorate_liaison that issued it in this conversation, send that session a follow-up asking for the re-check. Otherwise dispatch directorate_liaison to re-check it: ${seal ? `tell it to pass recheck: "${seal}" to directorate_seal` : "it finds the latest reported seal with directorate_ledger_list and passes it as recheck to directorate_seal"}. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
+            })
+            .pipe(Effect.asVoid);
+        }
         const flag = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u.exec(
           prompt.text
         );
@@ -253,6 +375,12 @@ const register = Effect.fn("Directorate.register")(function* () {
               "Seal id of an unreported review to take over instead of sealing a new one.",
           })
         ),
+        recheck: optional(
+          str.annotate({
+            description:
+              "Seal id of a reported review to re-check after fixes: seals its target as it is now, keeps what was read in unchanged regions, and carries its findings for re-decision. Takes no target, scope, mode, or panel.",
+          })
+        ),
         abandon: optional(
           Schema.Boolean.annotate({
             description:
@@ -276,7 +404,20 @@ const register = Effect.fn("Directorate.register")(function* () {
         if (!input.resume && input.scope && input.target) {
           return yield* failure("Pass either scope or target, not both.");
         }
+        if (
+          input.recheck &&
+          RECHECK_FIXED.some((key) => input[key] !== undefined)
+        ) {
+          return yield* failure(
+            "A re-check reuses the earlier review's target and mode, without a panel. Pass recheck with only budget_minutes, question, or abandon."
+          );
+        }
         const a = actor(c);
+        // Checked before abandoning, so a bad re-check target never files the active review.
+        const earlier = input.recheck
+          ? yield* store.load(input.recheck)
+          : undefined;
+        if (earlier) yield* recheckable(earlier);
         const prior = yield* sessions.active(a.session);
         if (prior && prior.id !== input.resume) {
           if (!input.abandon)
@@ -284,6 +425,18 @@ const register = Effect.fn("Directorate.register")(function* () {
               `This session already holds an active containment seal ${prior.id}. Close it with directorate_report, or pass abandon: true to file its partial directive and start over.`
             );
           yield* autoReport(prior.id, "abandoned for a new review", a.session);
+        }
+        if (earlier) {
+          const r = yield* recheckSeal({
+            prior: earlier,
+            ledger: yield* store.loadLedger(earlier.id),
+            owner: a,
+            budgetMinutes: input.budget_minutes,
+            question: input.question,
+          });
+          yield* sessions.bind(a.session, r.seal.id);
+          yield* sessions.record(a.session, r.seal);
+          return yield* done(r.seal, recheckSummary(earlier, r));
         }
         if (input.resume) {
           const resume = input.resume;
@@ -293,7 +446,7 @@ const register = Effect.fn("Directorate.register")(function* () {
               const s = yield* store.load(resume);
               if (s.reportedAt)
                 return yield* failure(
-                  `${s.id} was already reported; directorate_report with this seal shows the saved directive.`
+                  `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`
                 );
               // A spent budget gets more time: half the original, at least 5 minutes, unless the caller names a budget.
               const now = yield* DateTime.now;
@@ -354,47 +507,7 @@ const register = Effect.fn("Directorate.register")(function* () {
         });
         yield* sessions.bind(a.session, seal.id);
         yield* sessions.record(a.session, seal);
-        const changedFiles = seal.files.filter((f) => f.status !== "unchanged");
-        const regionIds = Map.groupBy(seal.regions, (r) => r.file);
-        const rows = changedFiles.slice(0, 300).map(
-          (f) =>
-            `| ${f.path}${f.oldPath ? ` (from ${f.oldPath})` : ""} | ${f.status} | +${f.added} −${f.removed} | ${
-              regionIds
-                .get(f.path)
-                ?.map((r) => r.id)
-                .join(" ") || "—"
-            } | ${f.excluded ?? ""} |`
-        );
-        const unchanged = seal.files.length - changedFiles.length;
-        return yield* done(
-          seal,
-          [
-            `Containment sealed \`${seal.id}\`: ${seal.description}.`,
-            `base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
-            seal.lensesOff
-              ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
-              : undefined,
-            seal.panel && seal.regions.length
-              ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} directorate_seat subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
-              : undefined,
-            "",
-            "| File | Status | Lines | Regions | Excluded |",
-            "|---|---|---|---|---|",
-            ...rows,
-            changedFiles.length > rows.length
-              ? `| … ${changedFiles.length - rows.length} more files | | | | |`
-              : undefined,
-            unchanged
-              ? `\n${unchanged} unchanged files in scope (whole-file regions; directorate_ls lists them).`
-              : undefined,
-            "",
-            seal.regions.length
-              ? "Next: read every region with directorate_diff (call it with only the seal to get the next unread chunk)."
-              : "Nothing to review in this target. Inform the requester, or seal a different target.",
-          ]
-            .filter((line) => line !== undefined)
-            .join("\n")
-        );
+        return yield* done(seal, sealSummary(seal));
       },
     });
 

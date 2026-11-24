@@ -63,6 +63,14 @@ export function renderReport(input: {
     );
   const leads = unresolved(ledger);
   const refuted = ledger.entries.filter((e) => e.status === "refuted");
+  const resolved = ledger.entries.filter((e) => e.status === "resolved");
+  /** In a re-check, where a finding came from: the earlier review's entry, or this one. */
+  const origin = (e: Entry) =>
+    seal.recheckOf
+      ? e.carried
+        ? ` · ${e.carried.status === "confirmed" ? "still present" : "previously unverified"} (${e.carried.id} in \`${seal.recheckOf}\`)`
+        : " · new"
+      : "";
   const merged =
     ledger.entries.filter((e) => e.status === "duplicate").length -
     leads.filter((e) => e.status === "duplicate").length;
@@ -75,7 +83,9 @@ export function renderReport(input: {
         : top === "minor"
           ? "<Minor Revisions/Tolerated with Notes>"
           : status === "complete"
-            ? "<Approved/Tolerated> — No Anomalies Verified"
+            ? resolved.length
+              ? "<Approved/Tolerated> — Prior Findings Resolved"
+              : "<Approved/Tolerated> — No Anomalies Verified"
             : "<Provisional/Incomplete> — No Confirmed Issues";
   const cov = coverageSummary(seal);
   const who = (a: Entry["raisedBy"]) => actorName(seal, a);
@@ -85,7 +95,7 @@ export function renderReport(input: {
     `**Directorate Directive: ${verdict}** · status: **${status}** · mode: ${seal.mode}`
   );
   out.push(
-    `Containment: ${seal.description} · seal \`${seal.id}\` · fingerprint \`${seal.fingerprint.slice(0, 12)}\`${seal.refreshes ? ` · re-contained ${seal.refreshes}×` : ""} · regions ${cov.read}/${cov.total} observed${cov.assessed ? ` (${cov.assessed} by disposition)` : ""}${cov.skimmed.length ? `, ${cov.skimmed.length} skimmed` : ""}${cov.skipped.length ? `, ${cov.skipped.length} skipped` : ""} · ${confirmed.length} verified, ${refuted.length} refuted, ${merged} merged, ${leads.length} unverified`
+    `Containment: ${seal.description} · seal \`${seal.id}\`${seal.recheckOf ? ` · re-check of \`${seal.recheckOf}\`` : ""} · fingerprint \`${seal.fingerprint.slice(0, 12)}\`${seal.refreshes ? ` · re-contained ${seal.refreshes}×` : ""} · regions ${cov.read}/${cov.total} observed${cov.assessed ? ` (${cov.assessed} by disposition)` : ""}${cov.skimmed.length ? `, ${cov.skimmed.length} skimmed` : ""}${cov.skipped.length ? `, ${cov.skipped.length} skipped` : ""} · ${confirmed.length} verified${seal.recheckOf ? `, ${resolved.length} resolved` : ""}, ${refuted.length} refuted, ${merged} merged, ${leads.length} unverified`
   );
   if (panel)
     out.push(
@@ -113,7 +123,7 @@ export function renderReport(input: {
       const higher = dupes.filter((d) => RANK[currentSeverity(d)] < RANK[sev]);
       const seats = panel?.raised.get(e.id);
       out.push(
-        `${i + 1}. **[${SEV_LABEL[sev]}] ${e.title}** — \`${loc}\`${e.anchor.side === "old" ? " (base side)" : ""} · ${e.kind} · ${e.lens}${panel ? ` · seats ${seats?.size ?? 0}/${panel.seats.length}` : ""}`
+        `${i + 1}. **[${SEV_LABEL[sev]}] ${e.title}** — \`${loc}\`${e.anchor.side === "old" ? " (base side)" : ""} · ${e.kind} · ${e.lens}${panel ? ` · seats ${seats?.size ?? 0}/${panel.seats.length}` : ""}${origin(e)}`
       );
       out.push(`   - **Trigger:** ${e.trigger}`);
       out.push(`   - **Consequence:** ${e.consequence}`);
@@ -131,6 +141,15 @@ export function renderReport(input: {
         );
     });
   }
+  if (resolved.length) {
+    out.push("", `### Resolved Since \`${seal.recheckOf}\``);
+    for (const e of resolved) {
+      const v = e.verdicts.findLast((x) => x.verdict === "resolved");
+      out.push(
+        `- ${e.title} — was \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${e.carried?.id}${e.carried?.status === "unverified" ? ", previously unverified" : ""}); resolved by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""}`.trimEnd()
+      );
+    }
+  }
   if (leads.length) {
     out.push(
       "",
@@ -139,7 +158,7 @@ export function renderReport(input: {
     );
     for (const e of leads)
       out.push(
-        `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${who(e.raisedBy)}${e.staleReason ? `; ${e.staleReason}` : ""}${e.status === "duplicate" ? "; duplicate of an unconfirmed entry" : ""})`
+        `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${who(e.raisedBy)}${e.carried ? `; ${e.carried.status === "confirmed" ? "verified" : "unverified"} as ${e.carried.id} in \`${seal.recheckOf}\`, not re-checked` : e.staleReason ? `; ${e.staleReason}` : ""}${e.status === "duplicate" ? "; duplicate of an unconfirmed entry" : ""})`
       );
   }
   const notable = refuted.filter((e) => currentSeverity(e) !== "minor");

@@ -57,7 +57,12 @@ import {
 import { type Ledger, RepoPath, RepoScope, type Seal } from "../src/model.ts";
 import { platformLayer, type Platform } from "../src/platform.ts";
 import { assess, finalize, renderReport } from "../src/report.ts";
-import { changedSinceSeal, createSeal, refreshSeal } from "../src/seal.ts";
+import {
+  changedSinceSeal,
+  createSeal,
+  recheckSeal,
+  refreshSeal,
+} from "../src/seal.ts";
 import { SettingsStore } from "../src/settings.ts";
 import { StateRoot, Store } from "../src/store.ts";
 import { currentFingerprint } from "../src/target.ts";
@@ -1723,7 +1728,7 @@ test("range: base moved to head is stale; refresh rebuilds the empty target diff
   assert.equal(r.seal.regions.length, 0);
   assert.deepEqual(r.reopened, ["F1"]);
   assert.match(
-    r.ledger.entries[0].staleReason!,
+    r.ledger.entries[0]!.staleReason!,
     /no longer part of the change/
   );
   assert.equal(
@@ -2383,5 +2388,272 @@ test("budget lines are written for each role", () => {
   assert.doesNotMatch(
     budgetLine(s, now, "directorate_auditor"),
     /directorate_report/
+  );
+});
+
+// ---------- re-checks ----------
+const confirmedBy = (by: any, evidence: string[]) => ({
+  by,
+  verdict: "confirmed",
+  rationale: "",
+  evidence,
+  severity: "important",
+  at: T0,
+});
+
+test("re-check: keeps the base and unchanged reads, carries verified findings and leads, reopens what the fixes touched", async () => {
+  const dir = repo({
+    "src/math.ts": MATH,
+    "src/other.ts": "export const other = 1\n",
+  });
+  write(dir, "src/math.ts", MATH + "export const z = 1\n");
+  write(dir, "src/other.ts", "export const other = 2\n");
+  const sealed = await local(dir);
+  const ledger: any = {
+    entries: [
+      entry("F1", {
+        severity: "important",
+        status: "confirmed",
+        verdicts: [confirmedBy(refuter, ["src/math.ts:2"])],
+      }),
+      entry("F2", {
+        severity: "important",
+        status: "confirmed",
+        anchor: at("src/other.ts", 1),
+        quote: "export const other = 2",
+        evidence: ["src/other.ts:1"],
+        verdicts: [confirmedBy(refuter, ["src/other.ts:1"])],
+      }),
+      entry("F3", { status: "refuted" }),
+      entry("F4"),
+      entry("F5", {
+        status: "duplicate",
+        verdicts: [
+          {
+            by: refuter,
+            verdict: "duplicate",
+            of: "F1",
+            rationale: "",
+            evidence: ["src/math.ts:2"],
+            at: T0,
+          },
+        ],
+      }),
+    ],
+    notes: [
+      {
+        kind: "unanswered",
+        text: "is div ever called with 0?",
+        by: lead,
+        at: T0,
+      },
+    ],
+  };
+  const prior = {
+    ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
+    reportedAt: T0,
+  };
+  await run(Effect.flatMap(store, (st) => st.saveBoth(prior, ledger)));
+
+  await assert.rejects(
+    run(recheckSeal({ prior: sealed, ledger, owner: lead })),
+    /has not been reported/
+  );
+
+  // The fix touches math.ts only, and everything is committed: the base stays where the earlier review had it.
+  write(dir, "src/math.ts", MATH + "export const z = 2\n");
+  g(dir, "add", "-A");
+  g(dir, "commit", "-qm", "fix");
+  const r = await run(recheckSeal({ prior, ledger, owner: lead }));
+
+  assert.equal(r.seal.recheckOf, sealed.id);
+  assert.notEqual(r.seal.id, sealed.id);
+  assert.equal(
+    r.seal.baseSha,
+    sealed.baseSha,
+    "committing the fixes is not a new change"
+  );
+  assert.equal(r.seal.panel, undefined);
+  assert.deepEqual(r.files, ["src/math.ts"]);
+  const byFile = (f: string) => r.seal.regions.filter((x) => x.file === f);
+  assert.ok(
+    byFile("src/other.ts").every((x) => x.ownerRead),
+    "unchanged regions keep their reads"
+  );
+  assert.ok(
+    byFile("src/math.ts").every((x) => !x.ownerRead),
+    "changed regions are read again"
+  );
+
+  // F3 (refuted) and F5 (a duplicate of a confirmed finding) do not carry; the rest are renumbered.
+  assert.deepEqual(
+    r.ledger.entries.map((e) => [
+      e.id,
+      e.carried?.id,
+      e.carried?.status,
+      e.status,
+    ]),
+    [
+      ["F1", "F1", "confirmed", "open"],
+      ["F2", "F2", "confirmed", "confirmed"],
+      ["F3", "F4", "unverified", "open"],
+    ]
+  );
+  assert.deepEqual(r.reopened, ["F1", "F3"]);
+  assert.deepEqual(r.kept, ["F2"]);
+  assert.match(
+    r.ledger.entries[0].staleReason!,
+    /changed since .*src\/math\.ts/
+  );
+  assert.equal(
+    r.ledger.entries[0]!.verdicts.length,
+    0,
+    "a reopened finding's verdicts move to its history"
+  );
+  assert.deepEqual(r.unanswered, ["is div ever called with 0?"]);
+  assert.deepEqual(r.ledger.notes, []);
+
+  assert.equal((await run(loadSeal(r.seal.id))).recheckOf, sealed.id);
+  assert.equal((await run(loadLedger(r.seal.id))).entries.length, 3);
+  assert.ok(
+    (await run(loadSeal(sealed.id))).reportedAt,
+    "the earlier seal stays reported"
+  );
+});
+
+test("re-check verdicts: only carried entries resolve, only Compliance decides carried verified findings, nobody resolves their own", () => {
+  const verified = entry("F1", {
+    carried: { id: "F7", status: "confirmed" },
+  });
+  const unverified = entry("F2", {
+    carried: { id: "F8", status: "unverified" },
+  });
+  const own = entry("F3", {
+    raisedBy: lead,
+    carried: { id: "F9", status: "unverified" },
+  });
+  const fresh = entry("F4");
+  const ledger: any = {
+    entries: [verified, unverified, own, fresh],
+    notes: [],
+  };
+  const v = (e: any, by: any, verdict: any, evidence = ["a:1"]) =>
+    verdictError(e, by, { verdict, evidence }, ledger);
+  assert.match(v(fresh, refuter, "resolved")!, /new in this review/);
+  assert.match(
+    v(verified, lead, "resolved")!,
+    /route it to directorate_compliance/
+  );
+  assert.match(
+    v(verified, lead, "refuted")!,
+    /route it to directorate_compliance/,
+    "the lead cannot drop a verified finding"
+  );
+  assert.equal(v(verified, refuter, "resolved"), undefined);
+  assert.equal(v(verified, refuter, "confirmed"), undefined);
+  assert.match(v(verified, refuter, "resolved", [])!, /lines that fix it/);
+  assert.equal(
+    v(unverified, lead, "resolved"),
+    undefined,
+    "minor unverified leads by others follow the usual rules"
+  );
+  assert.match(v(own, lead, "resolved")!, /different session must resolve/);
+  assert.equal(
+    v(own, lead, "refuted"),
+    undefined,
+    "an unverified lead of one's own may still be withdrawn"
+  );
+});
+
+test("resolving an entry reopens its duplicates", () => {
+  const F1 = entry("F1", { carried: { id: "F1", status: "confirmed" } });
+  const F2 = entry("F2", {
+    status: "duplicate",
+    verdicts: [
+      {
+        by: refuter,
+        verdict: "duplicate",
+        of: "F1",
+        rationale: "",
+        evidence: ["a:1"],
+        at: T0,
+      },
+    ],
+  });
+  const { ledger, reopened } = decide(
+    { entries: [F1, F2], notes: [] } as any,
+    { ...F1, status: "resolved" } as any
+  );
+  assert.deepEqual(reopened, ["F2"]);
+  assert.match(ledger.entries[1]!.staleReason!, /was resolved/);
+});
+
+test("re-check Directive: names the earlier seal, marks findings still present or new, and lists what was resolved", () => {
+  const earlier = "directorate-20260101000000-aaaaaa";
+  const seal: any = {
+    id: "directorate-20260101000000-bbbbbb",
+    recheckOf: earlier,
+    mode: "default",
+    description: "d",
+    fingerprint: "f",
+    refreshes: 0,
+    regions: [],
+    files: [],
+    children: [],
+    deleted: [],
+  };
+  const still = entry("F1", {
+    title: "still broken",
+    severity: "important",
+    status: "confirmed",
+    carried: { id: "F3", status: "confirmed" },
+    verdicts: [confirmedBy(refuter, ["src/math.ts:2"])],
+  });
+  const fresh = entry("F2", {
+    title: "introduced by the fix",
+    status: "confirmed",
+    verdicts: [
+      { ...confirmedBy(refuter, ["src/math.ts:2"]), severity: "minor" },
+    ],
+  });
+  const fixed = entry("F3", {
+    title: "was broken",
+    status: "resolved",
+    carried: { id: "F5", status: "confirmed" },
+    verdicts: [
+      {
+        by: refuter,
+        verdict: "resolved",
+        rationale: "guarded now",
+        evidence: ["src/math.ts:1"],
+        at: T0,
+      },
+    ],
+  });
+  const render = (entries: any[], status: any = "complete") =>
+    renderReport({ seal, ledger: { entries, notes: [] }, status, reasons: [] });
+  const md = render([still, fresh, fixed]);
+  assert.match(md, new RegExp(`re-check of \`${earlier}\``));
+  assert.match(md, /2 verified, 1 resolved, 0 refuted/);
+  assert.match(
+    md,
+    new RegExp(
+      `still broken\\*\\* .* · still present \\(F3 in \`${earlier}\`\\)`
+    )
+  );
+  assert.match(md, /introduced by the fix\*\* .* · new$/m);
+  assert.match(
+    md,
+    new RegExp(
+      `### Resolved Since \`${earlier}\`\\n- was broken — was \`src/math\\.ts:2\` \\(minor, F5\\); resolved by directorate_compliance: guarded now \`src/math\\.ts:1\``
+    )
+  );
+  assert.match(
+    render([fixed]),
+    /<Approved\/Tolerated> — Prior Findings Resolved/
+  );
+  assert.match(
+    render([{ ...still, status: "open", verdicts: [] }], "partial"),
+    new RegExp(`verified as F3 in \`${earlier}\`, not re-checked`)
   );
 });

@@ -102,16 +102,19 @@ export const Severity = Schema.Literals(["blocking", "important", "minor"]);
 export type Severity = typeof Severity.Type;
 export const Kind = Schema.Literals(["defect", "test-gap", "quality"]);
 export type Kind = typeof Kind.Type;
+/** `resolved`: a finding carried from the review a re-check follows no longer holds on the new code. */
 export const VerdictKind = Schema.Literals([
   "confirmed",
   "refuted",
   "duplicate",
+  "resolved",
 ]);
 export const EntryStatus = Schema.Literals([
   "open",
   "confirmed",
   "refuted",
   "duplicate",
+  "resolved",
 ]);
 export const NoteKind = Schema.Literals(["unanswered", "limit", "assumption"]);
 const ChildStatus = Schema.Literals([
@@ -207,6 +210,13 @@ const Entry = Schema.Struct({
   staleReason: opt(Schema.String),
   verdicts: list(Verdict),
   history: opt(list(Verdict)),
+  /** In a re-check: the entry this one continues in the earlier review, and its status when that review reported. */
+  carried: opt(
+    Schema.Struct({
+      id: Schema.String,
+      status: Schema.Literals(["confirmed", "unverified"]),
+    })
+  ),
   createdAt: Time,
 });
 export type Entry = typeof Entry.Type;
@@ -282,6 +292,8 @@ const Seal = Schema.Struct({
   panel: opt(list(Schema.String)),
   /** Lenses the settings turned off for this review. */
   lensesOff: opt(list(Schema.String)),
+  /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
+  recheckOf: opt(Schema.String),
   reportedAt: opt(Time),
   autoReported: opt(Schema.Boolean),
   abandoned: opt(Schema.Boolean),
