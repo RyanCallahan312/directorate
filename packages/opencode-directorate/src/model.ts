@@ -19,6 +19,14 @@ export const REFUTER = "directorate_compliance";
 export const SCOUT = "directorate_auditor";
 export const PANELIST = "directorate_seat";
 
+/** Every Directorate role, in registration order. */
+export const ROLES = [REVIEWER, SCOUT, PANELIST, REFUTER] as const;
+
+/** The roles the Liaison dispatches as child sessions. */
+export const CHILD_ROLES = [SCOUT, PANELIST, REFUTER] as const;
+export const ROLE_SET: ReadonlySet<string> = new Set(ROLES);
+export const CHILD_ROLE_SET: ReadonlySet<string> = new Set(CHILD_ROLES);
+
 /** The seats of a panel review when the caller names no models, as "providerID/modelID#variant". */
 export const DEFAULT_PANEL = [
   "openai/gpt-6.2-astra#xhigh",

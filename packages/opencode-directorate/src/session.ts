@@ -15,7 +15,7 @@ import {
 import { childOutstanding } from "./children.ts";
 import { ignore } from "./error.ts";
 import { Host } from "./host.ts";
-import { PANELIST, REFUTER, SCOUT } from "./model.ts";
+import { CHILD_ROLE_SET } from "./model.ts";
 import type { Seal } from "./model.ts";
 import { Store } from "./store.ts";
 
@@ -23,7 +23,6 @@ export { Host } from "./host.ts";
 
 const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
-const CHILD_ROLES = new Set([SCOUT, PANELIST, REFUTER]);
 
 /** A host session id, or none for anything else (hook events are typed loosely). */
 const asSessionID = Schema.decodeUnknownOption(Session.ID);
@@ -133,7 +132,7 @@ const make = Effect.gen(function* make() {
         seal = yield* loadActive(yield* recordedSeal(child.parentID));
 
         // After takeover the host's parent link is unchanged, but the former Liaison no longer records this seal.
-        if (!seal && CHILD_ROLES.has(String(child.agent))) {
+        if (!seal && CHILD_ROLE_SET.has(String(child.agent))) {
           seal = (yield* store.list()).find(
             (s) =>
               !s.reportedAt && s.children.some((ch) => ch.session === sessionID)

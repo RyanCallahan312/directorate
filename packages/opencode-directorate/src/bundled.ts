@@ -4,7 +4,7 @@ import { Agent, Skill } from "@opencode/plugin/effect";
 import { Data, Effect, FileSystem, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
-import { PANELIST, REFUTER, REVIEWER, SCOUT } from "./model.ts";
+import { ROLES } from "./model.ts";
 import { Host } from "./session.ts";
 
 const AgentFrontmatter = Schema.Struct({
@@ -50,19 +50,17 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
   function* registerBundled() {
     const host = yield* Host;
 
-    const agents = yield* Effect.forEach(
-      [REVIEWER, SCOUT, PANELIST, REFUTER],
-      (id) =>
-        Effect.gen(function* loadAgent() {
-          const { data, content } = yield* readMarkdown(
-            new URL(`../agents/${id}.md`, import.meta.url)
-          );
+    const agents = yield* Effect.forEach([...ROLES], (id) =>
+      Effect.gen(function* loadAgent() {
+        const { data, content } = yield* readMarkdown(
+          new URL(`../agents/${id}.md`, import.meta.url)
+        );
 
-          const fields =
-            yield* Schema.decodeUnknownEffect(AgentFrontmatter)(data);
+        const fields =
+          yield* Schema.decodeUnknownEffect(AgentFrontmatter)(data);
 
-          return { fields, id, system: content };
-        })
+        return { fields, id, system: content };
+      })
     );
 
     const skill = yield* readMarkdown(

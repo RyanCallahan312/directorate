@@ -9,10 +9,7 @@ import {
   DEFAULT_PANEL,
   isUnset,
   LENSES,
-  PANELIST,
-  REFUTER,
-  REVIEWER,
-  SCOUT,
+  ROLE_SET,
   SettingsSchema,
   SettingsScopeSchema,
 } from "./model.ts";
@@ -26,7 +23,6 @@ import type { DefineTool } from "./tool.ts";
 const show = (label: string, file: string, s: Settings) =>
   `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;
 
-const REVIEW_ROLES = new Set([REVIEWER, SCOUT, PANELIST, REFUTER]);
 const MAX_LISTED = 40;
 
 const make = Effect.gen(function* make() {
@@ -108,7 +104,7 @@ export const configureTool = (tool: DefineTool) => {
     description:
       "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
     *execute(input, c) {
-      if (REVIEW_ROLES.has(c.agent)) {
+      if (ROLE_SET.has(c.agent)) {
         return yield* failure(
           "Directorate review agents cannot modify Directorate settings."
         );

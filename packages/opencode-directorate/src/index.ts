@@ -42,6 +42,8 @@ import { Git } from "./git.ts";
 import { ledgerTools } from "./ledger-tools.ts";
 import { currentSeverity, unresolved } from "./ledger.ts";
 import {
+  CHILD_ROLE_SET,
+  CHILD_ROLES,
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
   ModelRef,
@@ -51,7 +53,7 @@ import {
   REVIEW_SCOPE_TARGET,
   REVIEWER,
   ReviewScopeSchema,
-  SCOUT,
+  ROLE_SET,
   TargetKindSchema,
 } from "./model.ts";
 import type { Child, Seal } from "./model.ts";
@@ -75,9 +77,6 @@ import {
   writable,
 } from "./tool.ts";
 
-const ROLES = new Set([REVIEWER, SCOUT, PANELIST, REFUTER]);
-const CHILD_ROLES = new Set([SCOUT, PANELIST, REFUTER]);
-
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 const GRACE_MS = 120_000;
 
@@ -88,7 +87,7 @@ const LIAISON_ONLY =
 /** An Auditor, Seat, or Compliance launch, as the subagent tool's input; with a sessionID it continues an existing child. */
 const decodeAssignment = Schema.decodeUnknownOption(
   Schema.Struct({
-    agent: Schema.Literals([SCOUT, PANELIST, REFUTER]),
+    agent: Schema.Literals(CHILD_ROLES),
     description: Schema.optional(Schema.String),
     model: Schema.optional(Schema.String),
     prompt: Schema.optional(Schema.String),
@@ -894,7 +893,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
       if (ev.tool !== "subagent") {
         const id = yield* sessions.boundTo(ev.sessionID);
 
-        if (!id || !CHILD_ROLES.has(ev.agent)) {
+        if (!id || !CHILD_ROLE_SET.has(ev.agent)) {
           return;
         }
 
@@ -1105,7 +1104,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
     agent: string,
     title: string | undefined
   ) {
-    if (!CHILD_ROLES.has(agent)) {
+    if (!CHILD_ROLE_SET.has(agent)) {
       return;
     }
 
@@ -1286,7 +1285,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
       hook(kind, function* onSessionHook(event) {
         const agent: string = event.agent;
 
-        if (!ROLES.has(agent)) {
+        if (!ROLE_SET.has(agent)) {
           // Other agents get the Liaison, not the harness: no review tools but the settings one.
           for (const name of Object.keys(event.tools ?? {})) {
             if (
@@ -1360,7 +1359,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
       const covered =
         event.action === "subagent"
-          ? CHILD_ROLES.has(target)
+          ? CHILD_ROLE_SET.has(target)
           : event.action.startsWith("directorate_") &&
             event.action !== "directorate_configure";
 
@@ -1371,7 +1370,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
       if (
         caller !== undefined &&
-        (event.action === "subagent" ? caller !== REVIEWER : !ROLES.has(caller))
+        (event.action === "subagent"
+          ? caller !== REVIEWER
+          : !ROLE_SET.has(caller))
       ) {
         event.effect = "deny";
         event.message = LIAISON_ONLY;
