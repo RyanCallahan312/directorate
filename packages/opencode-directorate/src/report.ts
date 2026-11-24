@@ -142,7 +142,7 @@ const outsideContainment = (
   // A failed Seat is reported once, as its seat.
   const seatless = missingSeats(seal);
 
-  for (const c of [...childOutstanding(seal), ...childFailures(seal)]) {
+  for (const c of [...childOutstanding(seal), ...childFailures(seal, ledger)]) {
     if (!(c.model && seatless.some((s) => s.model === c.model))) {
       nr.push(
         `- ${childName(c)} did not ${c.status === "failed" ? "complete" : "finish"}: ${childQuestion(c)}`
@@ -508,7 +508,7 @@ export const assess = (
 
   if (
     ledger.notes.some((n) => n.kind === "unanswered") ||
-    childFailures(seal).length ||
+    childFailures(seal, ledger).length ||
     childOutstanding(seal).length
   ) {
     partial("some questions went unanswered");

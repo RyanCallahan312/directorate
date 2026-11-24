@@ -3,8 +3,8 @@
 // changed, so callers write only changes.
 import { DateTime } from "effect";
 
-import { PANELIST } from "./model.ts";
-import type { Actor, Child, Seal } from "./model.ts";
+import { PANELIST, REFUTER } from "./model.ts";
+import type { Actor, Child, Ledger, Seal } from "./model.ts";
 
 export const childOutstanding = (seal: Seal) =>
   seal.children.filter(
@@ -75,22 +75,43 @@ export const panelSeats = (seal: Seal) =>
     };
   });
 
-/** The next seat a Directorate Seat launch takes: the first with no run that is launching, running, or completed. */
+/**
+ * The next seat a Directorate Seat launch takes: the first with no run that is launching, running, or completed. With
+ * no regions there is nothing to review, so no seat is missing.
+ */
 export const missingSeats = (seal: Seal) =>
-  panelSeats(seal).filter(
-    (s) =>
-      s.status === "failed" ||
-      s.status === "not launched" ||
-      s.status === "partial"
-  );
+  seal.regions.length
+    ? panelSeats(seal).filter(
+        (s) =>
+          s.status === "failed" ||
+          s.status === "not launched" ||
+          s.status === "partial"
+      )
+    : [];
 
 export const openSeat = (seal: Seal) => missingSeats(seal)[0]?.model;
 
 const childKey = (c: Child) =>
   `${c.agent}\0${c.model ?? ""}\0${childQuestion(c)}`;
 
-/** Failed children whose question no later run of the same agent (and model) completed. */
-export const childFailures = (seal: Seal) => {
+/** A Compliance run is answered once every entry on its entries line is decided, whichever run decided it. */
+const decided = (c: Child, ledger: Ledger) => {
+  if (c.agent !== REFUTER || !/^entries:/imu.test(c.prompt)) {
+    return false;
+  }
+
+  const ids = childQuestion(c).match(/\bF\d+\b/gu) ?? [];
+
+  return (
+    ids.length > 0 &&
+    ids.every((id) =>
+      ledger.entries.some((e) => e.id === id && e.status !== "open")
+    )
+  );
+};
+
+/** Failed children whose question no later run of the same agent (and model) completed, or whose entries stay open. */
+export const childFailures = (seal: Seal, ledger: Ledger) => {
   const done = new Set<string>();
 
   return seal.children
@@ -100,7 +121,9 @@ export const childFailures = (seal: Seal) => {
         done.add(childKey(c));
       }
 
-      return c.status === "failed" && !done.has(childKey(c));
+      return (
+        c.status === "failed" && !done.has(childKey(c)) && !decided(c, ledger)
+      );
     })
     .toReversed();
 };

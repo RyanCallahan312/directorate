@@ -2702,6 +2702,24 @@ test("a Seat that returns normally after reading only one region cannot make a c
   assert.match(md, /Directorate Seat alpha: 1 of 2 regions unread/u);
 });
 
+test("a panel with nothing to review misses no Seat", async () => {
+  const dir = repo();
+  execFileSync("git", ["-C", dir, "commit", "-qam", "clean"], {
+    stdio: "pipe",
+  });
+  const { call } = await harness(dir);
+
+  const sealed = await call("directorate_seal", {
+    panel_models: ["prov/alpha"],
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(sealed.content);
+  const { content } = await call("directorate_report", { seal });
+  assert.match(content, /status: \*\*complete\*\*/u);
+  assert.doesNotMatch(content, /Directorate Seat alpha/u);
+});
+
 test("follow-ups to a subagent are new runs of its session: earlier runs keep their outcome, and directorate_wait reports the new run once", async () => {
   const { S, call, launch, bus, hooks, followUp } = await harness(repo());
 

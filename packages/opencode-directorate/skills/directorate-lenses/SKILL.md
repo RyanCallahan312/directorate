@@ -157,7 +157,7 @@ Plugin errors say what to do; follow them. These cover the rest:
 | Documentation cannot be fetched | Read the installed version with `directorate_read`; if neither is available, the claim is incomplete (§8). |
 | A lens file cannot be read | Apply §1–§9 alone. The Liaison, an Auditor, or a Seat records a `directorate_note` kind `limit` naming the file; Compliance leaves that lens's non-minor entries open and names the file in its handoff. |
 | A lens is disabled (`directorate.json`) | Skip that lens; if the finding also fits an enabled lens, record it there, otherwise leave it. |
-| A subagent (`directorate_auditor`, `directorate_seat`, or `directorate_compliance`) fails | Retry once on a transient error (narrowing scope if it hit step or budget limits); on a second failure, answer directly or record `directorate_note` kind `unanswered`. |
+| A subagent (`directorate_auditor`, `directorate_seat`, or `directorate_compliance`) fails | Retry once on a transient error, keeping its `question:` line verbatim (narrow scope in the lines below it if it hit step or budget limits; a Compliance batch may be split across runs, and is answered once every entry on it is decided); on a second failure, answer directly or record `directorate_note` kind `unanswered`. |
 | The same tool call fails twice with the same message | Stop repeating it. Reach the fact another way, or, if it decides a claim, treat the claim as incomplete (§8) and name the call and the message. |
 
 Retrying an unchanged tool call after the same error is never recovery: change the input or record the limit.

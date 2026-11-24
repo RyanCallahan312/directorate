@@ -490,7 +490,9 @@ test("only a subsequent successful retry clears a failed question", async () => 
   } as const;
 
   const reviewed = { ...seal, children: [first, failed], regions: [] };
-  assert.deepEqual(childFailures(reviewed), [failed]);
+  assert.deepEqual(childFailures(reviewed, { entries: [], notes: [] }), [
+    failed,
+  ]);
   assert.equal(
     assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
     "partial"
@@ -532,6 +534,51 @@ const entry = (id: string, o: Partial<Entry> = {}): Entry => ({
   trigger: "b=0",
   verdicts: [],
   ...o,
+});
+
+test("a failed Compliance batch is answered once narrowed retries decide every entry on it", async () => {
+  const seal = await local(repo());
+
+  const batch = (call: string, ids: string, status: "completed" | "failed") =>
+    ({
+      agent: "directorate_compliance",
+      call,
+      prompt: `seal: ${seal.id}\nentries: [${ids}]`,
+      startedAt: T0,
+      status,
+    }) as const;
+
+  const reviewed = {
+    ...seal,
+    children: [
+      batch("batch", "F1, F2", "failed"),
+      batch("first", "F1", "completed"),
+      batch("second", "F2", "completed"),
+    ],
+    regions: [],
+  };
+
+  const confirmed = { status: "confirmed" } as const;
+
+  assert.deepEqual(
+    childFailures(reviewed, {
+      entries: [entry("F1", confirmed), entry("F2")],
+      notes: [],
+    }),
+    [reviewed.children[0]]
+  );
+  assert.equal(
+    assess(
+      reviewed,
+      {
+        entries: [entry("F1", confirmed), entry("F2", confirmed)],
+        notes: [],
+      },
+      {},
+      "normal"
+    ).status,
+    "complete"
+  );
 });
 
 // ---------- parsing ----------
