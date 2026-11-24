@@ -49,6 +49,19 @@ const make = Effect.gen(function* make() {
   const bind = (sessionID: string, sealId: string) =>
     Ref.update(bindings, HashMap.set(sessionID, sealId));
 
+  /**
+   * Subagent call -> the seal and Liaison session it was launched for, until the subagent tool returns. A report can
+   * close the seal before the launch links to its child session; the late child is stopped, not left running unowned.
+   */
+  const launches = yield* Ref.make(
+    HashMap.empty<string, { parent: string; seal: string }>()
+  );
+
+  const interrupt = (sessionID: string) =>
+    host.session
+      .interrupt({ resume: false, sessionID: Session.ID.make(sessionID) })
+      .pipe(ignore(`could not interrupt ${sessionID}`));
+
   const info = Effect.fnUntraced(function* info(sessionID: string) {
     const id = Option.getOrUndefined(asSessionID(sessionID));
 
@@ -182,10 +195,7 @@ const make = Effect.gen(function* make() {
         childOutstanding(seal).flatMap((ch) =>
           ch.session ? [ch.session] : []
         ),
-        (session) =>
-          host.session
-            .interrupt({ resume: false, sessionID: Session.ID.make(session) })
-            .pipe(ignore(`could not interrupt ${session}`)),
+        interrupt,
         { concurrency: "unbounded", discard: true }
       );
       yield* Ref.update(
@@ -196,6 +206,28 @@ const make = Effect.gen(function* make() {
     }),
     directory: (sessionID: string) =>
       info(sessionID).pipe(Effect.map((i) => i?.location.directory)),
+    interrupt,
+    /** A subagent call the Liaison of `parent` made for `seal`, open until `launchSettled`. */
+    launch: (call: string, seal: string, parent: string) =>
+      Ref.update(launches, HashMap.set(call, { parent, seal })),
+    launchSettled: (call: string) => Ref.update(launches, HashMap.remove(call)),
+    /** The seal a subagent call was launched for, if it has not settled. */
+    launchedFor: (call: string) =>
+      Ref.get(launches).pipe(
+        Effect.map((m) => Option.getOrUndefined(HashMap.get(m, call))?.seal)
+      ),
+    /** Seal ids of the unsettled subagent calls `parent` made. */
+    launchesBy: (parent: string) =>
+      Ref.get(launches).pipe(
+        Effect.map(
+          (m) =>
+            new Set(
+              [...HashMap.values(m)].flatMap((l) =>
+                l.parent === parent ? [l.seal] : []
+              )
+            )
+        )
+      ),
     /** Runs body under the seal's cross-process lock, on a freshly loaded seal. */
     locked: <A, E, R>(
       sessionID: string,

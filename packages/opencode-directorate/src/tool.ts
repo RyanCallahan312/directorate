@@ -4,8 +4,9 @@ import type { Plugin } from "@opencode/plugin/effect";
 import { Tool } from "@opencode/schema/tool";
 import { Clock, Effect, Predicate, Schema } from "effect";
 
-import { budgetLine } from "./budget.ts";
+import { budget, budgetLine } from "./budget.ts";
 import { failure, recover } from "./error.ts";
+import { PANELIST, REFUTER, REVIEWER, SCOUT } from "./model.ts";
 import type { Actor, Seal } from "./model.ts";
 import type { Platform } from "./platform.ts";
 import { Host, Sessions } from "./session.ts";
@@ -79,7 +80,25 @@ export const locked = <A>(
     sessions.locked(c.sessionID, sealId, (seal) => Effect.gen(() => body(seal)))
   );
 
-/** A change to an open seal, under its lock. */
+/** What each role may still call once the budget is locked. */
+export const LOCKED_TOOLS = new Map([
+  [
+    REVIEWER,
+    new Set([
+      "directorate_report",
+      "directorate_ledger_list",
+      "directorate_note",
+    ]),
+  ],
+  [SCOUT, new Set(["directorate_ledger_add", "directorate_note"])],
+  [PANELIST, new Set(["directorate_ledger_add", "directorate_note"])],
+  [REFUTER, new Set(["directorate_ledger_verdict", "directorate_ledger_list"])],
+]);
+
+/**
+ * A change to an open seal, under its lock. Once the budget locks, only the caller's locked tools run: a model step that
+ * began before the deadline still sees the tools stripped at lockdown, and the lock may have been held past it.
+ */
 export const mutate = <A>(
   c: Tool.Context,
   sealId: string,
@@ -89,6 +108,15 @@ export const mutate = <A>(
 ) =>
   locked(c, sealId, function* mutateSeal(seal) {
     yield* writable(seal, c, name, ownerOnly);
+
+    if (
+      budget(seal, yield* Clock.currentTimeMillis).phase === "locked" &&
+      !LOCKED_TOOLS.get(c.agent)?.has(name)
+    ) {
+      return yield* failure(
+        `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
+      );
+    }
 
     return yield* body(seal);
   });

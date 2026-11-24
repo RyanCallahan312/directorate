@@ -6,6 +6,7 @@ import {
   Effect,
   FileSystem,
   Match,
+  Option,
   Path,
   Predicate,
   Schema,
@@ -20,6 +21,7 @@ import { failure, ReviewError } from "./error.ts";
 import { exclusionReason, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
+import { Host } from "./host.ts";
 import { reopen, unresolved } from "./ledger.ts";
 import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, REVIEWER } from "./model.ts";
 import type {
@@ -494,6 +496,11 @@ const describedAt = (seal: Seal, cur: Pick<Current, "baseSha" | "headSha">) =>
       )
     : seal.description;
 
+/** The sealing OpenCode instance's directory, if sealed inside one. */
+const hostDirectory = Effect.serviceOption(Host).pipe(
+  Effect.map((h) => Option.getOrUndefined(h)?.location.directory)
+);
+
 export const createSeal = Effect.fn("Directorate.createSeal")(
   function* createSeal(input: {
     repo: string;
@@ -508,6 +515,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
   }) {
     const store = yield* Store;
     const top = yield* (yield* Git).root(input.repo);
+    const host = yield* hostDirectory;
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
     const panel = input.panel?.length ? [...new Set(input.panel)] : undefined;
@@ -537,6 +545,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
             gates: {},
             gen: 0,
             headSha: ends.headSha,
+            host,
             id,
             lensesOff: input.lensesOff,
             mode: input.mode,
@@ -818,6 +827,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     const { prior } = input;
     yield* recheckable(prior);
     const store = yield* Store;
+    const host = yield* hostDirectory;
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
 
@@ -867,6 +877,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             gates: {},
             gen: 0,
             headSha: cur.headSha,
+            host,
             id,
             lensesOff: prior.lensesOff,
             mode: prior.mode,

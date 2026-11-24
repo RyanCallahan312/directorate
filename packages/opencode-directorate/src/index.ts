@@ -68,6 +68,7 @@ import {
   adapter,
   done,
   locked,
+  LOCKED_TOOLS,
   mutate,
   optional,
   str,
@@ -76,21 +77,6 @@ import {
 
 const ROLES = new Set([REVIEWER, SCOUT, PANELIST, REFUTER]);
 const CHILD_ROLES = new Set([SCOUT, PANELIST, REFUTER]);
-
-/** What each role may still call once the budget is locked. */
-const LOCKED_TOOLS = new Map([
-  [
-    REVIEWER,
-    new Set([
-      "directorate_report",
-      "directorate_ledger_list",
-      "directorate_note",
-    ]),
-  ],
-  [SCOUT, new Set(["directorate_ledger_add", "directorate_note"])],
-  [PANELIST, new Set(["directorate_ledger_add", "directorate_note"])],
-  [REFUTER, new Set(["directorate_ledger_verdict", "directorate_ledger_list"])],
-]);
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 const GRACE_MS = 120_000;
@@ -990,6 +976,10 @@ const register = Effect.fn("Directorate.register")(function* register() {
           ignore(`could not register ${assignment.agent} in ${seal.id}`, "Warn")
         );
 
+      if (launch) {
+        yield* sessions.launch(ev.id, seal.id, ev.sessionID);
+      }
+
       if (launch && Predicate.isObject(ev.input)) {
         if (launch.followUp) {
           ev.input = { ...ev.input, prompt: followUpPrompt(launch) };
@@ -1008,17 +998,37 @@ const register = Effect.fn("Directorate.register")(function* register() {
       }
     })
   );
+
+  /** A launch of a seal reported before the launch ran: stop the child it started, which no review owns now. */
+  const stopUnowned = Effect.fn("Directorate.stopUnowned")(
+    function* stopUnowned(
+      call: string,
+      sealId: string | undefined,
+      session: string | undefined
+    ) {
+      const reported = sealId
+        ? yield* store.load(sealId).pipe(Effect.orElseSucceed(() => null))
+        : null;
+
+      const launch = reported?.reportedAt
+        ? reported.children.find(
+            (x) => x.call === call && x.status === "launching"
+          )
+        : undefined;
+
+      const child = session ?? launch?.session;
+
+      if (launch && child) {
+        yield* sessions.interrupt(child);
+      }
+    }
+  );
+
   // The subagent result is authoritative even if session.created was missed (a plugin reload mid-launch).
   yield* host.tool.hook(
     "execute.after",
     hook("executeAfter", function* onExecuteAfter(ev) {
       if (ev.tool !== "subagent") {
-        return;
-      }
-
-      const seal = yield* sessions.active(ev.sessionID);
-
-      if (!seal) {
         return;
       }
 
@@ -1028,6 +1038,14 @@ const register = Effect.fn("Directorate.register")(function* register() {
         decodeChildMeta(result?.metadata?.metadata ?? result?.metadata),
         () => ({ sessionID: undefined, status: undefined })
       );
+
+      const launchedFor = yield* sessions.launchedFor(ev.id);
+      yield* sessions.launchSettled(ev.id);
+      const seal = yield* sessions.active(ev.sessionID);
+
+      if (!seal) {
+        return yield* stopUnowned(ev.id, launchedFor, meta.sessionID);
+      }
 
       const text = JSON.stringify(result?.content ?? "");
 
@@ -1058,6 +1076,15 @@ const register = Effect.fn("Directorate.register")(function* register() {
             return;
           }
 
+          // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
+          // registered, so there is no child, and no failure to report.
+          if (ev.status === "error" && launch.status === "launching") {
+            return {
+              ...s,
+              children: s.children.filter((x) => x !== launch),
+            };
+          }
+
           child = meta.sessionID ?? launch.session;
 
           return returned(s, ev.id, meta.sessionID, outcome, endedAt);
@@ -1084,7 +1111,27 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
     const seal = yield* sessions.active(parentID);
 
-    if (!seal || seal.ownerSession !== parentID) {
+    if (!seal) {
+      // Reported between launch and link: stop the child, which no review owns now.
+      for (const id of yield* sessions.launchesBy(parentID)) {
+        const reported = yield* store
+          .load(id)
+          .pipe(Effect.orElseSucceed(() => null));
+
+        if (
+          reported?.reportedAt &&
+          claimed(reported, sessionID, agent, title)
+        ) {
+          yield* sessions.interrupt(sessionID);
+
+          return;
+        }
+      }
+
+      return;
+    }
+
+    if (seal.ownerSession !== parentID) {
       return;
     }
 
@@ -1198,11 +1245,15 @@ const register = Effect.fn("Directorate.register")(function* register() {
       !seal.reportedAt &&
       now >= DateTime.toEpochMillis(seal.deadline) + GRACE_MS;
 
-    if (myRepo) {
-      for (const seal of yield* store.list({ repo: myRepo })) {
-        if (overdue(seal)) {
-          ids.add(seal.id);
-        }
+    // After a reload no session is bound yet: recover this instance's reviews, wherever their repository is, and any
+    // review of this repository.
+    for (const seal of yield* store.list()) {
+      if (
+        overdue(seal) &&
+        (seal.host === host.location.directory ||
+          (myRepo !== null && seal.repo === myRepo))
+      ) {
+        ids.add(seal.id);
       }
     }
 

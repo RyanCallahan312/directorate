@@ -241,8 +241,10 @@ interface ToolBeforeEvent {
 }
 
 interface ToolAfterEvent {
+  error?: { message: string };
   id: string;
-  result: {
+  /** Absent when the tool failed (status "error"). */
+  result?: {
     content?: string;
     metadata:
       | { metadata: { sessionID: string; status: string } }
@@ -3245,6 +3247,79 @@ test("a child still reports completion after a Liaison takeover and plugin reloa
   assert.equal(present(sealJson(seal).children[0]).status, "completed");
 });
 
+test("a launch the Directive was filed before it linked is stopped when its child appears", async () => {
+  const { S, bus, call, hooks, interrupted } = await harness(repo());
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+
+  const event: ToolBeforeEvent = {
+    agent: "directorate_liaison",
+    id: "late",
+    input: { agent: "directorate_auditor", description: "late", prompt: "q" },
+    sessionID: S("lead"),
+    tool: "subagent",
+  };
+
+  await present(hooks["tool.execute.before"])(event);
+
+  // Each gate pushes back once; the Directive is filed with the launch still unlinked.
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Coverage\)/u
+  );
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Active Personnel\)/u
+  );
+  await call("directorate_report", { seal });
+  assert.ok(sealJson(seal).reportedAt);
+  assert.deepEqual(interrupted, []);
+  await bus.emit({
+    data: {
+      agent: "directorate_auditor",
+      parentID: S("lead"),
+      sessionID: S("late"),
+      title: event.input?.description,
+    },
+    type: "session.created",
+  });
+  assert.deepEqual(interrupted, [S("late")]);
+});
+
+test("a subagent launch rejected before it runs (a drain denial) leaves no failed child", async () => {
+  const { S, call, hooks } = await harness(repo());
+
+  const { content } = await call("directorate_seal", {
+    budget_minutes: 10,
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+  shiftClock(seal, 7);
+
+  // OpenCode runs execute.before, then the subagent tool, which asks permission (and is denied during drain).
+  await present(hooks["tool.execute.before"])({
+    agent: "directorate_liaison",
+    id: "denied",
+    input: { agent: "directorate_auditor", description: "late", prompt: "q" },
+    sessionID: S("lead"),
+    tool: "subagent",
+  });
+  assert.equal(present(sealJson(seal).children[0]).status, "launching");
+  await present(hooks["tool.execute.after"])({
+    error: { message: "Subagent denied: directorate_auditor" },
+    id: "denied",
+    sessionID: S("lead"),
+    status: "error",
+    tool: "subagent",
+  });
+  assert.deepEqual(sealJson(seal).children, []);
+});
+
 test("hooks write the seal only for changes: unrelated subagents and running auditors' tool calls leave it alone", async () => {
   const { S, call, launch, hooks, bus } = await harness(repo());
 
@@ -3690,6 +3765,39 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   assert.equal(e3.effect, "allow");
 });
 
+test("a refresh from a model step that began before lockdown does not run after it", async () => {
+  const dir = repo();
+  const { S, call, hooks } = await harness(dir);
+
+  const { content } = await call("directorate_seal", {
+    budget_minutes: 10,
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+  shiftClock(seal, 7);
+
+  const drain: SessionHookEvent = {
+    agent: "directorate_liaison",
+    sessionID: S("lead"),
+    system: [],
+    tools: { directorate_refresh: {}, directorate_report: {} },
+  };
+
+  await present(hooks["session.context"])(drain);
+  assert.ok("directorate_refresh" in drain.tools, "offered during drain");
+
+  // The step's call runs against that request's tools, after the budget locked.
+  writeFileSync(path.join(dir, "src/b.ts"), "export const b = 3\n");
+  shiftClock(seal, 11);
+  await assert.rejects(
+    call("directorate_refresh", { seal }),
+    /Directorate lockdown: .* directorate_refresh no longer runs\. Call directorate_report now/u
+  );
+  assert.equal(sealJson(seal).gen, 0);
+  assert.equal(sealJson(seal).refreshes, 0);
+});
+
 test("the report gate does not ask for Seat dispatches during drain", async () => {
   const { call } = await harness(repo());
 
@@ -3869,6 +3977,52 @@ test(
           DateTime.toEpochMillis(present(sealJson(seal).reportedAt)) >=
             start + 240_000
         );
+        assert.match(
+          readFileSync(path.join(state, seal, "report.md"), "utf-8"),
+          /status: \*\*partial\*\*/u
+        );
+        yield* Scope.close(reloaded.scope, Exit.void);
+      }).pipe(Effect.provide(TestClock.layer()))
+    );
+  }
+);
+
+test(
+  "the watchdog of the instance that sealed another repository recovers its overdue review after a reload",
+  { timeout: 10_000 },
+  async () => {
+    const here = repo();
+    const there = repo();
+    const start = Date.now();
+    await Effect.runPromise(
+      Effect.gen(function* watchdogTest() {
+        yield* TestClock.setTime(start);
+        const run = Effect.runPromiseWith(yield* Effect.context());
+        const h = yield* Effect.tryPromise(() => harness(here, "xrepo", run));
+
+        const result = yield* Effect.tryPromise(() =>
+          h.call("directorate_seal", {
+            budget_minutes: 2,
+            repo: there,
+            target: { kind: "local" },
+          })
+        );
+
+        const seal = h.sealOf(result.content);
+        assert.equal(sealJson(seal).host, here);
+        yield* Scope.close(h.scope, Exit.void);
+        yield* TestClock.adjust("1 hour");
+
+        const reloaded = yield* Effect.tryPromise(() =>
+          harness(here, "xrepo", run)
+        );
+
+        yield* TestClock.adjust("30 seconds");
+        assert.match(
+          yield* Deferred.await(reloaded.notified),
+          new RegExp(`<intervened/filed> the directive for ${seal}`, "u")
+        );
+        assert.equal(sealJson(seal).autoReported, true);
         assert.match(
           readFileSync(path.join(state, seal, "report.md"), "utf-8"),
           /status: \*\*partial\*\*/u

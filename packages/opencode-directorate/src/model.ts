@@ -338,6 +338,8 @@ const SealSchema = Schema.Struct({
   gates: since(GatesSchema, {}),
   gen: since(Count, 0),
   headSha: Schema.String,
+  /** The directory of the OpenCode instance that sealed it, whose watchdog reports it if the Liaison does not. */
+  host: opt(Schema.String),
   id: Schema.String,
   /** Lenses the settings turned off for this review. */
   lensesOff: opt(list(Schema.String)),
