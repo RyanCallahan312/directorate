@@ -2,10 +2,16 @@
 // tool result.
 import { Effect, FileSystem, Option, Path } from "effect";
 
-import { inDependencyDir, installed, readable, sealedFile } from "./content.ts";
+import {
+  inDependencyDir,
+  installed,
+  outsideWorktreeScope,
+  readable,
+  sealedFile,
+} from "./content.ts";
 import type { Shown } from "./coverage.ts";
 import { failure } from "./error.ts";
-import { isSecret, scopeOf } from "./exclusions.ts";
+import { inScope, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import type { Region, Seal, Side } from "./model.ts";
 import { Store } from "./store.ts";
@@ -197,7 +203,9 @@ export const readLines = Effect.fn("Directorate.readLines")(function* (
       ? `base ${seal.baseSha.slice(0, 10)}`
       : seal.postImage === "commit"
         ? `head ${seal.headSha.slice(0, 10)}`
-        : "sealed post-image";
+        : outsideWorktreeScope(seal, path)
+          ? `base ${seal.baseSha.slice(0, 10)} (outside the sealed scope; working tree not captured)`
+          : "sealed post-image";
   return `${path}:${s}-${e} of ${all.length} · ${src}\n${out.join("\n")}${cut}${e < all.length ? `\n… ${all.length - e} more lines (pass start: ${e + 1})` : ""}`;
 });
 
@@ -229,9 +237,7 @@ export const grepSealed = Effect.fn("Directorate.grepSealed")(function* (
     "--",
     ...scope,
   ];
-  const out = yield* (yield* Git).run(seal.repo, args, [0, 1], {
-    GIT_LITERAL_PATHSPECS: "1",
-  });
+  const out = yield* (yield* Git).run(seal.repo, args, [0, 1]);
   const rows = out
     .split("\n")
     .filter(Boolean)
@@ -257,24 +263,19 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* (
 ) {
   const git = yield* Git;
   const scope = scopeOf(dir ? [dir] : undefined) ?? [];
-  const lit = { GIT_LITERAL_PATHSPECS: "1" };
   const tree = (rev: string) =>
     git
-      .run(
-        seal.repo,
-        ["ls-tree", "-r", "-z", "--name-only", rev, "--", ...scope],
-        [0],
-        lit
-      )
+      .run(seal.repo, [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        rev,
+        "--",
+        ...scope,
+      ])
       .pipe(Effect.map((out) => out.split("\0").filter(Boolean)));
-  const under = (p: string) =>
-    !scope.length || scope.some((d) => p === d || p.startsWith(`${d}/`));
-  const gone = new Set([
-    ...seal.deleted,
-    ...seal.files.flatMap((f) =>
-      f.oldPath && f.oldPath !== f.path ? [f.oldPath] : []
-    ),
-  ]);
+  const gone = new Set(seal.deleted);
   const names =
     seal.postImage === "commit"
       ? yield* tree(seal.headSha)
@@ -289,7 +290,7 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* (
             ),
           ]),
         ]
-          .filter((p) => under(p) && !gone.has(p))
+          .filter((p) => inScope(p, scope) && !gone.has(p))
           .sort();
   if (!names.length && dir && inDependencyDir(dir))
     return yield* listInstalled(seal, dir);
@@ -358,7 +359,6 @@ export const history = Effect.fn("Directorate.history")(function* (
     return yield* failure(`${path} is a secret-like path; withheld.`);
   if (input.rev && !REV.test(input.rev))
     return yield* failure(`Invalid revision ${input.rev}.`);
-  const lit = { GIT_LITERAL_PATHSPECS: "1" };
   // Before the first commit, the seal's head is the empty tree, which has no history.
   const head = (yield* git.hasCommit(seal.repo, seal.headSha))
     ? seal.headSha
@@ -380,8 +380,7 @@ export const history = Effect.fn("Directorate.history")(function* (
         "--",
         ...(path ? [path] : []),
       ],
-      [0, 128],
-      lit
+      [0, 128]
     );
   } else if (input.kind === "blame") {
     if (!path) return yield* failure("blame needs path");
@@ -390,8 +389,7 @@ export const history = Effect.fn("Directorate.history")(function* (
     out = yield* git.run(
       seal.repo,
       ["blame", "--date=short", `-L${s},${e}`, rev, "--", path],
-      [0, 128],
-      lit
+      [0, 128]
     );
   } else {
     if (!input.rev) return yield* failure("show needs rev");
@@ -419,8 +417,7 @@ export const history = Effect.fn("Directorate.history")(function* (
         "--",
         ...(path ? [path] : []),
       ],
-      [0, 128],
-      lit
+      [0, 128]
     );
     if (!path)
       out = out
@@ -435,5 +432,5 @@ export const history = Effect.fn("Directorate.history")(function* (
   const n = fitting(lines);
   return n < lines.length
     ? `${lines.slice(0, n).join("\n")}\n… truncated; narrow with path, rev, or lines`
-    : out || "(no output)";
+    : lines.join("\n") || "(no output)";
 });

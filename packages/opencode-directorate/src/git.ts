@@ -9,6 +9,7 @@ import { failure, ReviewError } from "./error.ts";
 
 const GIT_ENV = (extra: Record<string, string> = {}) => ({
   GIT_OPTIONAL_LOCKS: "0",
+  GIT_LITERAL_PATHSPECS: "1",
   GIT_EXTERNAL_DIFF: "",
   GIT_PAGER: "cat",
   GIT_CONFIG_PARAMETERS: "",
@@ -83,7 +84,13 @@ const make = Effect.gen(function* () {
   const hasCommit = (repo: string, oid: string) =>
     check(repo, ["cat-file", "-e", `${oid}^{commit}`]);
   const isIgnored = (repo: string, p: string) =>
-    check(repo, ["check-ignore", "-q", "--", p]);
+    // check-ignore checks a pathname and rejects Git's literal pathspec flag.
+    run(repo, ["check-ignore", "-q", "--", p], [0], {
+      GIT_LITERAL_PATHSPECS: "0",
+    }).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false)
+    );
   const root = (dir: string) =>
     run(dir, ["rev-parse", "--show-toplevel"]).pipe(
       Effect.map((out) => out.trim())

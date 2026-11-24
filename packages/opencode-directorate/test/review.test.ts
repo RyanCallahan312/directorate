@@ -256,8 +256,173 @@ const local = async (dir: string, mode: any = "default") =>
   await run(
     createSeal({ repo: dir, mode, target: { kind: "local" }, owner: lead })
   );
+
+test("paths capture and freshness interpret bracketed directories literally", async () => {
+  const dir = repo({
+    "[route]/tracked.ts": "inside\n",
+    "r/tracked.ts": "outside\n",
+  });
+  write(dir, "[route]/new.ts", "new inside\n");
+  write(dir, "r/new.ts", "new outside\n");
+  const seal = await run(
+    createSeal({
+      repo: dir,
+      mode: "default",
+      target: { kind: "paths", paths: ["[route]/"] },
+    })
+  );
+  assert.deepEqual(
+    seal.files.map((f) => f.path),
+    ["[route]/new.ts", "[route]/tracked.ts"]
+  );
+  assert.deepEqual(
+    seal.regions.map((r) => r.file),
+    ["[route]/new.ts", "[route]/tracked.ts"]
+  );
+  write(dir, "r/tracked.ts", "changed outside\n");
+  assert.equal(
+    (await run(currentFingerprint(seal))).fingerprint,
+    seal.fingerprint
+  );
+  write(dir, "[route]/tracked.ts", "changed inside\n");
+  assert.notEqual(
+    (await run(currentFingerprint(seal))).fingerprint,
+    seal.fingerprint
+  );
+  const diff = await run(
+    createSeal({
+      repo: dir,
+      mode: "default",
+      target: { kind: "local", paths: ["[route]"] },
+    })
+  );
+  assert.deepEqual(diff.files.map((f) => f.path).sort(), [
+    "[route]/new.ts",
+    "[route]/tracked.ts",
+  ]);
+  const matches = await run(
+    grepSealed(diff, "changed", { paths: ["[route]"] })
+  );
+  assert.match(matches, /^\[route\]\/tracked.ts:/m);
+  assert.doesNotMatch(matches, /^r\//m);
+  const outside = await run(readLines(diff, "r/tracked.ts", "new"));
+  assert.match(
+    outside,
+    /base .*outside the sealed scope; working tree not captured/
+  );
+  assert.doesNotMatch(outside, /changed outside/);
+});
+
+test("unsupported targets reject path restrictions rather than widen the review", async () => {
+  const dir = repo({ "a/file.ts": "a\n", "b/file.ts": "b\n" });
+  for (const kind of ["commit", "auto", "range", "pr"] as const) {
+    await assert.rejects(
+      run(
+        createSeal({
+          repo: dir,
+          mode: "default",
+          target: { kind, paths: ["a"] },
+        })
+      ),
+      /does not support paths/
+    );
+  }
+});
+
+test("paths seal does not expose a base blob as the post-image of an absent sparse file", async () => {
+  const dir = repo({
+    "visible/file.ts": "visible\n",
+    "hidden/file.ts": "not checked out\n",
+  });
+  g(dir, "sparse-checkout", "set", "--cone", "visible");
+  const seal = await run(
+    createSeal({ repo: dir, mode: "default", target: { kind: "paths" } })
+  );
+  assert.equal(
+    seal.files.find((f) => f.path === "hidden/file.ts")?.status,
+    "deleted"
+  );
+  assert.ok(seal.regions.every((r) => r.file !== "hidden/file.ts"));
+  assert.doesNotMatch(await run(listFiles(seal)), /hidden\/file.ts/);
+  await assert.rejects(
+    run(readLines(seal, "hidden/file.ts", "new")),
+    /does not exist/
+  );
+});
+
+test("a recreated staged deletion is present in the sealed diff, listing and new-side read", async () => {
+  const dir = repo({
+    "src/a.ts": "context\noriginal\n",
+    "src/same.ts": "same\n",
+  });
+  g(dir, "rm", "--cached", "src/a.ts");
+  g(dir, "rm", "--cached", "src/same.ts");
+  write(dir, "src/a.ts", "context\nreplacement\n");
+  const seal = await local(dir);
+  const patch = readFileSync(await run(diffFile(seal)), "utf8");
+  assert.match(patch, /^-original$/m);
+  assert.match(patch, /^\+replacement$/m);
+  assert.match(patch, /^ context$/m);
+  assert.doesNotMatch(patch, /src\/same.ts/);
+  assert.ok(seal.regions.every((r) => r.file !== "src/same.ts"));
+  assert.deepEqual(
+    seal.files.map(({ path, status }) => [path, status]),
+    [["src/a.ts", "modified"]]
+  );
+  assert.match(await run(listFiles(seal, "src")), /^src\/a\.ts$/m);
+  assert.deepEqual(await run(readable(seal, "src/a.ts")), {
+    content: "context\nreplacement\n",
+    live: false,
+  });
+});
+
+test("history clips long patch lines even when all clipped lines fit on one page", async () => {
+  const dir = repo({ "long.ts": `${"x".repeat(60_000)}\n` });
+  const seal = await local(dir);
+  const result = await run(
+    history(seal, { kind: "show", rev: "HEAD", path: "long.ts" })
+  );
+  assert.ok(Buffer.byteLength(result) <= OUTPUT_MAX_BYTES);
+  assert.match(result, /^\+x+ …$/m);
+});
+
 /** Fixture timestamp. */
 const T0 = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+
+test("only a subsequent successful retry clears a failed question", async () => {
+  const seal = await local(repo());
+  const first = {
+    call: "first",
+    agent: scout.agent,
+    prompt: "question: same",
+    status: "completed",
+    startedAt: T0,
+  } as const;
+  const failed = {
+    ...first,
+    call: "failed",
+    prompt: "question: same\ncheck the guard",
+    status: "failed",
+  } as const;
+  const reviewed = { ...seal, regions: [], children: [first, failed] };
+  assert.deepEqual(childFailures(reviewed), [failed]);
+  assert.equal(
+    assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
+    "partial"
+  );
+  assert.equal(
+    assess(
+      {
+        ...reviewed,
+        children: [...reviewed.children, { ...first, call: "retry" }],
+      },
+      { entries: [], notes: [] },
+      {},
+      "normal"
+    ).status,
+    "complete"
+  );
+});
 const at = (path: string, line: number, side: "new" | "old" = "new") => ({
   path,
   line,
@@ -388,41 +553,6 @@ test("tool paths decode to the repository's form: contained, normalized, the roo
     assert.equal(path(bad)._tag, "None", bad);
   assert.deepEqual(
     [
-
-test("only a subsequent successful retry clears a failed question", async () => {
-  const seal = await local(repo());
-  const first = {
-    call: "first",
-    agent: scout.agent,
-    prompt: "question: same",
-    status: "completed",
-    startedAt: T0,
-  } as const;
-  const failed = {
-    ...first,
-    call: "failed",
-    prompt: "question: same\ncheck the guard",
-    status: "failed",
-  } as const;
-  const reviewed = { ...seal, regions: [], children: [first, failed] };
-  assert.deepEqual(childFailures(reviewed), [failed]);
-  assert.equal(
-    assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
-    "partial"
-  );
-  assert.equal(
-    assess(
-      {
-        ...reviewed,
-        children: [...reviewed.children, { ...first, call: "retry" }],
-      },
-      { entries: [], notes: [] },
-      {},
-      "normal"
-    ).status,
-    "complete"
-  );
-});
       path(" ./a//./b c.ts ").pipe((o) => o._tag === "Some" && o.value),
       path("a/../b").pipe((o) => o._tag === "Some" && o.value),
     ],
@@ -1144,6 +1274,10 @@ test("quotes: exact lines pass and snap to the real line; fragments and hallucin
     /fragment/
   );
   await assert.rejects(
+    run(checkQuote(seal, at("src/math.ts", 1), "b: number) {\nreturn a /")),
+    /fragment/
+  );
+  await assert.rejects(
     run(checkQuote(seal, at("src/math.ts", 10), "return a % b")),
     /does not appear/
   );
@@ -1273,10 +1407,6 @@ test("listings: worktree seals list what was sealed; dependency directories list
     /directorate_ls lists a dependency directory/
   );
 });
-  await assert.rejects(
-    run(checkQuote(seal, at("src/math.ts", 1), "b: number) {\nreturn a /")),
-    /fragment/
-  );
 
 // ---------- ledger rules ----------
 test("verdict rules: lead decides only minor entries by others; refuter decides the rest; authors may withdraw", () => {
@@ -1960,13 +2090,19 @@ test("refresh uses the captured generation to reopen dependent findings", async 
   const dir = repo({
     "src/math.ts": MATH,
     "src/guard.ts": "export const checked = false\n",
+    "src/caller.ts": "export const call = () => div(1, 0)\n",
   });
   write(dir, "src/math.ts", `${MATH}// first edit\n`);
   const seal = await local(dir);
   write(dir, "src/math.ts", `${MATH}// second edit\n`);
   const ledger = {
     entries: [
-      entry("F1", { status: "confirmed", evidence: ["src/guard.ts:1"] }),
+      entry("F1", {
+        status: "confirmed",
+        anchor: at("src/caller.ts", 1),
+        quote: "export const call = () => div(1, 0)",
+        evidence: ["src/guard.ts:1"],
+      }),
     ],
     notes: [],
   };

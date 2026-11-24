@@ -76,31 +76,42 @@ type Captured = {
   regions: readonly Region[];
 };
 
-/** An untracked file as an addition. Withheld files are never read: their name is enough to list them. */
+/** An untracked file as an addition or a net diff when it replaces a staged deletion. */
 const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(function* (
   repo: string,
-  path: string
+  path: string,
+  base: string,
+  deleted?: Piece
 ) {
-  const piece = (lines: readonly string[]): Piece => ({
-    code: "A",
-    path,
-    lines: [
-      `diff --git ${shown(`a/${path}`)} ${shown(`b/${path}`)}`,
-      "new file mode 100644",
-      ...lines,
-    ],
-  });
-  if (exclusionReason(path)) return piece([]);
-  const { buf } = yield* (yield* Worktree).entry(repo, path);
-  if (buf === undefined) return undefined;
+  const code = deleted ? "M" : "A";
+  if (exclusionReason(path)) return { code, path, lines: [] } satisfies Piece;
+  const { buf, mode } = yield* (yield* Worktree).entry(repo, path);
+  if (buf === undefined) return deleted;
+  const git = yield* Git;
+  const old = deleted ? yield* git.blob(repo, base, path) : undefined;
+  const oldMode = deleted?.lines
+    .find((line) => line.startsWith("deleted file mode "))
+    ?.slice("deleted file mode ".length);
+  const newMode =
+    mode === "link" ? "120000" : mode === "exec" ? "100755" : "100644";
+  const sameBytes = old?.equals(
+    oldMode === "120000" && mode === "link"
+      ? buf.subarray("symlink -> ".length, -1)
+      : buf
+  );
+  if (sameBytes && oldMode === newMode) return undefined;
+
   // Diff the captured bytes, not the live path, so a symlink stays its link text.
   const fs = yield* FileSystem.FileSystem;
-  const file = (yield* Path.Path).join(
-    yield* fs.makeTempDirectoryScoped({ prefix: "directorate-delta-" }),
-    "b"
-  );
+  const paths = yield* Path.Path;
+  const scratch = yield* fs.makeTempDirectoryScoped({
+    prefix: "directorate-delta-",
+  });
+  const file = paths.join(scratch, "b");
+  const original = old ? paths.join(scratch, "a") : "/dev/null";
   yield* fs.writeFile(file, buf);
-  const body = (yield* (yield* Git).run(
+  if (old) yield* fs.writeFile(original, old);
+  const body = (yield* git.run(
     repo,
     [
       "diff",
@@ -109,23 +120,50 @@ const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(function* (
       "--no-textconv",
       "--no-index",
       "--",
-      "/dev/null",
+      original,
       file,
     ],
     [0, 1]
   ))
     .replace(/\n$/, "")
     .split("\n");
-  // git names the scratch file: keep its body, renamed to the real path. An empty file has only the header.
+  // Use the real names and modes in place of those of the scratch files.
   const start = body.findIndex(
     (l) => l.startsWith("--- ") || l.startsWith("Binary files")
   );
-  if (start < 0) return piece([]);
-  const hunk = body.findIndex((l) => l.startsWith("@@"));
-  const pre = body
-    .slice(start, hunk < 0 ? body.length : hunk)
-    .map((l) => (l.startsWith("+++ ") ? `+++ ${shown(`b/${path}`)}` : l));
-  return piece([...pre, ...(hunk < 0 ? [] : body.slice(hunk))]);
+  const a = shown(`a/${path}`);
+  const b = shown(`b/${path}`);
+  const from = old ? a : "/dev/null";
+  const endOfHeader = body.findIndex((l) => l.startsWith("@@"));
+  const headers =
+    start < 0
+      ? []
+      : body
+          .slice(start, endOfHeader < 0 ? undefined : endOfHeader)
+          .map((l) =>
+            l.startsWith("--- ")
+              ? `--- ${from}`
+              : l.startsWith("+++ ")
+                ? `+++ ${b}`
+                : l.startsWith("Binary files ")
+                  ? `Binary files ${from} and ${b} differ`
+                  : l
+          );
+  return {
+    code,
+    path,
+    lines: [
+      ...(deleted && !old ? deleted.lines : []),
+      `diff --git ${a} ${b}`,
+      ...(!old
+        ? [`new file mode ${newMode}`]
+        : oldMode === newMode
+          ? []
+          : [`old mode ${oldMode}`, `new mode ${newMode}`]),
+      ...headers,
+      ...(endOfHeader < 0 ? [] : body.slice(endOfHeader)),
+    ],
+  } satisfies Piece;
 }, Effect.scoped);
 
 /** Paths targets: every file in scope as whole-file regions, numbered in file order. Withheld files are never read. */
@@ -244,15 +282,20 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* (
           })
     )
   );
-  const extra = worktree
-    ? yield* Effect.forEach(
-        yield* git.untracked(seal.repo, scope),
-        (f) => untrackedPiece(seal.repo, f),
-        { concurrency: IO_CONCURRENCY }
-      )
-    : [];
+  const untracked = worktree ? yield* git.untracked(seal.repo, scope) : [];
+  const untrackedNames = new Set(untracked);
+  const replacements = new Map(
+    tracked
+      .filter((p) => p.code === "D" && untrackedNames.has(p.path))
+      .map((p) => [p.path, p])
+  );
+  const extra = yield* Effect.forEach(
+    untracked,
+    (f) => untrackedPiece(seal.repo, f, seal.baseSha, replacements.get(f)),
+    { concurrency: IO_CONCURRENCY }
+  );
   const { text, files } = assemble([
-    ...tracked,
+    ...tracked.filter((p) => replacements.get(p.path) !== p),
     ...extra.filter(Predicate.isNotUndefined),
   ]);
   const regions = yield* buildRegions(files, text);
@@ -307,10 +350,17 @@ const capture = Effect.fn("Directorate.capture")(function* (
   );
   yield* store.writeDiff(seal, text);
   const sigs = worktree ? Object.fromEntries(signed) : undefined;
+  // Secret paths have no signatures; check presence without reading their bytes.
+  const absentSecrets = yield* Effect.filter(
+    changed.filter(isSecret),
+    (path) => wt.present(top, path).pipe(Effect.map((present) => !present)),
+    { concurrency: IO_CONCURRENCY }
+  );
   const deleted = [
     ...new Set([
       ...signed.filter(([, sig]) => sig === "deleted").map(([f]) => f),
-      ...(worktree
+      ...absentSecrets,
+      ...(seal.target.kind === "paths"
         ? files.filter((f) => f.status === "deleted").map((f) => f.path)
         : []),
     ]),

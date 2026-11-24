@@ -222,7 +222,12 @@ const register = Effect.fn("Directorate.register")(function* () {
             head: optional(str),
             commit: optional(str),
             pr: optional(str),
-            paths: optional(Schema.Array(RepoScope)),
+            paths: optional(
+              Schema.Array(RepoScope).annotate({
+                description:
+                  "Literal file or directory restrictions, supported only by local and paths targets.",
+              })
+            ),
           })
         ),
         budget_minutes: optional(

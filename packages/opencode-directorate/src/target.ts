@@ -25,6 +25,14 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(function* (
   target: Target
 ): Effect.fn.Return<Ends, ReviewError, Git> {
   const git = yield* Git;
+  if (
+    target.paths?.length &&
+    target.kind !== "local" &&
+    target.kind !== "paths"
+  )
+    return yield* failure(
+      `The ${target.kind} target does not support paths. Use local for scoped working-tree changes or paths for whole files.`
+    );
   switch (target.kind) {
     case "auto": {
       const head = yield* git.head(repo);

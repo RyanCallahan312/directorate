@@ -2,7 +2,7 @@
 import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { failure, ReviewError } from "./error.ts";
-import { DEPENDENCY_DIRS, isSecret } from "./exclusions.ts";
+import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import {
   type Anchor,
@@ -16,8 +16,9 @@ import { Store } from "./store.ts";
 
 const IO_CONCURRENCY = 16;
 
-const renamedAway = (seal: Seal, p: string) =>
-  seal.files.some((f) => f.oldPath === p && f.path !== p);
+export const outsideWorktreeScope = (seal: Seal, path: string) =>
+  seal.postImage === "worktree" && !inScope(path, scopeOf(seal.target.paths));
+
 /** A path's bytes on one side of the seal. Paths arrive in repository form, checked by RepoPath at the tool boundary. */
 const sealedBytes = Effect.fnUntraced(function* (
   seal: Seal,
@@ -28,7 +29,7 @@ const sealedBytes = Effect.fnUntraced(function* (
   if (side === "old") return yield* git.blob(seal.repo, seal.baseSha, p);
   if (seal.postImage === "commit")
     return yield* git.blob(seal.repo, seal.headSha, p);
-  if (seal.deleted.includes(p) || renamedAway(seal, p)) return undefined;
+  if (seal.deleted.includes(p)) return undefined;
   const snap = yield* (yield* Store).readSnapshot(seal, p);
   if (snap !== undefined) return snap;
   // Changed but withheld (excluded) files have no sealed content; everything else unchanged is the base.
@@ -89,7 +90,6 @@ export const readable = Effect.fn("Directorate.readable")(function* (
   if (
     side === "old" ||
     seal.deleted.includes(p) ||
-    renamedAway(seal, p) ||
     seal.files.some((f) => f.path === p)
   )
     return yield* failure(
@@ -112,6 +112,10 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(function* (
   anchor: Anchor,
   quote: string
 ) {
+  if (anchor.side === "new" && outsideWorktreeScope(seal, anchor.path))
+    return yield* failure(
+      `${anchor.path} is outside the sealed scope; only the base is available. Use side:"old" to anchor to the base.`
+    );
   const { content } = yield* readable(seal, anchor.path, anchor.side).pipe(
     Effect.mapError(
       (e) =>

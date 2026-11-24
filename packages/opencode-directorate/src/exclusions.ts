@@ -31,6 +31,10 @@ export const DEPENDENCY_DIRS =
   /(^|\/)(node_modules|vendor|\.venv|venv|__pypackages__|bower_components|Pods|site-packages|\.bundle)\//;
 /** Stored scopes as git pathspecs; none, or only the root, is the whole repository. Tool inputs arrive as RepoScope. */
 export const scopeOf = (paths?: readonly string[]) => {
-  const s = (paths ?? []).filter((p) => p !== "" && p !== ".");
+  const s = (paths ?? [])
+    .map((p) => p.replace(/\/+$/, ""))
+    .filter((p) => p !== "" && p !== ".");
   return s.length ? s : undefined;
 };
+export const inScope = (p: string, scope?: readonly string[]) =>
+  !scope?.length || scope.some((d) => p === d || p.startsWith(`${d}/`));
