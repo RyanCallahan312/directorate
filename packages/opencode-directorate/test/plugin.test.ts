@@ -496,8 +496,67 @@ test("registers fifteen tools, four hooks, and the settings RPC; tools assert pe
     })
   ).content;
   assert.match(out, /local changes .* 2 files · 2 regions/s);
+  assert.doesNotMatch(out, /\n{3,}/u);
   assert.ok(sealOf(out));
   assert.deepEqual(asserted, ["directorate_liaison:directorate_seal"]);
+});
+
+test("review scope falls back from explicit input to project, global, and branch defaults", async () => {
+  const dir = repo();
+  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args]);
+  git("switch", "-qc", "feature");
+  git("add", "src/a.ts");
+  git("commit", "-qm", "branch change");
+  const { call, sealOf } = await harness(dir);
+  const seal = async (session: string, input = {}) => {
+    const result = await call(
+      "directorate_seal",
+      { mode: "full", ...input },
+      "directorate_liaison",
+      session
+    );
+    return sealJson(sealOf(result.content));
+  };
+  const branch = await seal("branch");
+  assert.match(
+    branch.description,
+    /branch 1 commit ahead of main plus local changes/u
+  );
+  assert.deepEqual(
+    branch.files.map(({ path }: { path: string }) => path),
+    ["src/a.ts", "src/b.ts"]
+  );
+
+  mkdirSync(join(home, ".opencode"), { recursive: true });
+  writeFileSync(globalSettings, JSON.stringify({ default_scope: "local" }));
+  const local = await seal("global");
+  assert.deepEqual(
+    local.files.map(({ path }: { path: string }) => path),
+    ["src/b.ts"]
+  );
+
+  await call(
+    "directorate_configure",
+    {
+      action: "write",
+      scope: "project",
+      settings: { default_scope: "repository" },
+    },
+    "build"
+  );
+  assert.equal((await seal("project")).target.kind, "paths");
+  assert.equal(
+    (await seal("explicit", { scope: "local" })).baseSha,
+    local.baseSha
+  );
+  assert.equal(
+    (await seal("target", { target: { kind: "commit" } })).target.kind,
+    "commit"
+  );
+  await assert.rejects(
+    seal("ambiguous", { scope: "branch", target: { kind: "local" } }),
+    /Pass either scope or target/u
+  );
 });
 
 test("the plugin registers bundled review agents and skill without discovery files", async () => {
@@ -556,16 +615,21 @@ test("bundled registration preserves existing agent and skill overrides", async 
   ]);
 });
 
-test("/directorate-review submits a question-first prompt in the current session", async () => {
+test("/directorate-review forwards free-form requests and only offers setup questions for a bare command", async () => {
   const { commands, prompts, S } = await harness(repo());
   const review = commands.get("directorate-review");
   assert.ok(review);
 
   const sessionID = Session.ID.make(S("lead"));
-  const text = "Review PR #123";
+  const text =
+    "Review PR #123 with one model.\nFocus on migrations; skip generated files.\n\n ";
   const files = [{ uri: "file:///tmp/context.md" }];
   await Effect.runPromise(
-    review.execute({ delivery: "queue", prompt: { files, text }, sessionID })
+    review.execute({
+      delivery: "queue",
+      prompt: { files, text },
+      sessionID,
+    })
   );
 
   assert.equal(prompts.length, 1);
@@ -574,11 +638,87 @@ test("/directorate-review submits a question-first prompt in the current session
   assert.equal(submitted.sessionID, sessionID);
   assert.equal(submitted.delivery, "queue");
   assert.deepEqual(submitted.files, files);
-  assert.ok(submitted.text.startsWith(text));
+  assert.ok(
+    submitted.text.startsWith(
+      `${text}\n\nStart a Directorate code review using the request above.`
+    )
+  );
   assert.match(
     submitted.text,
-    /question tool.*\s+Once the options are settled, dispatch directorate_liaison/u
+    /Use configured defaults for details the user didn't specify\. Ask only if a missing or conflicting detail/u
   );
+  assert.doesNotMatch(
+    submitted.text,
+    /use the question tool to offer the mode/u
+  );
+  assert.match(
+    submitted.text,
+    /Dispatch directorate_liaison with the user's request/u
+  );
+
+  for (const blank of ["", " \n\t"]) {
+    await Effect.runPromise(
+      review.execute({ delivery: "queue", prompt: { text: blank }, sessionID })
+    );
+    assert.match(
+      prompts.at(-1)?.text ?? "",
+      /^Start a Directorate code review\./u
+    );
+    assert.match(prompts.at(-1)?.text ?? "", /omit both target and scope/u);
+    assert.match(
+      prompts.at(-1)?.text ?? "",
+      /use the question tool to offer the mode/u
+    );
+  }
+  await Effect.runPromise(
+    review.execute({
+      delivery: "queue",
+      prompt: { text: "--scope local focus on tests" },
+      sessionID,
+    })
+  );
+  assert.match(prompts.at(-1)?.text ?? "", /pass scope: "local"/u);
+  const count = prompts.length;
+  await assert.rejects(
+    Effect.runPromise(
+      review.execute({
+        delivery: "queue",
+        prompt: { text: "--scope nonsense" },
+        sessionID,
+      })
+    ),
+    /Use --scope branch/u
+  );
+  assert.equal(prompts.length, count);
+});
+
+test("a whole-file directory target includes unchanged files but excludes files outside it", async () => {
+  const dir = repo();
+  mkdirSync(join(dir, "packages/nested"), { recursive: true });
+  writeFileSync(
+    join(dir, "packages/nested/keep.ts"),
+    "export const keep = 1\n"
+  );
+  execFileSync("git", ["-C", dir, "add", "packages"]);
+  execFileSync("git", ["-C", dir, "commit", "-qm", "add package"]);
+  writeFileSync(join(dir, "packages/draft.ts"), "export const draft = 1\n");
+
+  const { call, sealOf } = await harness(dir);
+  const target = { kind: "paths", paths: ["packages/"] };
+  const { content } = await call("directorate_seal", { target });
+  const seal = sealJson(sealOf(content));
+  assert.deepEqual(
+    seal.files.map(({ path, status }: { path: string; status: string }) => [
+      path,
+      status,
+    ]),
+    [
+      ["packages/draft.ts", "modified"],
+      ["packages/nested/keep.ts", "unchanged"],
+    ]
+  );
+  const diff = await call("directorate_diff", { seal: seal.id });
+  assert.match(diff.content, /export const keep = 1/u);
 });
 
 test("registered agents receive their role-specific tool permissions", async () => {
@@ -1188,6 +1328,8 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
   const { client } = await harness(dir);
   const t = tui(client, dir, [
     pick("Global Charter"),
+    pick("Default review scope"),
+    pick("local"),
     pick("Default mode"),
     pick("full"),
     pick("Panel by default"),
@@ -1237,6 +1379,7 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
   assert.deepEqual(t.alerts, []);
   assert.match(t.toasts[0].message, /"500" is not 2–240 minutes/);
   assert.deepEqual(JSON.parse(readFileSync(globalSettings, "utf8")), {
+    default_scope: "local",
     mode: "full",
     budget_minutes: { full: 45 },
     panel: {
@@ -1252,7 +1395,7 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
   assert.match(
     t.toasts[1].message,
     new RegExp(
-      `<Filed/Saved> ${globalSettings}\\. Effective: mode full · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs\\.`
+      `<Filed/Saved> ${globalSettings}\\. Effective: mode full · scope local · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs\\.`
     )
   );
 });

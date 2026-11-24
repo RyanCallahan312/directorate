@@ -86,6 +86,14 @@ export const TargetKind = Schema.Literals([
   "paths",
 ]);
 export type TargetKind = typeof TargetKind.Type;
+export const ReviewScope = Schema.Literals(["branch", "local", "repository"]);
+export type ReviewScope = typeof ReviewScope.Type;
+export const DEFAULT_REVIEW_SCOPE: ReviewScope = "branch";
+export const REVIEW_SCOPE_TARGET = {
+  branch: "auto",
+  local: "local",
+  repository: "paths",
+} as const satisfies Record<ReviewScope, TargetKind>;
 export const Side = Schema.Literals(["new", "old"]);
 export type Side = typeof Side.Type;
 export const Disposition = Schema.Literals(["reviewed", "skimmed", "skipped"]);
@@ -409,6 +417,11 @@ const Seat = Schema.Struct({
 export type Seat = typeof Seat.Type;
 /** directorate.json. Every key is optional; an absent key falls through to the global file, then to Directorate defaults. */
 export const Settings = Schema.Struct({
+  default_scope: Schema.optionalKey(
+    ReviewScope.annotate({
+      description: "Review scope when the request names no scope or target.",
+    })
+  ),
   mode: Schema.optionalKey(
     Mode.annotate({ description: "Review mode when the request names none." })
   ),

@@ -1,4 +1,5 @@
 {
+  "default_scope": "branch",
   "mode": "full",
   "budget_minutes": {
     "default": 8,

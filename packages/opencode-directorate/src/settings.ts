@@ -30,6 +30,8 @@ const STRICT = { onExcessProperty: "error" } as const;
 
 /** The project's settings over the global ones, key by key within each section. */
 export const merge = (global: Settings, project: Settings): Settings => ({
+  ...(global.default_scope && { default_scope: global.default_scope }),
+  ...(project.default_scope && { default_scope: project.default_scope }),
   mode: project.mode ?? global.mode,
   budget_minutes:
     global.budget_minutes || project.budget_minutes
@@ -71,6 +73,7 @@ export const resolve = (
 export function describe(s: Settings): string | undefined {
   const parts = [
     s.mode && `mode ${s.mode}`,
+    s.default_scope && `scope ${s.default_scope}`,
     s.panel?.enabled !== undefined && `panel ${s.panel.enabled ? "on" : "off"}`,
     s.panel?.models && `panel models ${s.panel.models.map(seatRef).join(", ")}`,
     s.budget_minutes &&

@@ -39,12 +39,15 @@ import { ledgerTools } from "./ledger-tools.ts";
 import { currentSeverity, unresolved } from "./ledger.ts";
 import {
   type Child,
+  DEFAULT_REVIEW_SCOPE,
   Mode,
   ModelRef,
   PANELIST,
   REFUTER,
   RepoScope,
+  REVIEW_SCOPE_TARGET,
   REVIEWER,
+  ReviewScope,
   SCOUT,
   type Seal,
   TargetKind,
@@ -153,20 +156,40 @@ const register = Effect.fn("Directorate.register")(function* () {
   yield* configureRpc();
   yield* host.command.transform((editor) => {
     editor.add({
-      description: "Choose options and start a Directorate review",
-      execute: ({ delivery, prompt, sessionID }) =>
-        host.session
+      description:
+        "Start a Directorate review [request or --scope branch|local|repository]",
+      execute: ({ delivery, prompt, sessionID }) => {
+        const flag = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u.exec(
+          prompt.text
+        );
+        const scope = flag?.groups?.value;
+        if (flag && !Schema.is(ReviewScope)(scope)) {
+          return failure(
+            "Use --scope branch, --scope local, or --scope repository."
+          );
+        }
+        const hasRequest = prompt.text.trim().length > 0;
+        return host.session
           .prompt({
             ...prompt,
             delivery,
             sessionID,
-            text: `${prompt.text}
-
-Start a Directorate code review. Before dispatching, use the question tool to ask for any options not already supplied above. Ask what to review (current branch with local changes, uncommitted changes only, a PR, a commit or range, or specific paths), the mode (configured default, default, code-quality, or full), and whether to use the configured panel setting, a single-model review, or a panel. Offer an optional focus or time limit. If the target needs a PR number, ref, or path, ask for it. If the user cancels, do not start a review.
-
-Once the options are settled, dispatch directorate_liaison with the chosen target and options. Leave configured defaults unset rather than guessing them. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
+            text: [
+              hasRequest ? prompt.text : "",
+              hasRequest
+                ? "Start a Directorate code review using the request above. Interpret it as natural language and carry through the requested target, scope, mode, model preferences, time limit, and any focus or constraints. Use configured defaults for details the user didn't specify. Ask only if a missing or conflicting detail prevents you from honoring the request. Do not silently drop a constraint or widen the target."
+                : "Start a Directorate code review. Before dispatching, use the question tool to offer the mode (configured default, default, code-quality, or full) and panel preference (configured default, single model, or Directorate Seats). If the user cancels, do not start a review.",
+              "Dispatch directorate_liaison with the user's request and any clarified options. Leave configured defaults unset rather than guessing them. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.",
+              "Reviewing everything in named files or directories uses a whole-file target (kind: paths, with repository-relative paths), including unchanged files. A request for changes only is a diff review, not a whole-file review.",
+              scope
+                ? `The --scope flag selects ${scope}. Tell the Liaison to pass scope: "${scope}" to directorate_seal, without a target. If the request also names a conflicting target, ask which to use.`
+                : "If no target or scope was requested, do not ask what to review: omit both target and scope so directorate_seal uses the configured default.",
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
           })
-          .pipe(Effect.asVoid),
+          .pipe(Effect.asVoid);
+      },
       name: "directorate-review",
     });
   });
@@ -180,7 +203,7 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
     tool({
       name: "directorate_seal",
       description:
-        "Start a Directorate review: pin the target in containment and start the time budget. target.kind auto = local changes plus any commits on this branch beyond the default branch. Also: local, commit, range (base may be @default), pr, paths (no paths = whole repository). Returns the seal id every other directorate_* tool needs. resume takes over an interrupted review (mode and target not needed). panel convenes independent whole-change reviews by several models (Directorate Seats), combined in one Directive.",
+        "Start a Directorate review: pin the target in containment and start the time budget. Pass scope or a specific target, not both. Omit both to use the configured default scope (branch if unset). target.kind auto = local changes plus any commits on this branch beyond the default branch. Also: local, commit, range (base may be @default), pr, paths (no paths = whole repository). Returns the seal id every other directorate_* tool needs. resume takes over an interrupted review. panel convenes independent whole-change reviews by several models (Directorate Seats), combined in one Directive.",
       input: Schema.Struct({
         mode: optional(
           Mode.annotate({
@@ -188,6 +211,7 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
               "Omit to use the configured default (directorate.json), else default.",
           })
         ),
+        scope: optional(ReviewScope),
         target: optional(
           Schema.Struct({
             kind: TargetKind,
@@ -241,6 +265,9 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
         ),
       }),
       execute: function* (input, c) {
+        if (!input.resume && input.scope && input.target) {
+          return yield* failure("Pass either scope or target, not both.");
+        }
         const a = actor(c);
         const prior = yield* sessions.active(a.session);
         if (prior && prior.id !== input.resume) {
@@ -290,8 +317,6 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
             `Resumed containment \`${seal.id}\` (${seal.mode}): ${seal.description}. Observed ${cov.read}/${cov.total}; ${unresolved(yield* store.loadLedger(seal.id)).length} entries unresolved. Continue where it stopped: directorate_diff for unread regions, directorate_ledger_list for entries.`
           );
         }
-        if (!input.target)
-          return yield* failure("directorate_seal needs a target (or resume).");
         const repo =
           input.repo ||
           (yield* sessions.directory(a.session)) ||
@@ -307,7 +332,11 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
         const seal = yield* createSeal({
           repo,
           mode,
-          target: input.target,
+          target: input.target ?? {
+            kind: REVIEW_SCOPE_TARGET[
+              input.scope ?? configured.default_scope ?? DEFAULT_REVIEW_SCOPE
+            ],
+          },
           budgetMinutes,
           question: input.question,
           panel,
@@ -335,25 +364,27 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
             `base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
             seal.lensesOff
               ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
-              : "",
+              : undefined,
             seal.panel && seal.regions.length
               ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} directorate_seat subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
-              : "",
+              : undefined,
             "",
             "| File | Status | Lines | Regions | Excluded |",
             "|---|---|---|---|---|",
             ...rows,
             changedFiles.length > rows.length
               ? `| … ${changedFiles.length - rows.length} more files | | | | |`
-              : "",
+              : undefined,
             unchanged
               ? `\n${unchanged} unchanged files in scope (whole-file regions; directorate_ls lists them).`
-              : "",
+              : undefined,
             "",
             seal.regions.length
               ? "Next: read every region with directorate_diff (call it with only the seal to get the next unread chunk)."
               : "Nothing to review in this target. Inform the requester, or seal a different target.",
-          ].join("\n")
+          ]
+            .filter((line) => line !== undefined)
+            .join("\n")
         );
       },
     });

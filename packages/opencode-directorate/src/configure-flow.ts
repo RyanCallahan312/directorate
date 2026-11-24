@@ -5,9 +5,11 @@
 import {
   DEFAULT_BUDGET,
   DEFAULT_PANEL,
+  DEFAULT_REVIEW_SCOPE,
   LENSES,
   Mode,
   PANEL_BUDGET_FACTOR,
+  ReviewScope,
   type Seat,
   seatRef,
   type Settings,
@@ -66,6 +68,7 @@ export interface Backend {
 type Lens = (typeof LENSES)[number];
 type Item =
   | "mode"
+  | "review-scope"
   | "panel"
   | "seats"
   | "budgets"
@@ -82,6 +85,11 @@ const MODE_HINT: Record<Mode, string> = {
   default: "functionality and test coverage",
   "code-quality": "adds maintainability and design",
   full: "every applicable lens",
+};
+const SCOPE_HINT: Record<ReviewScope, string> = {
+  branch: "branch commits beyond the default branch plus uncommitted changes",
+  local: "uncommitted changes only",
+  repository: "whole repository, including unchanged files",
 };
 
 export const messageOf = (e: unknown) =>
@@ -100,6 +108,7 @@ function tidy(s: Settings): Settings {
   return (
     keep({
       mode: s.mode,
+      ...(s.default_scope && { default_scope: s.default_scope }),
       budget_minutes: s.budget_minutes && keep(s.budget_minutes),
       panel: s.panel && keep(s.panel),
       lenses: s.lenses && keep(s.lenses),
@@ -327,6 +336,13 @@ export async function configure(dialog: Dialogs, directorate: Backend) {
       current: at,
       options: [
         {
+          title: "Default review scope",
+          value: "review-scope",
+          description:
+            draft.default_scope ??
+            unset(base.default_scope ?? DEFAULT_REVIEW_SCOPE),
+        },
+        {
           title: "Default mode",
           value: "mode",
           description: draft.mode ?? unset(base.mode ?? "default"),
@@ -408,6 +424,30 @@ export async function configure(dialog: Dialogs, directorate: Backend) {
       }
     }
     if (item === "clear") draft = {};
+    if (item === "review-scope") {
+      const reviewScope = await choose<ReviewScope | "unset">(
+        "Default review scope",
+        draft.default_scope ?? "unset",
+        [
+          ...ReviewScope.literals.map((value) => ({
+            title: value,
+            value,
+            description: SCOPE_HINT[value],
+          })),
+          {
+            title: "Unset",
+            value: "unset",
+            description: unset(base.default_scope ?? DEFAULT_REVIEW_SCOPE),
+          },
+        ]
+      );
+      if (reviewScope === "unset") {
+        const { default_scope: _, ...rest } = draft;
+        draft = rest;
+      } else if (reviewScope) {
+        draft = { ...draft, default_scope: reviewScope };
+      }
+    }
     if (item === "mode") {
       const mode = await choose<Mode | "unset">(
         "Default mode",

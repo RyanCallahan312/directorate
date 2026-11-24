@@ -5,7 +5,7 @@ The Directorate (`opencode-directorate`) is an Effect-native OpenCode plugin. It
 | Agent | Role | `directorate_*` tools it may call |
 | --- | --- | --- |
 | 🟢 `directorate_liaison` | **Liaison (Lead).** Seals the target in containment, reads every changed region, decides what to investigate, issues the Directive. | all `directorate_*` except `directorate_configure` |
-| 🔵 `directorate_auditor` | **Auditor (Investigator).** Answers one narrow question and files candidate findings to the dossier. | read tools, `directorate_ledger_add`, `directorate_note` |
+| 🔵 `directorate_auditor` | **Auditor (Investigator).** Answers one narrow question and files candidate findings to the dossier. | read tools except `directorate_ledger_list`, `directorate_ledger_add`, `directorate_note` |
 | 🟠 `directorate_seat` | **Directorate Seat (Panel seat).** In a panel review, reviews the whole change independently on its own model under memetic isolation. | read tools except `directorate_ledger_list`, `directorate_ledger_add`, `directorate_note` |
 | 🟣 `directorate_compliance` | **Compliance (Verifier).** Confirms or refutes findings in a separate session. | read tools, `directorate_ledger_verdict` |
 
@@ -27,7 +27,7 @@ The plugin enforces the parts of a review that should not depend on judgment:
 
 ## Install from npm
 
-Once published, install the package in a stable location so OpenCode can load the plugin and discover its bundled agents and skill from the same copy:
+Once published, install the package in a stable location so OpenCode can load it:
 
 ```sh
 npm install --global opencode-directorate@0.1.0
@@ -57,7 +57,13 @@ The plugin registers its four agents and the `directorate-lenses` skill when it 
 
 ## Start a review
 
-Run `/directorate-review` from your normal OpenCode session. The agent uses the question tool to ask what to review, which mode to use, and whether to run a panel before dispatching `directorate_liaison`. You can supply details up front, for example `/directorate-review PR #123 in code-quality mode`, and the agent asks only for the remaining options.
+Run `/directorate-review` from your normal OpenCode session. With no scope or target specified, it reviews the current branch's commits beyond the default branch plus staged, unstaged, and untracked changes, in every review mode. Change this under **Default review scope** in `/directorate-configure` or set `default_scope` in `directorate.json`. Project settings override global settings.
+
+Write what you want after the command in plain language, for example `/directorate-review PR #123, focus on migration safety, use one model`. Unspecified options use your configured defaults; the agent asks only if it needs clarification to honor the request. Running the command with no arguments still offers mode and panel choices.
+
+For an explicit scope flag, start the arguments with `--scope branch`, `--scope local` (uncommitted changes only), or `--scope repository` (including unchanged files). For example, `/directorate-review --scope local in code-quality mode`.
+
+`/directorate-review scope to everything in packages/` reviews eligible files recursively under `packages/`, including unchanged files, instead of reviewing the branch diff. Paths are relative to the repository root; normal exclusions still apply.
 
 ## The review, as a state chart
 
@@ -189,6 +195,7 @@ flowchart LR
 
 1. **Pick a file:** Global Charter or Local Jurisdiction (this project).
 2. **Change any of:**
+   - the default review scope (`branch`, `local`, or `repository`)
    - the default mode
    - whether a panel runs by default
    - the Directorate Seats (panel models), each with a thinking level chosen from the ones that model offers

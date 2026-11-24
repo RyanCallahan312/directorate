@@ -75,7 +75,7 @@ export function configureTool(tool: DefineTool) {
   tool({
     name: "directorate_configure",
     description:
-      "Show or write Directorate settings (directorate.json): default review mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
+      "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
     input: Schema.Struct({
       action: Schema.Literals(["show", "write"]),
       scope: optional(
@@ -137,7 +137,7 @@ export function configureTool(tool: DefineTool) {
           now.project
         ),
         `Effective: ${describe(now.effective) ?? "Directorate defaults"}.`,
-        `Unset keys keep Directorate defaults: mode default; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets 20, 30, 60 min (default, code-quality, full), half again for panels; no lenses disabled.`,
+        `Unset keys keep Directorate defaults: scope branch; mode default; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets 20, 30, 60 min (default, code-quality, full), half again for panels; no lenses disabled.`,
         `Lenses: ${LENSES.join(", ")}.`,
       ];
       if (input.find !== undefined) {

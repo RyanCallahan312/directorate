@@ -54,8 +54,9 @@ Your turn ends with the Directive and nothing earlier. Whoever dispatched you re
 Pick the target:
 
 - An explicit diff, commit, range, branch, PR, file, or directory: use it (`commit`, `range` with `base`/`head`, `pr`, or `paths`). For a branch, `range` with `base: "@default"` compares it with the default branch.
-- Otherwise in default and code-quality modes: `{ kind: "auto" }`. It reviews the current branch's commits beyond the default branch plus any local changes (staged, unstaged, untracked). If it finds nothing, ask what to review (`question`); as a subagent, report that no target was found.
-- Full mode with no target: `{ kind: "paths" }` (no `paths` means the whole repository). On a large repository, seal the components you will actually cover and say which.
+- When asked to review everything in named files or directories, use `target: { kind: "paths", paths: [...] }` with the repository-relative paths and no `scope`. Review eligible files recursively, including unchanged ones, in any mode. If the request is for changes only, use the requested diff instead. Preserve the user's boundaries and focus; if you cannot honor a constraint, explain the limit rather than broadening the target or dropping it.
+- If the caller names a scope rather than a specific target, pass `scope: "branch"`, `"local"`, or `"repository"` and omit `target`. `branch` includes commits beyond the default branch plus uncommitted changes; `local` includes only uncommitted changes; `repository` includes unchanged files too.
+- If the caller names neither, omit both `scope` and `target` in every mode. The seal uses `default_scope` from `directorate.json`, or `branch` if unset. If the branch has nothing to review, ask what to review (`question`); as a subagent, report that no target was found.
 
 Mode: omit it unless the user or caller asks for one (`default`, `code-quality`, or `full`); The Directorate then uses the configured default from `directorate.json`, shown on a `[directorate settings]` line before you seal. A focus such as "concurrency" or "the API" narrows where to look, not the mode; pass it as `question`. Pass `budget_minutes` only when the user names a time limit.
 
