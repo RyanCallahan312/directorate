@@ -51,7 +51,6 @@ export function ledgerTools(tool: DefineTool) {
       lens: Lens,
       path: RepoPath,
       line: positiveInt,
-      end_line: optional(positiveInt),
       side: optional(
         Side.annotate({ description: "old = base side, for removed code" })
       ),
@@ -104,7 +103,7 @@ export function ledgerTools(tool: DefineTool) {
           const raw = {
             path: input.path,
             line: input.line,
-            endLine: Math.max(input.end_line ?? input.line, input.line),
+            endLine: input.line,
             side: input.side ?? "new",
           };
           const anchor = yield* checkQuote(seal, raw, input.quote).pipe(
@@ -175,7 +174,6 @@ export function ledgerTools(tool: DefineTool) {
       ),
       path: optional(RepoPath),
       line: optional(positiveInt),
-      end_line: optional(positiveInt),
       side: optional(Side),
       quote: optional(str),
     }),
@@ -209,10 +207,7 @@ export function ledgerTools(tool: DefineTool) {
               ? {
                   path: input.path ?? entry.anchor.path,
                   line: input.line ?? entry.anchor.line,
-                  endLine: Math.max(
-                    input.end_line ?? input.line ?? entry.anchor.endLine,
-                    input.line ?? entry.anchor.line
-                  ),
+                  endLine: input.line ?? entry.anchor.endLine,
                   side: input.side ?? entry.anchor.side,
                 }
               : entry.anchor;

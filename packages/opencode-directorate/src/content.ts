@@ -128,28 +128,31 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(function* (
   const q = quote.split("\n").map(norm).filter(Boolean);
   if (!q.length)
     return yield* failure("quote is empty; copy the exact code at the anchor.");
-  if (!q.some((l) => l.replace(/\s/g, "").length >= 8))
+  const longEnough = (l: string) => l.replace(/\s/g, "").length >= 8;
+  if (!q.some(longEnough))
     return yield* failure(
       "quote too short to identify the code; include at least one full line with 8 or more non-space characters."
     );
   const matchAt = (i: number): number | undefined => {
-    const first = norm(lines[i] ?? "");
-    if (
-      !first ||
-      !(q.length === 1
-        ? first === q[0]
-        : first === q[0] || first.endsWith(q[0]))
-    )
-      return undefined;
     let j = i;
-    for (let k = 1; k < q.length; k++) {
-      j++;
-      while (j < lines.length && !norm(lines[j])) j++;
+    let complete = false;
+    for (const [k, part] of q.entries()) {
+      if (k > 0) {
+        j++;
+        while (j < lines.length && !norm(lines[j])) j++;
+      }
       const h = norm(lines[j] ?? "");
-      if (!(h === q[k] || (k === q.length - 1 && h.startsWith(q[k]))))
+      if (h === part) complete ||= longEnough(part);
+      else if (
+        !(
+          q.length > 1 &&
+          ((k === 0 && h.endsWith(part)) ||
+            (k === q.length - 1 && h.startsWith(part)))
+        )
+      )
         return undefined;
     }
-    return j;
+    return complete ? j : undefined;
   };
   const base = anchor.line - 1;
   for (const d of [0, 1, -1, 2, -2, 3, -3]) {

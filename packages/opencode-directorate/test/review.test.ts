@@ -1273,6 +1273,10 @@ test("listings: worktree seals list what was sealed; dependency directories list
     /directorate_ls lists a dependency directory/
   );
 });
+  await assert.rejects(
+    run(checkQuote(seal, at("src/math.ts", 1), "b: number) {\nreturn a /")),
+    /fragment/
+  );
 
 // ---------- ledger rules ----------
 test("verdict rules: lead decides only minor entries by others; refuter decides the rest; authors may withdraw", () => {
