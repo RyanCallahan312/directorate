@@ -15,6 +15,9 @@ const regionSize = (r: Region) =>
   r.patchStart === 0
     ? r.newEnd - r.newStart + 1
     : r.patchEnd - r.patchStart + 1;
+/** Read by the lead, or reviewed by disposition: a region that counts as observed. */
+export const isRead = (r: Region) =>
+  (!r.disposition && Boolean(r.ownerRead)) || r.disposition === "reviewed";
 export function coverageSummary(seal: Seal) {
   const total = seal.regions.length;
   const skipped = seal.regions.filter((r) => r.disposition === "skipped");
@@ -22,9 +25,7 @@ export function coverageSummary(seal: Seal) {
   const assessed = seal.regions.filter(
     (r) => r.disposition === "reviewed" && !r.ownerRead
   );
-  const read = seal.regions.filter(
-    (r) => (!r.disposition && r.ownerRead) || r.disposition === "reviewed"
-  );
+  const read = seal.regions.filter(isRead);
   const unread = seal.regions.filter((r) => !r.disposition && !r.ownerRead);
   return {
     total,

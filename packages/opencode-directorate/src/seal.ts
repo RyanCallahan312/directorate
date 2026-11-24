@@ -21,6 +21,7 @@ import { reopen } from "./ledger.ts";
 import {
   type Actor,
   DEFAULT_BUDGET,
+  type Entry,
   type FileEntry,
   type Ledger,
   type Mode,
@@ -376,6 +377,23 @@ const capture = Effect.fn("Directorate.capture")(function* (
   return { ...seal, files, regions, sigs, deleted, fingerprint } satisfies Seal;
 });
 
+/** A new seal's id: its creation time, and a random suffix. */
+const sealId = Effect.fnUntraced(function* (createdAt: DateTime.Utc) {
+  const suffix = Hex.encode(yield* (yield* Crypto.Crypto).randomBytes(3));
+  return `directorate-${DateTime.formatIso(createdAt)
+    .replace(/[-:TZ.]/g, "")
+    .slice(0, 14)}-${suffix}`;
+});
+
+/** A commit pair's description with the ends it moved to; a worktree's description does not name them. */
+const describedAt = (seal: Seal, cur: Pick<Current, "baseSha" | "headSha">) =>
+  seal.postImage === "commit"
+    ? seal.description.replace(
+        /\(([^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/,
+        `($1${cur.baseSha.slice(0, 10)} → ${cur.headSha.slice(0, 10)})`
+      )
+    : seal.description;
+
 export const createSeal = Effect.fn("Directorate.createSeal")(
   function* (input: {
     repo: string;
@@ -391,10 +409,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     const store = yield* Store;
     const top = yield* (yield* Git).root(input.repo);
     const createdAt = yield* DateTime.now;
-    const suffix = Hex.encode(yield* (yield* Crypto.Crypto).randomBytes(3));
-    const id = `directorate-${DateTime.formatIso(createdAt)
-      .replace(/[-:TZ.]/g, "")
-      .slice(0, 14)}-${suffix}`;
+    const id = yield* sealId(createdAt);
     const panel = input.panel?.length ? [...new Set(input.panel)] : undefined;
     const budgetMinutes =
       input.budgetMinutes ??
@@ -484,6 +499,55 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
   }
 );
 
+/** What `next` changed in the files an entry rests on, judged against `before`; undefined when nothing it rests on moved. */
+const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
+  const inChange = new Set(
+    next.files.filter((f) => f.status !== "unchanged").map((f) => f.path)
+  );
+  return (e: Entry) => {
+    const hit = [...depsOf(e)].filter((d) => changed.has(d));
+    const gone =
+      e.anchor.side === "new" &&
+      before.files.some(
+        (f) => f.path === e.anchor.path && f.status !== "unchanged"
+      ) &&
+      !inChange.has(e.anchor.path);
+    const baseMoved = e.anchor.side === "old" && changed.has("(base moved)");
+    return hit.length || gone || baseMoved
+      ? { hit: hit.length > 0, gone, files: hit.join(", ") || "base moved" }
+      : undefined;
+  };
+};
+
+/** Files that differ between a seal and a later capture of the same target. */
+const changedBetween = (seal: Seal, captured: Seal) =>
+  seal.postImage === "worktree"
+    ? Effect.succeed(changedSignatures(seal.sigs ?? {}, captured.sigs ?? {}))
+    : changedSinceSeal(seal, captured);
+
+/** Captured regions, with the receipts and dispositions of the `from` regions (those `keep` accepts) whose content they repeat. */
+const carryRegions = (
+  from: readonly Region[],
+  onto: readonly Region[],
+  keep: (r: Region) => boolean = () => true
+) => {
+  const byKey = new Map(
+    from.flatMap((r) => (r.key && keep(r) ? [[r.key, r] as const] : []))
+  );
+  return onto.map((r): Region => {
+    const p = r.key ? byKey.get(r.key) : undefined;
+    return p
+      ? {
+          ...r,
+          ownerRead: p.ownerRead,
+          readBy: p.readBy,
+          disposition: p.disposition,
+          note: p.note,
+        }
+      : r;
+  });
+};
+
 /**
  * Re-pins a moved target into the seal's next generation. Regions whose content did not change keep their read receipts
  * and dispositions; entries whose anchor or evidence changed reopen. Both are saved, and returned.
@@ -521,13 +585,7 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(function* (
       baseSha: cur.baseSha,
       headSha: cur.headSha,
       baseTip: cur.baseTip ?? seal.baseTip,
-      description:
-        seal.postImage === "commit"
-          ? seal.description.replace(
-              /\(([^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/,
-              `($1${cur.baseSha.slice(0, 10)} → ${cur.headSha.slice(0, 10)})`
-            )
-          : seal.description,
+      description: describedAt(seal, cur),
     },
     scopeOf(seal.target.paths),
     beforeCapture
@@ -537,47 +595,19 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(function* (
     )
   );
   if (captured.fingerprint === seal.fingerprint) return unchanged;
-  const changed = new Set(
-    seal.postImage === "worktree"
-      ? changedSignatures(seal.sigs ?? {}, captured.sigs ?? {})
-      : yield* changedSinceSeal(seal, captured)
-  );
-  const prior = new Map(
-    seal.regions.flatMap((r) => (r.key ? [[r.key, r] as const] : []))
-  );
-  const regions = captured.regions.map((r): Region => {
-    const p = r.key ? prior.get(r.key) : undefined;
-    return p
-      ? {
-          ...r,
-          ownerRead: p.ownerRead,
-          readBy: p.readBy,
-          disposition: p.disposition,
-          note: p.note,
-        }
-      : r;
-  });
-  const inChange = new Set(
-    captured.files.filter((f) => f.status !== "unchanged").map((f) => f.path)
-  );
+  const changed = new Set(yield* changedBetween(seal, captured));
+  const regions = carryRegions(seal.regions, captured.regions);
+  const moved = movedUnder(seal, captured, changed);
   const reopened: string[] = [];
   const entries = ledger.entries.map((e) => {
-    const hit = [...depsOf(e)].filter((d) => changed.has(d));
-    if (e.status === "refuted" && !hit.length) return e;
-    const gone =
-      e.anchor.side === "new" &&
-      seal.files.some(
-        (f) => f.path === e.anchor.path && f.status !== "unchanged"
-      ) &&
-      !inChange.has(e.anchor.path);
-    const baseMoved = e.anchor.side === "old" && changed.has("(base moved)");
-    if (!hit.length && !gone && !baseMoved) return e;
+    const why = moved(e);
+    if (!why || (e.status === "refuted" && !why.hit)) return e;
     reopened.push(e.id);
     return reopen(
       e,
-      gone
+      why.gone
         ? `${e.anchor.path} is no longer part of the change; re-verify or refute`
-        : `code changed after the seal (${hit.join(", ") || "base moved"}); re-verify and re-anchor`
+        : `code changed after the seal (${why.files}); re-verify and re-anchor`
     );
   });
   const next = { ...captured, regions };
