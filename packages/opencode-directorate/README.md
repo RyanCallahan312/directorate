@@ -107,7 +107,7 @@ stateDiagram-v2
     class Reported done
 ```
 
-**Targets.** `auto` (local changes, plus the branch's commits beyond the default branch), `local`, `commit`, `range`, `pr`, or `paths` (whole files, for a full review).
+**Targets.** `auto` (local changes, plus the branch's commits beyond the default branch), `local`, `commit`, `range`, `pr`, or `paths` (whole files, for a full review). Only `local` and `paths` accept a literal file or directory restriction.
 
 **Budget phases.** The default budget is 20, 30, or 60 minutes for `default`, `code-quality`, and `full` mode. While a seal is open, each `directorate_*` tool result about it ends with a `[DIRECTORATE // ...]` budget line telling the caller where it stands.
 
@@ -127,7 +127,7 @@ stateDiagram-v2
 | Containment Drift (Freshness) | the code moved since the seal | `directorate_refresh` (allowed once; a move that is not refreshed makes the Directive stale) |
 | Unverified Dossier (Open entries) | findings are unverified | verdicts, mostly from `directorate_compliance` |
 
-**Resume.** `directorate_seal resume: <id>` lets another session take over an unreported review. If its budget is in drain or locked, the clock restarts with half the current budget (at least 5 minutes), unless the call passes `budget_minutes`.
+**Resume.** `directorate_seal resume: <id>` lets another session take over an unreported review. On takeover in drain or locked, the clock restarts with half the current budget (at least 5 minutes). A session resuming its own review keeps its deadline unless the call explicitly passes `budget_minutes`.
 
 ### Auditors, Seats, and Compliance
 
@@ -160,6 +160,8 @@ stateDiagram-v2
 ### Panel reviews (Directorate Seats)
 
 Several frontier models each review the whole change; The Directorate merges their work into one verified Directive. Ask for it with `directorate_seal panel: true` (the default seats are listed in `DEFAULT_PANEL` in `model.ts`) or `panel_models: ["provider/model#variant", ...]`. A panel works with any mode, and its default budget is 1.5× the mode's.
+
+A Seat's review is complete only when a finished session for that Seat has read every region in the current seal. A normal handoff with unread regions is reported as partial.
 
 ```mermaid
 flowchart LR
@@ -366,7 +368,7 @@ A few rules hold everywhere:
 - **Schemas at boundaries.** Saved JSON, tool inputs (`RepoPath`, `RepoScope`, `LineRef`), GitHub responses, and git's raw diff (`RawDiff`) are decoded with Effect Schema.
 - **Withheld paths.** Secret-like files (`.env`, keys, credentials) and `.git` are redacted and never shown. Lockfiles and generated files are listed but not diffed.
 - **Installed dependencies.** `directorate_read` also reads gitignored files in dependency directories (such as `node_modules`), and `directorate_ls` lists such a directory one level deep from disk, with each link's resolved target, so agents find store paths (such as Bun's `node_modules/.bun/<name>@<version>+<hash>`) instead of guessing them. Both resolve symlinks first, so Bun and pnpm store links work, and then check the resolved path (`installed` in `content.ts`): it must stay inside the repository, be ignored, and not be secret-like.
-- **Listings match reads.** For local and paths seals, `directorate_ls` lists the base tree plus the changes captured at sealing, the same files `directorate_read` serves, not the live tree.
+- **Listings match reads.** For local and paths seals, `directorate_ls` lists the base tree plus the changes captured at sealing, the same files `directorate_read` serves, not the live tree. A read outside a scoped worktree seal is labeled as base content; the working-tree version was not captured.
 - **Bounded output.** The reading tools stay under OpenCode's 50 KiB / 2,000-line cut, and long regions continue on the next call.
 
 ## What a seal stores
