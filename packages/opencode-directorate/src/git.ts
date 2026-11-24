@@ -214,6 +214,35 @@ const make = Effect.gen(function* make() {
     );
   });
 
+  /**
+   * The merge base of two fetched commits. Without one (a shallow clone missing the shared history, or unrelated
+   * histories) this fails rather than standing in a tip: a two-tip diff is not the change the branch made.
+   */
+  const mergeBase = Effect.fn("Git.mergeBase")(function* mergeBase(
+    repo: string,
+    base: string,
+    head: string,
+    labels?: { readonly base: string; readonly head: string }
+  ) {
+    const mb = (yield* run(repo, ["merge-base", base, head], [0, 1])).trim();
+
+    if (mb) {
+      return mb;
+    }
+
+    const shallow =
+      (yield* run(repo, ["rev-parse", "--is-shallow-repository"])).trim() ===
+      "true";
+
+    const [b, h] = [labels?.base ?? base, labels?.head ?? head];
+
+    return yield* failure(
+      shallow
+        ? `Cannot find the merge base of ${b} and ${h}: this shallow clone lacks their shared history. Ask the user to deepen it (\`git fetch --deepen=<n>\` or \`git fetch --unshallow\`), then seal again.`
+        : `${b} and ${h} share no history (no merge base). Ask the user which base to review against.`
+    );
+  });
+
   /** Untracked files that .gitignore does not exclude. */
   const untracked = (repo: string, paths?: readonly string[]) =>
     run(repo, [
@@ -273,7 +302,7 @@ const make = Effect.gen(function* make() {
       )
     );
 
-  /** A PR's metadata from GitHub, with its merge base when both ends are fetched. */
+  /** A PR's metadata from GitHub, and whether each end is fetched. */
   const pr = Effect.fn("Git.pr")(function* pr(repo: string, id: string) {
     const response = yield* gh(repo, [
       "pr",
@@ -289,19 +318,12 @@ const make = Effect.gen(function* make() {
       )
     );
 
-    const headFetched = yield* hasCommit(repo, meta.headRefOid);
-    let mb: string | undefined;
+    const [headFetched, baseFetched] = yield* Effect.all(
+      [hasCommit(repo, meta.headRefOid), hasCommit(repo, meta.baseRefOid)],
+      { concurrency: 2 }
+    );
 
-    if (headFetched && (yield* hasCommit(repo, meta.baseRefOid))) {
-      mb =
-        (yield* run(
-          repo,
-          ["merge-base", meta.baseRefOid, meta.headRefOid],
-          [0, 1]
-        )).trim() || meta.baseRefOid;
-    }
-
-    return { ...meta, headFetched, mb };
+    return { ...meta, baseFetched, headFetched };
   });
 
   return {
@@ -313,6 +335,7 @@ const make = Effect.gen(function* make() {
     /** HEAD, or the empty tree in a repository with no commits yet. */
     head: (repo: string) => commitOrEmpty(repo, "HEAD"),
     isIgnored,
+    mergeBase,
     parentOf,
     pr,
     revParse,

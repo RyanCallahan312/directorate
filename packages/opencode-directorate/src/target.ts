@@ -1,9 +1,8 @@
 // Directorate targets: what a review compares (a base and a post-image), resolved from the user's target and re-resolved later
 // to tell whether the sealed code moved.
-import { Effect, Function } from "effect";
+import { Effect } from "effect";
 
-import { failure } from "./error.ts";
-import type { ReviewError } from "./error.ts";
+import { failure, ReviewError } from "./error.ts";
 import { scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
@@ -42,38 +41,49 @@ const localEnds = Effect.fnUntraced(function* localEnds(
 const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   const git = yield* Git;
   const head = yield* git.head(repo);
-
-  const def = yield* git
-    .defaultBranch(repo)
-    .pipe(Effect.orElseSucceed(Function.constUndefined));
+  const dirty = (yield* git.changedNames(repo, head)).length > 0;
 
   // Before the first commit, HEAD is the empty tree and nothing is ahead of anything.
-  const mb =
-    def && (yield* git.hasCommit(repo, head))
-      ? (yield* git.run(repo, ["merge-base", def, head], [0, 1])).trim() ||
-        undefined
-      : undefined;
+  if (!(yield* git.hasCommit(repo, head))) {
+    if (!dirty) {
+      return yield* failure(
+        "No local changes, and HEAD has no commits yet. Ask the user what to review."
+      );
+    }
+
+    return yield* localEnds(repo, { kind: "local" });
+  }
+
+  // Without a known base, the branch's commits cannot be found: sealing local-only would silently drop them.
+  const def = yield* git.defaultBranch(repo).pipe(
+    Effect.mapError(
+      (e) =>
+        new ReviewError({
+          message: `${e.message} Or use local scope to review only uncommitted changes.`,
+        })
+    )
+  );
+
+  const mb = yield* git.mergeBase(repo, def, head, { base: def, head: "HEAD" });
 
   const ahead =
-    mb && mb !== head
-      ? Number(
+    mb === head
+      ? 0
+      : Number(
           (yield* git.run(repo, [
             "rev-list",
             "--count",
             `${mb}..${head}`,
           ])).trim()
-        )
-      : 0;
-
-  const dirty = (yield* git.changedNames(repo, head)).length > 0;
+        );
 
   if (!dirty && !ahead) {
     return yield* failure(
-      `No local changes, and HEAD has no commits beyond ${def ?? "the default branch"}. Ask the user what to review.`
+      `No local changes, and HEAD has no commits beyond ${def}. Ask the user what to review.`
     );
   }
 
-  if (mb && ahead) {
+  if (ahead) {
     return {
       baseSha: mb,
       description: `branch ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${def}${dirty ? " plus local changes" : ""} (merge-base ${mb.slice(0, 10)} → working tree)`,
@@ -86,6 +96,22 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
 
   return yield* localEnds(repo, { kind: "local" });
 });
+
+const prMergeBase = (
+  repo: string,
+  m: {
+    readonly baseRefName: string;
+    readonly baseRefOid: string;
+    readonly headRefName: string;
+    readonly headRefOid: string;
+  }
+) =>
+  Git.use((git) =>
+    git.mergeBase(repo, m.baseRefOid, m.headRefOid, {
+      base: m.baseRefName,
+      head: m.headRefName,
+    })
+  );
 
 const rejectsPaths = (target: Target) =>
   target.paths?.length && target.kind !== "local" && target.kind !== "paths";
@@ -160,8 +186,10 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
         const h = yield* git.revParse(repo, target.head || "HEAD");
         const b = yield* git.revParse(repo, base);
 
-        const mb =
-          (yield* git.run(repo, ["merge-base", b, h], [0, 1])).trim() || b;
+        const mb = yield* git.mergeBase(repo, b, h, {
+          base,
+          head: target.head || "HEAD",
+        });
 
         return {
           baseSha: mb,
@@ -186,16 +214,18 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
           );
         }
 
-        if (!m.mb) {
+        if (!m.baseFetched) {
           return yield* failure(
             `Base commit ${m.baseRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin ${m.baseRefName}\`, then seal again.`
           );
         }
 
+        const mb = yield* prMergeBase(repo, m);
+
         return {
-          baseSha: m.mb,
+          baseSha: mb,
           baseTip: m.baseRefOid,
-          description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${m.mb.slice(0, 10)} → ${m.headRefOid.slice(0, 10)}) ${m.url}`,
+          description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${mb.slice(0, 10)} → ${m.headRefOid.slice(0, 10)}) ${m.url}`,
           headSha: m.headRefOid,
           kind: "pr",
           postImage: "commit",
@@ -262,17 +292,19 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
       } satisfies Current;
     }
 
-    const baseSha =
-      m.mb ??
-      (m.headRefOid === seal.headSha && m.baseRefOid === seal.baseTip
-        ? seal.baseSha
-        : undefined);
+    // An unfetched base still verifies when neither end moved since sealing.
+    const unmoved =
+      m.headRefOid === seal.headSha && m.baseRefOid === seal.baseTip;
 
-    if (!baseSha) {
+    if (!m.baseFetched && !unmoved) {
       return yield* failure(
         `the PR base moved to ${m.baseRefOid.slice(0, 10)}, which is not fetched (git fetch origin ${m.baseRefName})`
       );
     }
+
+    const baseSha = m.baseFetched
+      ? yield* prMergeBase(seal.repo, m)
+      : seal.baseSha;
 
     return {
       baseSha,

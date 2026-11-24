@@ -770,6 +770,53 @@ test("auto target: local changes if any, else the branch against the default bra
   assert.match(s3.description, /^main\.\.\.HEAD/u);
 });
 
+test("auto target: without a known default branch, committed work asks for a base instead of sealing local-only", async () => {
+  const dir = repo();
+  g(dir, "branch", "-m", "main", "trunk");
+  g(dir, "checkout", "-q", "-b", "feat");
+  write(dir, "src/math.ts", `${MATH}// feat\n`);
+  g(dir, "commit", "-qam", "feat");
+  write(dir, "package-lock.json", "{ }\n");
+
+  const seal = (target: { kind: "auto" | "local" }) =>
+    run(createSeal({ mode: "default", owner: lead, repo: dir, target }));
+
+  await assert.rejects(
+    seal({ kind: "auto" }),
+    /Cannot find the default branch.*which base.*local scope/u
+  );
+
+  const localSeal = await seal({ kind: "local" });
+  assert.deepEqual(
+    localSeal.files.map((f) => f.path),
+    ["package-lock.json"],
+    "explicit local still reviews uncommitted changes"
+  );
+
+  // Unrelated histories have no merge base: ask, rather than diffing the tips.
+  g(dir, "checkout", "-q", "--orphan", "main");
+  g(dir, "commit", "-qm", "unrelated");
+  g(dir, "checkout", "-q", "feat");
+  await assert.rejects(seal({ kind: "auto" }), /share no history/u);
+
+  // Before the first commit, there is no branch to compare: local changes are the target.
+  const unborn = mkdtempSync(join(tmpdir(), "directorate-repo-"));
+  dirs.push(unborn);
+  g(unborn, "init", "-q", "-b", "trunk");
+  write(unborn, "a.ts", "export const a = 1\n");
+
+  const first = await run(
+    createSeal({
+      mode: "default",
+      owner: lead,
+      repo: unborn,
+      target: { kind: "auto" },
+    })
+  );
+
+  assert.match(first.description, /^local changes/u);
+});
+
 // ---------- path policy ----------
 test("deleted and renamed-away paths have no new side; paths mode records deletions", async () => {
   const dir = repo({
@@ -959,6 +1006,74 @@ test("a shallow boundary is not a root commit when sealing a commit review", asy
     seal.files.map((f) => [f.path, f.status]),
     [["gone.txt", "deleted"]]
   );
+});
+
+test("range and PR reviews in a shallow clone missing the merge base ask to deepen instead of diffing the tips", async () => {
+  const dir = repo();
+  g(dir, "checkout", "-q", "-b", "feat");
+  write(dir, "src/math.ts", `${MATH}// feat\n`);
+  g(dir, "commit", "-qam", "feat");
+  g(dir, "checkout", "-q", "main");
+  write(dir, "package-lock.json", "{ }\n");
+  g(dir, "commit", "-qam", "main moves on");
+  const base = g(dir, "rev-parse", "main").trim();
+  const head = g(dir, "rev-parse", "feat").trim();
+  const shallow = join(dir, "shallow");
+  g(
+    dir,
+    "clone",
+    "-q",
+    "--depth=1",
+    "--no-single-branch",
+    pathToFileURL(dir).href,
+    shallow
+  );
+
+  const bin = mkdtempSync(join(tmpdir(), "directorate-bin-"));
+  dirs.push(bin);
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/bin/sh\necho '${JSON.stringify({ baseRefName: "main", baseRefOid: base, headRefName: "feat", headRefOid: head, number: 7, title: "t", url: "u" })}'\n`,
+    { mode: 0o755 }
+  );
+
+  const seal = (target: Parameters<typeof createSeal>[0]["target"]) =>
+    run(createSeal({ mode: "default", owner: lead, repo: shallow, target }));
+
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+
+  try {
+    await assert.rejects(
+      seal({ base: "origin/main", head: "origin/feat", kind: "range" }),
+      /merge base of origin\/main and origin\/feat: this shallow clone.*git fetch --deepen/u
+    );
+    await assert.rejects(
+      seal({ kind: "pr", pr: "7" }),
+      /merge base of main and feat: this shallow clone.*git fetch --unshallow/u
+    );
+
+    g(shallow, "fetch", "-q", "--deepen=1");
+
+    const range = await seal({
+      base: "origin/main",
+      head: "origin/feat",
+      kind: "range",
+    });
+
+    assert.deepEqual(
+      range.files.map((f) => f.path),
+      ["src/math.ts"],
+      "only the branch's change, not main's later commit"
+    );
+    const pr = await seal({ kind: "pr", pr: "7" });
+    assert.deepEqual(
+      pr.files.map((f) => f.path),
+      ["src/math.ts"]
+    );
+  } finally {
+    process.env.PATH = oldPath;
+  }
 });
 
 test("reading a sealed blob fails when git fails, instead of reading as a missing file", async () => {
