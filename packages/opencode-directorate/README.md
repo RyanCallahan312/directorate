@@ -385,3 +385,4 @@ bun run check  # from the workspace root; builds the GUI, typechecks, and runs n
 
 - **Effect version:** `effect` is a peer dependency pinned to the version the OpenCode host ships (4.0.6). The plugin uses the host's runtime and never starts its own.
 - **Reloading:** use `/reload` to force OpenCode to pick up changes from this checkout.
+- **Theme & copy:** see [THEME.md](THEME.md) for The Directorate's naming, vocabulary, and Dial 2.4 voice rules.
