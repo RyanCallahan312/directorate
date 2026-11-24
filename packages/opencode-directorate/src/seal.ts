@@ -5,6 +5,7 @@ import {
   DateTime,
   Effect,
   FileSystem,
+  Match,
   Path,
   Predicate,
   Schema,
@@ -13,36 +14,32 @@ import { Hex } from "effect/encoding";
 
 import { depsOf } from "./content.ts";
 import { isRead } from "./coverage.ts";
-import { assemble, buildRegions, type Piece, RawDiff, shown } from "./diff.ts";
+import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
+import type { Piece } from "./diff.ts";
 import { failure, ReviewError } from "./error.ts";
 import { exclusionReason, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { reopen, unresolved } from "./ledger.ts";
-import {
-  type Actor,
-  DEFAULT_BUDGET,
-  type Entry,
-  type FileEntry,
-  type Ledger,
-  type Mode,
-  PANEL_BUDGET_FACTOR,
-  type Region,
-  type Seal,
-  type Target,
-  REVIEWER,
+import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, REVIEWER } from "./model.ts";
+import type {
+  Actor,
+  Entry,
+  FileEntry,
+  Ledger,
+  Mode,
+  Region,
+  Seal,
+  Target,
 } from "./model.ts";
 import { emptyLedger, Store } from "./store.ts";
-import {
-  type Current,
-  currentFingerprint,
-  endsFingerprint,
-  resolveEnds,
-} from "./target.ts";
+import { currentFingerprint, endsFingerprint, resolveEnds } from "./target.ts";
+import type { Current } from "./target.ts";
 import { Worktree } from "./worktree.ts";
 
 const FILE_REGION_LINES = 300;
 const IO_CONCURRENCY = 16;
+
 /** Raw records (exact names) and the patch, in one run so they describe the same tree. */
 const RAW_DIFF = [
   "diff",
@@ -55,10 +52,12 @@ const RAW_DIFF = [
   "-z",
   "-p",
 ];
+
 const decodeRawDiff = Schema.decodeEffect(RawDiff);
 
 /** An edit landed while capturing; the capture is retried. */
 class CaptureDrift extends Data.TaggedError("DirectorateCaptureDrift") {}
+
 /** Retries a capture twice when files change mid-capture, then fails with `message`. */
 const settled =
   (message: string) =>
@@ -72,201 +71,274 @@ const settled =
     );
 
 const binary = (buf: Buffer) => buf.subarray(0, 8000).includes(0);
-type Captured = {
+
+interface Captured {
   text: string;
   files: readonly FileEntry[];
   regions: readonly Region[];
+}
+
+const gitFileMode = Match.type<"absent" | "link" | "exec" | "file">().pipe(
+  Match.when("link", () => "120000"),
+  Match.when("exec", () => "100755"),
+  Match.orElse(() => "100644")
+);
+
+const rewriteDiffHeader = (line: string, from: string, b: string): string => {
+  if (line.startsWith("--- ")) {
+    return `--- ${from}`;
+  }
+
+  if (line.startsWith("+++ ")) {
+    return `+++ ${b}`;
+  }
+
+  if (line.startsWith("Binary files ")) {
+    return `Binary files ${from} and ${b} differ`;
+  }
+
+  return line;
+};
+
+const diffModeLines = (
+  hasOld: boolean,
+  oldMode: string | undefined,
+  newMode: string
+): string[] => {
+  if (!hasOld) {
+    return [`new file mode ${newMode}`];
+  }
+
+  if (oldMode === newMode) {
+    return [];
+  }
+
+  return [`old mode ${oldMode}`, `new mode ${newMode}`];
 };
 
 /** An untracked file as an addition or a net diff when it replaces a staged deletion. */
-const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(function* (
-  repo: string,
-  path: string,
-  base: string,
-  deleted?: Piece
-) {
-  const code = deleted ? "M" : "A";
-  if (exclusionReason(path)) return { code, path, lines: [] } satisfies Piece;
-  const { buf, mode } = yield* (yield* Worktree).entry(repo, path);
-  if (buf === undefined) return deleted;
-  const git = yield* Git;
-  const old = deleted ? yield* git.blob(repo, base, path) : undefined;
-  const oldMode = deleted?.lines
-    .find((line) => line.startsWith("deleted file mode "))
-    ?.slice("deleted file mode ".length);
-  const newMode =
-    mode === "link" ? "120000" : mode === "exec" ? "100755" : "100644";
-  const sameBytes = old?.equals(
-    oldMode === "120000" && mode === "link"
-      ? buf.subarray("symlink -> ".length, -1)
-      : buf
-  );
-  if (sameBytes && oldMode === newMode) return undefined;
+const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
+  function* untrackedPiece(
+    repo: string,
+    path: string,
+    base: string,
+    deleted?: Piece
+  ) {
+    const code = deleted ? "M" : "A";
 
-  // Diff the captured bytes, not the live path, so a symlink stays its link text.
-  const fs = yield* FileSystem.FileSystem;
-  const paths = yield* Path.Path;
-  const scratch = yield* fs.makeTempDirectoryScoped({
-    prefix: "directorate-delta-",
-  });
-  const file = paths.join(scratch, "b");
-  const original = old ? paths.join(scratch, "a") : "/dev/null";
-  yield* fs.writeFile(file, buf);
-  if (old) yield* fs.writeFile(original, old);
-  const body = (yield* git.run(
-    repo,
-    [
-      "diff",
-      "--no-color",
-      "--no-ext-diff",
-      "--no-textconv",
-      "--no-index",
-      "--",
-      original,
-      file,
-    ],
-    [0, 1]
-  ))
-    .replace(/\n$/, "")
-    .split("\n");
-  // Use the real names and modes in place of those of the scratch files.
-  const start = body.findIndex(
-    (l) => l.startsWith("--- ") || l.startsWith("Binary files")
-  );
-  const a = shown(`a/${path}`);
-  const b = shown(`b/${path}`);
-  const from = old ? a : "/dev/null";
-  const endOfHeader = body.findIndex((l) => l.startsWith("@@"));
-  const headers =
-    start < 0
-      ? []
-      : body
-          .slice(start, endOfHeader < 0 ? undefined : endOfHeader)
-          .map((l) =>
-            l.startsWith("--- ")
-              ? `--- ${from}`
-              : l.startsWith("+++ ")
-                ? `+++ ${b}`
-                : l.startsWith("Binary files ")
-                  ? `Binary files ${from} and ${b} differ`
-                  : l
-          );
-  return {
-    code,
-    path,
-    lines: [
-      ...(deleted && !old ? deleted.lines : []),
-      `diff --git ${a} ${b}`,
-      ...(!old
-        ? [`new file mode ${newMode}`]
-        : oldMode === newMode
-          ? []
-          : [`old mode ${oldMode}`, `new mode ${newMode}`]),
-      ...headers,
-      ...(endOfHeader < 0 ? [] : body.slice(endOfHeader)),
-    ],
-  } satisfies Piece;
-}, Effect.scoped);
+    if (exclusionReason(path)) {
+      return { code, lines: [], path } satisfies Piece;
+    }
+
+    const { buf, mode } = yield* (yield* Worktree).entry(repo, path);
+
+    if (buf === undefined) {
+      return deleted;
+    }
+
+    const git = yield* Git;
+    const old = deleted ? yield* git.blob(repo, base, path) : undefined;
+
+    const oldMode = deleted?.lines
+      .find((line) => line.startsWith("deleted file mode "))
+      ?.slice("deleted file mode ".length);
+
+    const newMode = gitFileMode(mode);
+
+    const sameBytes = old?.equals(
+      oldMode === "120000" && mode === "link"
+        ? buf.subarray("symlink -> ".length, -1)
+        : buf
+    );
+
+    if (sameBytes && oldMode === newMode) {
+      return;
+    }
+
+    // Diff the captured bytes, not the live path, so a symlink stays its link text.
+    const fs = yield* FileSystem.FileSystem;
+    const paths = yield* Path.Path;
+
+    const scratch = yield* fs.makeTempDirectoryScoped({
+      prefix: "directorate-delta-",
+    });
+
+    const file = paths.join(scratch, "b");
+    const original = old ? paths.join(scratch, "a") : "/dev/null";
+    yield* fs.writeFile(file, buf);
+
+    if (old) {
+      yield* fs.writeFile(original, old);
+    }
+
+    const body = (yield* git.run(
+      repo,
+      [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-index",
+        "--",
+        original,
+        file,
+      ],
+      [0, 1]
+    ))
+      .replace(/\n$/u, "")
+      .split("\n");
+
+    // Use the real names and modes in place of those of the scratch files.
+    const start = body.findIndex(
+      (l) => l.startsWith("--- ") || l.startsWith("Binary files")
+    );
+
+    const a = shown(`a/${path}`);
+    const b = shown(`b/${path}`);
+    const from = old ? a : "/dev/null";
+    const endOfHeader = body.findIndex((l) => l.startsWith("@@"));
+
+    const headers =
+      start === -1
+        ? []
+        : body
+            .slice(start, endOfHeader === -1 ? undefined : endOfHeader)
+            .map((l) => rewriteDiffHeader(l, from, b));
+
+    return {
+      code,
+      lines: [
+        ...(deleted && !old ? deleted.lines : []),
+        `diff --git ${a} ${b}`,
+        ...diffModeLines(Boolean(old), oldMode, newMode),
+        ...headers,
+        ...(endOfHeader === -1 ? [] : body.slice(endOfHeader)),
+      ],
+      path,
+    } satisfies Piece;
+  },
+  Effect.scoped
+);
 
 /** Paths targets: every file in scope as whole-file regions, numbered in file order. Withheld files are never read. */
-const capturePaths = Effect.fn("Directorate.capturePaths")(function* (
-  top: string,
-  scope: readonly string[] | undefined,
-  changed: ReadonlySet<string>
-) {
-  const git = yield* Git;
-  const wt = yield* Worktree;
-  const [tracked, extra] = yield* Effect.all(
-    [
-      git.run(top, ["ls-files", "-z", "--", ...(scope ?? [])]),
-      git.untracked(top, scope),
-    ],
-    { concurrency: 2 }
-  );
-  const names = [
-    ...new Set([...tracked.split("\0").filter(Boolean), ...extra]),
-  ].sort();
-  const perFile = yield* Effect.forEach(
-    names,
-    Effect.fnUntraced(function* (path) {
-      const status = changed.has(path) ? "modified" : "unchanged";
-      const deleted = {
-        file: {
-          path,
-          status: "deleted",
-          added: 0,
-          removed: 0,
-        } satisfies FileEntry,
-        regions: [],
-      };
-      const excluded = exclusionReason(path);
-      if (excluded)
-        return (yield* wt.present(top, path))
-          ? {
-              file: {
-                path,
-                status,
-                added: 0,
-                removed: 0,
-                excluded,
-              } satisfies FileEntry,
-              regions: [],
-            }
-          : deleted;
-      const { buf } = yield* wt.entry(top, path);
-      if (buf === undefined) return deleted;
-      if (binary(buf))
-        return {
+const capturePaths = Effect.fn("Directorate.capturePaths")(
+  function* capturePaths(
+    top: string,
+    scope: readonly string[] | undefined,
+    changed: ReadonlySet<string>
+  ) {
+    const git = yield* Git;
+    const wt = yield* Worktree;
+
+    const [tracked, extra] = yield* Effect.all(
+      [
+        git.run(top, ["ls-files", "-z", "--", ...(scope ?? [])]),
+        git.untracked(top, scope),
+      ],
+      { concurrency: 2 }
+    );
+
+    const names = [
+      ...new Set([...tracked.split("\0").filter(Boolean), ...extra]),
+    ].toSorted();
+
+    const perFile = yield* Effect.forEach(
+      names,
+      Effect.fnUntraced(function* perFile(path) {
+        const status = changed.has(path) ? "modified" : "unchanged";
+
+        const deleted = {
           file: {
-            path,
-            status,
             added: 0,
+            path,
             removed: 0,
-            excluded: "binary",
+            status: "deleted",
           } satisfies FileEntry,
           regions: [],
         };
-      const text = buf.toString("utf8");
-      const lines = text.split("\n");
-      const n = text.replace(/\n$/, "").split("\n").length;
-      const regions: Omit<Region, "id">[] = [];
-      for (let s = 1; s <= n; s += FILE_REGION_LINES) {
-        const end = Math.min(n, s + FILE_REGION_LINES - 1);
-        regions.push({
-          file: path,
-          newStart: s,
-          newEnd: end,
-          patchStart: 0,
-          patchEnd: 0,
-          readBy: [],
-          key: yield* sha256(
-            `${path}\0${s}\0${lines.slice(s - 1, end).join("\n")}`
-          ),
-        });
-      }
-      return {
-        file: { path, status, added: n, removed: 0 } satisfies FileEntry,
-        regions,
-      };
-    }),
-    { concurrency: IO_CONCURRENCY }
-  );
-  return {
-    text: "",
-    files: perFile.map((x): FileEntry => x.file),
-    regions: perFile
-      .flatMap((x) => x.regions)
-      .map((r, i) => ({ id: `R${i + 1}`, ...r })),
-  } satisfies Captured;
-});
+
+        const excluded = exclusionReason(path);
+
+        if (excluded) {
+          return (yield* wt.present(top, path))
+            ? {
+                file: {
+                  added: 0,
+                  excluded,
+                  path,
+                  removed: 0,
+                  status,
+                } satisfies FileEntry,
+                regions: [],
+              }
+            : deleted;
+        }
+
+        const { buf } = yield* wt.entry(top, path);
+
+        if (buf === undefined) {
+          return deleted;
+        }
+
+        if (binary(buf)) {
+          return {
+            file: {
+              added: 0,
+              excluded: "binary",
+              path,
+              removed: 0,
+              status,
+            } satisfies FileEntry,
+            regions: [],
+          };
+        }
+
+        const text = buf.toString("utf-8");
+        const lines = text.split("\n");
+        const n = text.replace(/\n$/u, "").split("\n").length;
+        const regions: Omit<Region, "id">[] = [];
+
+        for (let s = 1; s <= n; s += FILE_REGION_LINES) {
+          const end = Math.min(n, s + FILE_REGION_LINES - 1);
+          regions.push({
+            file: path,
+            key: yield* sha256(
+              `${path}\0${s}\0${lines.slice(s - 1, end).join("\n")}`
+            ),
+            newEnd: end,
+            newStart: s,
+            patchEnd: 0,
+            patchStart: 0,
+            readBy: [],
+          });
+        }
+
+        return {
+          file: { added: n, path, removed: 0, status } satisfies FileEntry,
+          regions,
+        };
+      }),
+      { concurrency: IO_CONCURRENCY }
+    );
+
+    return {
+      files: perFile.map((x): FileEntry => x.file),
+      regions: perFile
+        .flatMap((x) => x.regions)
+        .map((r, i) => ({ id: `R${i + 1}`, ...r })),
+      text: "",
+    } satisfies Captured;
+  }
+);
 
 /** Diff targets: the base→post-image diff (untracked files as additions), with withheld files reduced to stubs. */
-const captureDiff = Effect.fn("Directorate.captureDiff")(function* (
+const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   seal: Seal,
   scope: readonly string[] | undefined
 ) {
   const git = yield* Git;
   const worktree = seal.postImage === "worktree";
+
   const tracked = yield* decodeRawDiff(
     yield* git.run(
       seal.repo,
@@ -284,29 +356,40 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* (
           })
     )
   );
+
   const untracked = worktree ? yield* git.untracked(seal.repo, scope) : [];
   const untrackedNames = new Set(untracked);
+
   const replacements = new Map(
     tracked
       .filter((p) => p.code === "D" && untrackedNames.has(p.path))
       .map((p) => [p.path, p])
   );
+
   const extra = yield* Effect.forEach(
     untracked,
     (f) => untrackedPiece(seal.repo, f, seal.baseSha, replacements.get(f)),
     { concurrency: IO_CONCURRENCY }
   );
+
   const { text, files } = assemble([
     ...tracked.filter((p) => replacements.get(p.path) !== p),
     ...extra.filter(Predicate.isNotUndefined),
   ]);
+
   const regions = yield* buildRegions(files, text);
+
   return {
-    text,
     files: files.map(
-      ({ hunks, patchStart, patchEnd, ...file }): FileEntry => file
+      ({
+        hunks: _hunks,
+        patchStart: _patchStart,
+        patchEnd: _patchEnd,
+        ...file
+      }): FileEntry => file
     ),
     regions,
+    text,
   } satisfies Captured;
 });
 
@@ -315,7 +398,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* (
  * tombstones. Worktree files are read twice: once to sign and snapshot them, once for the closing fingerprint. Any edit
  * after signing shows up as a difference between the two, which fails with CaptureDrift so the caller retries.
  */
-const capture = Effect.fn("Directorate.capture")(function* (
+const capture = Effect.fn("Directorate.capture")(function* capture(
   seal: Seal,
   scope: readonly string[] | undefined,
   beforeCapture?: () => Effect.Effect<void>
@@ -325,25 +408,35 @@ const capture = Effect.fn("Directorate.capture")(function* (
   const top = seal.repo;
   const worktree = seal.postImage === "worktree";
   yield* store.resetSnapshot(seal);
+
   const changed = worktree
     ? yield* (yield* Git).changedNames(top, seal.baseSha, scope)
     : [];
+
   // Sign every changed non-secret path, snapshotting those not withheld by name.
   const signed = yield* Effect.forEach(
     changed.filter((f) => !isSecret(f)),
-    Effect.fnUntraced(function* (f) {
+    Effect.fnUntraced(function* signed(f) {
       const e = yield* wt.entry(top, f);
-      if (e.buf !== undefined && !exclusionReason(f))
+
+      if (e.buf !== undefined && !exclusionReason(f)) {
         yield* store.writeSnapshot(seal, f, e.buf);
+      }
+
       return [f, yield* wt.sign(e)] as const;
     }),
     { concurrency: IO_CONCURRENCY }
   );
-  if (beforeCapture) yield* beforeCapture();
+
+  if (beforeCapture) {
+    yield* beforeCapture();
+  }
+
   const { text, files, regions }: Captured =
     seal.target.kind === "paths"
       ? yield* capturePaths(top, scope, new Set(changed))
       : yield* captureDiff(seal, scope);
+
   // A file renamed from a withheld path is withheld too: its content came from there.
   yield* Effect.forEach(
     files.filter((f) => f.oldPath && exclusionReason(f.oldPath)),
@@ -352,12 +445,14 @@ const capture = Effect.fn("Directorate.capture")(function* (
   );
   yield* store.writeDiff(seal, text);
   const sigs = worktree ? Object.fromEntries(signed) : undefined;
+
   // Secret paths have no signatures; check presence without reading their bytes.
   const absentSecrets = yield* Effect.filter(
     changed.filter(isSecret),
     (path) => wt.present(top, path).pipe(Effect.map((present) => !present)),
     { concurrency: IO_CONCURRENCY }
   );
+
   const deleted = [
     ...new Set([
       ...signed.filter(([, sig]) => sig === "deleted").map(([f]) => f),
@@ -366,23 +461,28 @@ const capture = Effect.fn("Directorate.capture")(function* (
         ? files.filter((f) => f.status === "deleted").map((f) => f.path)
         : []),
     ]),
-  ].sort();
+  ].toSorted();
+
   const fingerprint = yield* endsFingerprint(top, {
-    postImage: seal.postImage,
     baseSha: seal.baseSha,
     headSha: seal.headSha,
+    postImage: seal.postImage,
     scope,
   });
-  if (sigs && (yield* wt.fingerprintOf(seal.baseSha, sigs)) !== fingerprint)
+
+  if (sigs && (yield* wt.fingerprintOf(seal.baseSha, sigs)) !== fingerprint) {
     return yield* new CaptureDrift();
-  return { ...seal, files, regions, sigs, deleted, fingerprint } satisfies Seal;
+  }
+
+  return { ...seal, deleted, files, fingerprint, regions, sigs } satisfies Seal;
 });
 
 /** A new seal's id: its creation time, and a random suffix. */
-const sealId = Effect.fnUntraced(function* (createdAt: DateTime.Utc) {
+const sealId = Effect.fnUntraced(function* sealId(createdAt: DateTime.Utc) {
   const suffix = Hex.encode(yield* (yield* Crypto.Crypto).randomBytes(3));
+
   return `directorate-${DateTime.formatIso(createdAt)
-    .replace(/[-:TZ.]/g, "")
+    .replaceAll(/[-:TZ.]/gu, "")
     .slice(0, 14)}-${suffix}`;
 });
 
@@ -390,21 +490,21 @@ const sealId = Effect.fnUntraced(function* (createdAt: DateTime.Utc) {
 const describedAt = (seal: Seal, cur: Pick<Current, "baseSha" | "headSha">) =>
   seal.postImage === "commit"
     ? seal.description.replace(
-        /\(([^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/,
+        /\((?<prefix>[^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/u,
         `($1${cur.baseSha.slice(0, 10)} → ${cur.headSha.slice(0, 10)})`
       )
     : seal.description;
 
 export const createSeal = Effect.fn("Directorate.createSeal")(
-  function* (input: {
+  function* createSeal(input: {
     repo: string;
     mode: Mode;
     target: Target;
     owner?: Actor;
-    budgetMinutes?: number;
-    question?: string;
-    panel?: readonly string[];
-    lensesOff?: readonly string[];
+    budgetMinutes?: number | undefined;
+    question?: string | undefined;
+    panel?: readonly string[] | undefined;
+    lensesOff?: readonly string[] | undefined;
     beforeCapture?: () => Effect.Effect<void>;
   }) {
     const store = yield* Store;
@@ -412,46 +512,51 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
     const panel = input.panel?.length ? [...new Set(input.panel)] : undefined;
+
     const budgetMinutes =
       input.budgetMinutes ??
       DEFAULT_BUDGET[input.mode] * (panel ? PANEL_BUDGET_FACTOR : 1);
+
     // Each attempt re-resolves the ends, then captures; files changing mid-capture retry the whole attempt.
     return yield* store.create(
       id,
-      Effect.gen(function* () {
+      Effect.gen(function* attempt() {
         const ends = yield* resolveEnds(top, input.target);
+
         const seal = yield* capture(
           {
-            id,
-            repo: top,
-            owner: input.owner?.agent ?? REVIEWER,
-            ownerSession: input.owner?.session ?? "",
-            mode: input.mode,
-            target: ends.target,
-            description: ends.description,
             baseSha: ends.baseSha,
-            headSha: ends.headSha,
             baseTip: ends.baseTip,
-            postImage: ends.postImage,
-            fingerprint: "",
-            gen: 0,
+            budgetMinutes,
+            children: [],
             createdAt,
             deadline: DateTime.add(createdAt, { minutes: budgetMinutes }),
-            budgetMinutes,
-            refreshes: 0,
-            files: [],
-            regions: [],
             deleted: [],
-            children: [],
+            description: ends.description,
+            files: [],
+            fingerprint: "",
             gates: {},
-            question: input.question,
-            panel,
+            gen: 0,
+            headSha: ends.headSha,
+            id,
             lensesOff: input.lensesOff,
+            mode: input.mode,
+            owner: input.owner?.agent ?? REVIEWER,
+            ownerSession: input.owner?.session ?? "",
+            panel,
+            postImage: ends.postImage,
+            question: input.question,
+            refreshes: 0,
+            regions: [],
+            repo: top,
+            target: ends.target,
           },
           ends.scope,
           input.beforeCapture
         );
+
         yield* store.saveBoth(seal, emptyLedger);
+
         return seal;
       }).pipe(
         settled(
@@ -468,16 +573,19 @@ const changedSignatures = (
 ) =>
   [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((path) => before[path] !== after[path])
-    .sort();
+    .toSorted();
 
 /** Files that differ between the seal and `cur`; for commit pairs, "(base moved)" when the base did. */
 export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
-  function* (
+  function* changedSinceSeal(
     seal: Seal,
     cur: Pick<Current, "baseSha" | "headSha" | "unfetched">
   ) {
-    if (cur.unfetched) return [`(${cur.unfetched})`];
-    if (seal.postImage === "worktree")
+    if (cur.unfetched) {
+      return [`(${cur.unfetched})`];
+    }
+
+    if (seal.postImage === "worktree") {
       return changedSignatures(
         seal.sigs ?? {},
         yield* (yield* Worktree).sigs(
@@ -486,7 +594,10 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
           scopeOf(seal.target.paths)
         )
       );
+    }
+
     const git = yield* Git;
+
     const [heads, bases] = yield* Effect.all(
       [
         git.diffNames(seal.repo, seal.headSha, cur.headSha),
@@ -494,9 +605,14 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
       ],
       { concurrency: 2 }
     );
+
     const files = new Set([...heads, ...bases]);
-    if (cur.baseSha !== seal.baseSha) files.add("(base moved)");
-    return [...files].sort();
+
+    if (cur.baseSha !== seal.baseSha) {
+      files.add("(base moved)");
+    }
+
+    return [...files].toSorted();
   }
 );
 
@@ -505,17 +621,21 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
   const inChange = new Set(
     next.files.filter((f) => f.status !== "unchanged").map((f) => f.path)
   );
+
   return (e: Entry) => {
     const hit = [...depsOf(e)].filter((d) => changed.has(d));
+
     const gone =
       e.anchor.side === "new" &&
       before.files.some(
         (f) => f.path === e.anchor.path && f.status !== "unchanged"
       ) &&
       !inChange.has(e.anchor.path);
+
     const baseMoved = e.anchor.side === "old" && changed.has("(base moved)");
+
     return hit.length || gone || baseMoved
-      ? { hit: hit.length > 0, gone, files: hit.join(", ") || "base moved" }
+      ? { files: hit.join(", ") || "base moved", gone, hit: hit.length > 0 }
       : undefined;
   };
 };
@@ -535,93 +655,124 @@ const carryRegions = (
   const byKey = new Map(
     from.flatMap((r) => (r.key && keep(r) ? [[r.key, r] as const] : []))
   );
+
   return onto.map((r): Region => {
     const p = r.key ? byKey.get(r.key) : undefined;
+
     return p
       ? {
           ...r,
-          ownerRead: p.ownerRead,
-          readBy: p.readBy,
           disposition: p.disposition,
           note: p.note,
+          ownerRead: p.ownerRead,
+          readBy: p.readBy,
         }
       : r;
   });
 };
 
+interface RefreshResult {
+  files: string[];
+  ledger: Ledger;
+  newRegions: Region[];
+  reopened: string[];
+  seal: Seal;
+}
+
 /**
  * Re-pins a moved target into the seal's next generation. Regions whose content did not change keep their read receipts
  * and dispositions; entries whose anchor or evidence changed reopen. Both are saved, and returned.
  */
-export const refreshSeal = Effect.fn("Directorate.refreshSeal")(function* (
-  seal: Seal,
-  ledger: Ledger,
-  beforeCapture?: () => Effect.Effect<void>
-) {
-  const unchanged = {
-    seal,
-    ledger,
-    files: [] as string[],
-    newRegions: [] as Region[],
-    reopened: [] as string[],
-  };
-  const cur = yield* currentFingerprint(seal).pipe(
-    Effect.mapError(
-      (e) =>
-        new ReviewError({ message: `Cannot check freshness: ${e.message}` })
-    )
-  );
-  if (cur.unfetched)
-    return yield* failure(
-      `${cur.unfetched}. Ask the user to fetch it, or call directorate_report to report the review as stale.`
+export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
+  function* refreshSeal(
+    seal: Seal,
+    ledger: Ledger,
+    beforeCapture?: () => Effect.Effect<void>
+  ) {
+    const unchanged: RefreshResult = {
+      files: [],
+      ledger,
+      newRegions: [],
+      reopened: [],
+      seal,
+    };
+
+    const cur = yield* currentFingerprint(seal).pipe(
+      Effect.mapError(
+        (e) =>
+          new ReviewError({ message: `Cannot check freshness: ${e.message}` })
+      )
     );
-  if (cur.fingerprint === seal.fingerprint) return unchanged;
-  const captured = yield* capture(
-    {
-      ...seal,
-      gen: seal.gen + 1,
-      refreshes: seal.refreshes + 1,
-      staleFiles: undefined,
-      gates: {},
-      baseSha: cur.baseSha,
-      headSha: cur.headSha,
-      baseTip: cur.baseTip ?? seal.baseTip,
-      description: describedAt(seal, cur),
-    },
-    scopeOf(seal.target.paths),
-    beforeCapture
-  ).pipe(
-    settled(
-      "Files kept changing during refresh (3 attempts). Wait until edits stop, then call directorate_refresh again."
-    )
-  );
-  if (captured.fingerprint === seal.fingerprint) return unchanged;
-  const changed = new Set(yield* changedBetween(seal, captured));
-  const regions = carryRegions(seal.regions, captured.regions);
-  const moved = movedUnder(seal, captured, changed);
-  const reopened: string[] = [];
-  const entries = ledger.entries.map((e) => {
-    const why = moved(e);
-    if (!why || (e.status === "refuted" && !why.hit)) return e;
-    reopened.push(e.id);
-    return reopen(
-      e,
-      why.gone
-        ? `${e.anchor.path} is no longer part of the change; re-verify or refute`
-        : `code changed after the seal (${why.files}); re-verify and re-anchor`
+
+    if (cur.unfetched) {
+      return yield* failure(
+        `${cur.unfetched}. Ask the user to fetch it, or call directorate_report to report the review as stale.`
+      );
+    }
+
+    if (cur.fingerprint === seal.fingerprint) {
+      return unchanged;
+    }
+
+    const captured = yield* capture(
+      {
+        ...seal,
+        baseSha: cur.baseSha,
+        baseTip: cur.baseTip ?? seal.baseTip,
+        description: describedAt(seal, cur),
+        gates: {},
+        gen: seal.gen + 1,
+        headSha: cur.headSha,
+        refreshes: seal.refreshes + 1,
+        staleFiles: undefined,
+      },
+      scopeOf(seal.target.paths),
+      beforeCapture
+    ).pipe(
+      settled(
+        "Files kept changing during refresh (3 attempts). Wait until edits stop, then call directorate_refresh again."
+      )
     );
-  });
-  const next = { ...captured, regions };
-  const nextLedger = { ...ledger, entries };
-  yield* (yield* Store).saveBoth(next, nextLedger);
-  return {
-    seal: next,
-    ledger: nextLedger,
-    files: [...changed],
-    newRegions: regions.filter((r) => !r.ownerRead && !r.disposition),
-    reopened,
-  };
-});
+
+    if (captured.fingerprint === seal.fingerprint) {
+      return unchanged;
+    }
+
+    const changed = new Set(yield* changedBetween(seal, captured));
+    const regions = carryRegions(seal.regions, captured.regions);
+    const moved = movedUnder(seal, captured, changed);
+    const reopened: string[] = [];
+
+    const entries = ledger.entries.map((e) => {
+      const why = moved(e);
+
+      if (!why || (e.status === "refuted" && !why.hit)) {
+        return e;
+      }
+
+      reopened.push(e.id);
+
+      return reopen(
+        e,
+        why.gone
+          ? `${e.anchor.path} is no longer part of the change; re-verify or refute`
+          : `code changed after the seal (${why.files}); re-verify and re-anchor`
+      );
+    });
+
+    const next = { ...captured, regions };
+    const nextLedger = { ...ledger, entries };
+    yield* (yield* Store).saveBoth(next, nextLedger);
+
+    return {
+      files: [...changed],
+      ledger: nextLedger,
+      newRegions: regions.filter((r) => !r.ownerRead && !r.disposition),
+      reopened,
+      seal: next,
+    };
+  }
+);
 
 /** A re-check's budget when the caller names none: half its mode's default, at least RECHECK_MIN_MINUTES. */
 const RECHECK_MIN_MINUTES = 10;
@@ -642,7 +793,7 @@ export const recheckable = (prior: Seal) =>
  * re-check runs without a panel: it is a targeted pass, not a second independent review.
  */
 export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
-  function* (input: {
+  function* recheckSeal(input: {
     prior: Seal;
     ledger: Ledger;
     owner?: Actor;
@@ -655,12 +806,14 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     const store = yield* Store;
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
+
     const budgetMinutes =
       input.budgetMinutes ??
       Math.max(RECHECK_MIN_MINUTES, Math.round(DEFAULT_BUDGET[prior.mode] / 2));
+
     return yield* store.create(
       id,
-      Effect.gen(function* () {
+      Effect.gen(function* attempt() {
         // A worktree seal keeps its ends, so only commit pairs re-resolve.
         const cur: Pick<Current, "baseSha" | "headSha" | "baseTip"> =
           prior.postImage === "worktree"
@@ -672,93 +825,111 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
                       message: `Cannot re-resolve ${prior.id}'s target: ${e.message}`,
                     })
                 ),
-                Effect.flatMap((c) =>
-                  c.unfetched
-                    ? failure(
-                        `${c.unfetched}. Ask the user to fetch it, then re-check again.`
-                      )
-                    : Effect.succeed(c)
+                Effect.filterOrElse(
+                  (c) => !c.unfetched,
+                  (c) =>
+                    failure(
+                      `${c.unfetched}. Ask the user to fetch it, then re-check again.`
+                    )
                 )
               );
+
         const captured = yield* capture(
           {
-            id,
-            repo: prior.repo,
-            owner: input.owner?.agent ?? REVIEWER,
-            ownerSession: input.owner?.session ?? "",
-            mode: prior.mode,
-            target: prior.target,
-            description: describedAt(prior, cur),
             baseSha: cur.baseSha,
-            headSha: cur.headSha,
             baseTip: cur.baseTip ?? prior.baseTip,
-            postImage: prior.postImage,
-            fingerprint: "",
-            gen: 0,
+            budgetMinutes,
+            children: [],
             createdAt,
             deadline: DateTime.add(createdAt, { minutes: budgetMinutes }),
-            budgetMinutes,
-            refreshes: 0,
-            files: [],
-            regions: [],
             deleted: [],
-            children: [],
+            description: describedAt(prior, cur),
+            files: [],
+            fingerprint: "",
             gates: {},
-            question: input.question ?? prior.question,
+            gen: 0,
+            headSha: cur.headSha,
+            id,
             lensesOff: prior.lensesOff,
+            mode: prior.mode,
+            owner: input.owner?.agent ?? REVIEWER,
+            ownerSession: input.owner?.session ?? "",
+            postImage: prior.postImage,
+            question: input.question ?? prior.question,
             recheckOf: prior.id,
+            refreshes: 0,
+            regions: [],
+            repo: prior.repo,
+            target: prior.target,
           },
           scopeOf(prior.target.paths),
           input.beforeCapture
         );
+
         const changed = new Set(yield* changedBetween(prior, captured));
+
         const seal: Seal = {
           ...captured,
           regions: carryRegions(prior.regions, captured.regions, isRead),
         };
+
         const moved = movedUnder(prior, captured, changed);
         const open = new Set(unresolved(input.ledger));
         const reopened: string[] = [];
         const kept: string[] = [];
+
         // What the earlier review left behind: verified findings, and entries filed but never cleared.
         const entries = input.ledger.entries.flatMap((e): Entry[] => {
-          const status =
-            e.status === "confirmed"
-              ? ("confirmed" as const)
-              : open.has(e)
-                ? ("unverified" as const)
-                : undefined;
-          if (!status) return [];
+          let status: "confirmed" | "unverified" | undefined;
+
+          if (e.status === "confirmed") {
+            status = "confirmed";
+          } else if (open.has(e)) {
+            status = "unverified";
+          }
+
+          if (!status) {
+            return [];
+          }
+
           const carried: Entry = {
             ...e,
-            id: `F${reopened.length + kept.length + 1}`,
             carried: { id: e.id, status },
+            id: `F${reopened.length + kept.length + 1}`,
           };
+
           const why = moved(e);
+
           if (status === "confirmed" && !why) {
             kept.push(carried.id);
+
             return [carried];
           }
+
           reopened.push(carried.id);
-          return [
-            reopen(
-              carried,
-              status === "unverified"
-                ? `unverified in ${prior.id}; decide it on the current code`
-                : why?.gone
-                  ? `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`
-                  : `code it rests on changed since ${prior.id} (${why?.files}); decide whether it is still present (re-anchor) or resolved`
-            ),
-          ];
+
+          let reason: string;
+
+          if (status === "unverified") {
+            reason = `unverified in ${prior.id}; decide it on the current code`;
+          } else if (why?.gone) {
+            reason = `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`;
+          } else {
+            reason = `code it rests on changed since ${prior.id} (${why?.files}); decide whether it is still present (re-anchor) or resolved`;
+          }
+
+          return [reopen(carried, reason)];
         });
+
         const ledger: Ledger = { entries, notes: [] };
         yield* store.saveBoth(seal, ledger);
+
         return {
-          seal,
-          ledger,
           files: [...changed],
-          reopened,
           kept,
+          ledger,
+          reopened,
+          seal,
           unanswered: input.ledger.notes
             .filter((n) => n.kind === "unanswered")
             .map((n) => n.text),

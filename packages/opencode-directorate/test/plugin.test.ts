@@ -9,15 +9,19 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import path from "node:path";
 import { after, afterEach, test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { runInThisContext } from "node:vm";
 
 import { Agent, Skill } from "@opencode/plugin/effect";
+import type { Plugin as TuiPlugin } from "@opencode/plugin/tui";
 import { Session } from "@opencode/schema/session";
 import {
   Cause,
   ConfigProvider,
   Data,
+  DateTime,
   Deferred,
   Effect,
   Exit,
@@ -25,21 +29,43 @@ import {
   Schema,
   Scope,
   Stream,
-  type Types,
 } from "effect";
+import type { Types } from "effect";
 import { TestClock } from "effect/testing";
 
-const state = mkdtempSync(join(tmpdir(), "directorate-state-"));
+import { SealJson } from "../src/model.ts";
+import type { SettingsView, WriteResult } from "../src/rpc.ts";
+
+const present = <T>(value: T | null | undefined): T => {
+  assert.ok(value !== undefined && value !== null, "expected a value");
+
+  return value;
+};
+
+const runEach = <T>(
+  items: readonly T[],
+  fn: (item: T) => Promise<void>
+): Promise<void> =>
+  Effect.runPromise(
+    Effect.forEach(items, (item) => Effect.promise(() => fn(item)), {
+      discard: true,
+    })
+  );
+
+const state = mkdtempSync(path.join(tmpdir(), "directorate-state-"));
+
 // A global file inside a project's .opencode (as with OPENCODE_CONFIG_DIR=~/.opencode): <state>/home has no project file.
-const home = join(state, "home");
-const globalSettings = join(home, ".opencode", "directorate.json");
+const home = path.join(state, "home");
+const globalSettings = path.join(home, ".opencode", "directorate.json");
+
 const stateConfig = ConfigProvider.layer(
   ConfigProvider.fromEnvRecord({
-    DIRECTORATE_STATE_DIR: state,
     DIRECTORATE_SETTINGS: globalSettings,
+    DIRECTORATE_STATE_DIR: state,
   })
 );
-const plugin = (await import("../src/index.ts")).default;
+
+const { default: plugin } = await import("../src/index.ts");
 
 type HostContext = Parameters<typeof plugin.effect>[0];
 
@@ -51,11 +77,12 @@ type CommandDefinition = Parameters<CommandEditor["add"]>[0];
 
 type SubmittedPrompt = Parameters<HostContext["session"]["prompt"]>[0];
 
-const tuiPlugin = (await import("../src/tui.ts")).default;
+const { default: tuiPlugin } = await import("../src/tui.ts");
 const { DirectorateRpc } = await import("../src/rpc.ts");
 
 const dirs: string[] = [state];
 const scopes: Scope.Closeable[] = [];
+
 // Each test closes its plugins, so no earlier watchdog or event consumer runs into a later test's seals.
 afterEach(() =>
   Effect.runPromise(
@@ -64,43 +91,63 @@ afterEach(() =>
     })
   )
 );
-// Global settings apply to every repository: no test leaves them for the next.
-afterEach(() => rmSync(home, { recursive: true, force: true }));
-after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
 
-function repo(): string {
-  const dir = mkdtempSync(join(tmpdir(), "directorate-repo-"));
+// Global settings apply to every repository: no test leaves them for the next.
+afterEach(() => rmSync(home, { force: true, recursive: true }));
+
+after(() => {
+  for (const d of dirs) {
+    rmSync(d, { force: true, recursive: true });
+  }
+});
+
+const repo = (): string => {
+  const dir = mkdtempSync(path.join(tmpdir(), "directorate-repo-"));
   dirs.push(dir);
+
   const g = (...a: string[]) =>
     execFileSync("git", ["-C", dir, ...a], { stdio: "pipe" });
+
   g("init", "-q", "-b", "main");
   g("config", "user.email", "t@e.com");
   g("config", "user.name", "t");
-  mkdirSync(join(dir, "src"));
-  writeFileSync(join(dir, "src/a.ts"), "export const a = 1\n");
-  writeFileSync(join(dir, "src/b.ts"), "export const b = 1\n");
+  mkdirSync(path.join(dir, "src"));
+  writeFileSync(path.join(dir, "src/a.ts"), "export const a = 1\n");
+  writeFileSync(path.join(dir, "src/b.ts"), "export const b = 1\n");
   g("add", ".");
   g("commit", "-qm", "init");
   writeFileSync(
-    join(dir, "src/a.ts"),
+    path.join(dir, "src/a.ts"),
     "export const a = 2\nexport const div = (x: number, y: number) => x / y\n"
   );
-  writeFileSync(join(dir, "src/b.ts"), "export const b = 2\n");
+  writeFileSync(path.join(dir, "src/b.ts"), "export const b = 2\n");
+
   return dir;
+};
+
+interface BusEvent {
+  created?: number;
+  data: object;
+  type: string;
 }
 
 /** Serves one event per pull, so the plugin asking for the next event means it finished the previous one. */
-function eventBus() {
+const eventBus = () => {
   const queue = Effect.runSync(
-    Queue.unbounded<{ event: unknown; handled: Deferred.Deferred<void> }>()
+    Queue.unbounded<{
+      event: BusEvent & { created: number };
+      handled: Deferred.Deferred<true>;
+    }>()
   );
-  let current: Deferred.Deferred<void> | undefined;
+
+  let current: Deferred.Deferred<true> | undefined;
+
   return {
     /** Resolves once the plugin has handled the event. */
-    emit: (event: { type: string; data: unknown; created?: number }) =>
+    emit: (event: BusEvent) =>
       Effect.runPromise(
-        Effect.gen(function* () {
-          const handled = yield* Deferred.make<void>();
+        Effect.gen(function* emit() {
+          const handled = yield* Deferred.make<true>();
           yield* Queue.offer(queue, {
             event: { created: Date.now(), ...event },
             handled,
@@ -110,50 +157,187 @@ function eventBus() {
       ),
     subscribe: () =>
       Stream.fromEffectRepeat(
-        Effect.gen(function* () {
-          if (current) yield* Deferred.succeed(current, undefined);
+        Effect.gen(function* subscribe() {
+          if (current) {
+            yield* Deferred.succeed(current, true);
+          }
+
           const next = yield* Queue.take(queue);
           current = next.handled;
+
           return next.event;
         })
       ),
   };
-}
+};
+
 let uid = 0;
+
 /** A permission rule's denial, as the host reports it. */
 class Denied extends Data.TaggedError("Denied")<{ message: string }> {}
+
 /** Host state that outlives a plugin reload: instruction entries per session, and each child session's parent. */
-const entries = new Map<string, Map<string, unknown>>();
+const entries = new Map<string, Map<string, string>>();
 const parents = new Map<string, string>();
+
 /** Each session's agent, which the host records when the session is created. */
 const sessionAgents = new Map<string, string>();
 
+type JsonPrimitive = string | number | boolean | null | undefined;
+
+interface ToolInput {
+  [key: string]:
+    | JsonPrimitive
+    | ToolInput
+    | readonly (JsonPrimitive | ToolInput)[];
+}
+
+interface ToolContext {
+  agent: string;
+  id: string;
+  messageID: string;
+  sessionID: string;
+}
+
+interface RegisteredTool {
+  execute: (
+    input: ToolInput,
+    context: ToolContext
+  ) => Effect.Effect<{ content: string }, Error>;
+  input: Schema.Codec<ToolInput, ToolInput>;
+  name: string;
+}
+
+interface SessionHookEvent {
+  agent?: string;
+  sessionID: string;
+  system: { text: string }[];
+  tools: Record<string, Record<string, never>>;
+}
+
+interface PermissionHookEvent {
+  action: string;
+  agent?: string | undefined;
+  effect?: string;
+  message?: string;
+  resources: string[] | null;
+  sessionID: string;
+}
+
+interface ToolBeforeEvent {
+  agent: string;
+  id: string;
+  input: {
+    agent?: string;
+    description?: string | undefined;
+    model?: string;
+    prompt?: string;
+    sessionID?: string;
+  } | null;
+  messageID?: string;
+  sessionID: string;
+  tool: string;
+}
+
+interface ToolAfterEvent {
+  id: string;
+  result: {
+    content?: string;
+    metadata:
+      | { metadata: { sessionID: string; status: string } }
+      | { sessionID: string; status: string };
+  };
+  sessionID: string;
+  status: string;
+  tool: string;
+}
+
+interface Hooks {
+  "permission.evaluate"?: (event: PermissionHookEvent) => Promise<void>;
+  "session.compaction"?: (event: SessionHookEvent) => Promise<void>;
+  "session.context"?: (event: SessionHookEvent) => Promise<void>;
+  "session.generate"?: (event: SessionHookEvent) => Promise<void>;
+  "tool.execute.after"?: (event: ToolAfterEvent) => Promise<void>;
+  "tool.execute.before"?: (event: ToolBeforeEvent) => Promise<void>;
+}
+
+type RpcMethodInput = { scope: string; settings: ToolInput } | undefined;
+
+type RpcMethodOutput = SettingsView | WriteResult;
+
+interface RpcError {
+  message: string;
+  type: string;
+}
+
+interface RpcHandlerContext {
+  error: (type: string, message: string) => RpcError;
+}
+
+type RpcHandler = (
+  input: RpcMethodInput,
+  context: RpcHandlerContext
+) => Effect.Effect<RpcMethodOutput, RpcError>;
+
+type RpcHandlerMap = Record<string, RpcHandler>;
+
+interface TestRpcClient {
+  rpc: (
+    def: typeof DirectorateRpc
+  ) => Record<string, (input: RpcMethodInput) => Promise<RpcMethodOutput>>;
+}
+
+const sealOf = (out: string): string => {
+  const seal =
+    /(?:Containment sealed|Resumed containment) `(?<seal>directorate-[^`]+)`/u.exec(
+      out
+    )?.groups?.seal;
+
+  assert.ok(seal, out);
+
+  return seal;
+};
+
+const permissionEvent = (
+  agent: string | undefined,
+  action: string,
+  resource: string
+): PermissionHookEvent => ({
+  action,
+  agent,
+  effect: "allow",
+  resources: [resource],
+  sessionID: "ses_primary",
+});
+
 /** One plugin instance. Session ids are unique per harness (real ones are), unless `ids` shares them across a reload. */
-async function harness(
+const harness = async (
   dir: string,
   ids?: string,
   run = Effect.runPromise,
   deny: (request: { action: string; resources: string[] }) => boolean = () =>
     false,
   existing?: { agent: Types.DeepMutable<Agent.Info>; skill: Skill.Info }
-) {
-  const tag = ids ?? `h${++uid}`;
+) => {
+  const tag = ids ?? `h${(uid += 1)}`;
   const S = (name: string) => `ses_${name}-${tag}`;
-  const tools = new Map<string, any>();
-  const hooks: Record<string, any> = {};
+  const tools = new Map<string, RegisteredTool>();
+  const hooks: Hooks = {};
   const asserted: string[] = [];
   const requests: { action: string; resources: string[] }[] = [];
   const interrupted: string[] = [];
   const notices: string[] = [];
   const notified = Deferred.makeUnsafe<string>();
-  const rpcs = new Map<string, any>();
+  const rpcs = new Map<string, RpcHandlerMap>();
   const commands = new Map<string, CommandDefinition>();
   const agents = new Map<string, Types.DeepMutable<Agent.Info>>();
   const skills = new Map<string, Skill.Info>();
+
   if (existing) {
     agents.set(existing.agent.id, structuredClone(existing.agent));
     skills.set(existing.skill.id, structuredClone(existing.skill));
   }
+
   const prompts: SubmittedPrompt[] = [];
   const bus = eventBus();
 
@@ -162,28 +346,17 @@ async function harness(
       transform: (register: Parameters<HostContext["agent"]["transform"]>[0]) =>
         Effect.sync(() =>
           register({
-            list: () => [...agents.values()],
-            get: (id) => agents.get(id),
             default: () => {},
+            get: (id) => agents.get(id),
+            list: () => [...agents.values()],
             remove: () => {},
             update: (id, update) => {
               const agent =
                 agents.get(id) ?? Agent.Info.default(Agent.ID.make(id));
+
               update(agent);
               agents.set(id, agent);
             },
-          })
-        ),
-    },
-    skill: {
-      transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
-        Effect.sync(() =>
-          register({
-            list: () => [...skills.values()],
-            get: (id) => skills.get(id),
-            update: () => {},
-            remove: () => {},
-            add: (skill) => void skills.set(skill.id, skill),
           })
         ),
     },
@@ -197,67 +370,125 @@ async function harness(
           });
         }),
     },
+    event: { subscribe: bus.subscribe },
     location: { directory: dir },
-    rpc: {
-      register: (def: any, handlers: any) =>
-        Effect.sync(() => {
-          rpcs.set(def.id, handlers);
-          return { events: { emit: () => Effect.void } };
-        }),
-    },
     model: {
       list: () =>
         Effect.succeed({
           data: [
             {
-              providerID: "prov",
+              enabled: true,
               id: "alpha",
               name: "Alpha",
-              enabled: true,
+              providerID: "prov",
               variants: [{ id: "high" }, { id: "xhigh" }],
             },
             {
-              providerID: "prov",
+              enabled: true,
               id: "beta",
               name: "Beta",
-              enabled: true,
+              providerID: "prov",
               variants: [],
             },
             {
-              providerID: "prov",
+              enabled: false,
               id: "off",
               name: "Off",
-              enabled: false,
+              providerID: "prov",
               variants: [],
             },
           ],
         }),
     },
-    tool: {
-      transform: (fn: any) =>
-        Effect.sync(() => fn({ add: (t: any) => tools.set(t.name, t) })),
-      hook: (n: string, cb: any) =>
+    permission: {
+      assert: (request: {
+        action: string;
+        agent: string;
+        resources: string[];
+      }) => {
+        asserted.push(`${request.agent}:${request.action}`);
+        requests.push({
+          action: request.action,
+          resources: request.resources,
+        });
+
+        return deny(request)
+          ? Effect.fail(
+              new Denied({
+                message: `${request.action} denied by a permission rule`,
+              })
+            )
+          : Effect.void;
+      },
+      hook: (
+        name: "evaluate",
+        handler: (event: PermissionHookEvent) => Effect.Effect<void>
+      ) =>
         Effect.sync(() => {
-          hooks[`tool.${n}`] = (event: any) => run(cb(event));
+          hooks[`permission.${name}`] = (event: PermissionHookEvent) =>
+            run(handler(event));
+        }),
+    },
+    rpc: {
+      register: (def: { id: string }, handlers: RpcHandlerMap) =>
+        Effect.sync(() => {
+          rpcs.set(def.id, handlers);
+
+          return { events: { emit: () => Effect.void } };
         }),
     },
     session: {
-      hook: (n: string, cb: any) =>
-        Effect.sync(() => {
-          hooks[`session.${n}`] = (event: any) => run(cb(event));
-        }),
-      get: ({ sessionID }: any) =>
+      get: ({ sessionID }: { sessionID: string }) =>
         Effect.succeed({
+          agent: sessionAgents.get(sessionID),
           location: { directory: dir },
           parentID: parents.get(sessionID),
-          agent: sessionAgents.get(sessionID),
+        }),
+      hook: (
+        name: "compaction" | "context" | "generate",
+        handler: (event: SessionHookEvent) => Effect.Effect<void>
+      ) =>
+        Effect.sync(() => {
+          hooks[`session.${name}`] = (event: SessionHookEvent) =>
+            run(handler(event));
+        }),
+      instructions: {
+        entry: {
+          list: ({ sessionID }: { sessionID: string }) =>
+            Effect.sync(() =>
+              [...(entries.get(sessionID) ?? [])].map(([key, value]) => ({
+                key,
+                value,
+              }))
+            ),
+          put: ({
+            sessionID,
+            key,
+            value,
+          }: {
+            key: string;
+            sessionID: string;
+            value: string;
+          }) =>
+            Effect.sync(() => {
+              const map = entries.get(sessionID) ?? new Map<string, string>();
+              entries.set(sessionID, map);
+              map.set(key, value);
+            }),
+          remove: ({ sessionID, key }: { key: string; sessionID: string }) =>
+            Effect.sync(() => {
+              entries.get(sessionID)?.delete(key);
+            }),
+        },
+      },
+      interrupt: ({ sessionID }: { sessionID: string }) =>
+        Effect.sync(() => {
+          interrupted.push(sessionID);
         }),
       prompt: (input: SubmittedPrompt) =>
         Effect.sync(() => {
           prompts.push(input);
         }),
-      interrupt: ({ sessionID }: any) =>
-        Effect.sync(() => void interrupted.push(sessionID)),
       synthetic: ({ text }: { text: string }) =>
         Effect.sync(() => {
           notices.push(text);
@@ -265,82 +496,85 @@ async function harness(
           Effect.andThen(Deferred.succeed(notified, text)),
           Effect.asVoid
         ),
-      instructions: {
-        entry: {
-          put: ({ sessionID, key, value }: any) =>
-            Effect.sync(
-              () =>
-                void (
-                  entries.get(sessionID) ??
-                  entries.set(sessionID, new Map()).get(sessionID)!
-                ).set(key, value)
-            ),
-          remove: ({ sessionID, key }: any) =>
-            Effect.sync(() => void entries.get(sessionID)?.delete(key)),
-          list: ({ sessionID }: any) =>
-            Effect.sync(() =>
-              [...(entries.get(sessionID) ?? [])].map(([key, value]) => ({
-                key,
-                value,
-              }))
-            ),
-        },
-      },
     },
-    event: { subscribe: bus.subscribe },
-    permission: {
-      hook: (n: string, cb: any) =>
+    skill: {
+      transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
+        Effect.sync(() =>
+          register({
+            add: (skill) => {
+              skills.set(skill.id, skill);
+            },
+            get: (id) => skills.get(id),
+            list: () => [...skills.values()],
+            remove: () => {},
+            update: () => {},
+          })
+        ),
+    },
+    tool: {
+      hook: (
+        name: "execute.after" | "execute.before",
+        handler: (
+          event: ToolBeforeEvent | ToolAfterEvent
+        ) => Effect.Effect<void>
+      ) =>
         Effect.sync(() => {
-          hooks[`permission.${n}`] = (event: any) => run(cb(event));
+          if (name === "execute.before") {
+            hooks["tool.execute.before"] = (event: ToolBeforeEvent) =>
+              run(handler(event));
+          } else {
+            hooks["tool.execute.after"] = (event: ToolAfterEvent) =>
+              run(handler(event));
+          }
         }),
-      assert: (a: any) => {
-        asserted.push(`${a.agent}:${a.action}`);
-        requests.push({ action: a.action, resources: a.resources });
-        return deny(a)
-          ? Effect.fail(
-              new Denied({ message: `${a.action} denied by a permission rule` })
-            )
-          : Effect.void;
-      },
+      transform: (
+        register: (editor: { add: (tool: RegisteredTool) => void }) => void
+      ) =>
+        Effect.sync(() =>
+          register({
+            add: (tool) => {
+              tools.set(tool.name, tool);
+            },
+          })
+        ),
     },
   };
+
   const scope = Scope.makeUnsafe();
   scopes.push(scope);
+  // SAFETY: test harness provides every HostContext domain that the plugin touches.
+  const hostContext = Object.assign(Object.create(null) as HostContext, ctx);
   await run(
     plugin
-      .effect(ctx as unknown as Parameters<typeof plugin.effect>[0])
+      .effect(hostContext)
       .pipe(
         Effect.provideService(Scope.Scope, scope),
         Effect.provide(stateConfig)
       )
   );
+
   const call = (
     name: string,
-    input: any,
+    input: ToolInput,
     agent = "directorate_liaison",
     session = "lead"
   ) => {
-    const tool = tools.get(name);
+    const tool = present(tools.get(name));
+
     return run(
-      Schema.decodeUnknownEffect(tool.input as Schema.Codec<unknown, unknown>)(
-        input
-      ).pipe(
-        Effect.flatMap(
-          (decoded) =>
-            tool.execute(decoded, {
-              agent,
-              sessionID: S(session),
-              messageID: "m",
-              id: "c",
-            }) as Effect.Effect<{ content: string }, Error>
+      Schema.decodeEffect(tool.input)(input).pipe(
+        Effect.flatMap((decoded) =>
+          tool.execute(decoded, {
+            agent,
+            id: "c",
+            messageID: "m",
+            sessionID: S(session),
+          })
         )
       )
     );
   };
-  const sealOf = (out: string) =>
-    /(?:Containment sealed|Resumed containment) `(directorate-[^`]+)`/.exec(
-      out
-    )![1];
+
   /** As the subagent tool does: the before-hook, then the child session's creation (titled by the description); returns the after-hook. */
   const launch = async (
     callId: string,
@@ -350,36 +584,39 @@ async function harness(
     st: "running" | "completed" | "failed",
     description?: string
   ) => {
-    const event = {
-      tool: "subagent",
-      sessionID: S("lead"),
+    const event: ToolBeforeEvent = {
       agent: "directorate_liaison",
       id: callId,
-      input: { agent, prompt, description },
+      input: { agent, description, prompt },
+      sessionID: S("lead"),
+      tool: "subagent",
     };
-    await hooks["tool.execute.before"](event);
+
+    await present(hooks["tool.execute.before"])(event);
     parents.set(S(child), S("lead"));
     await bus.emit({
-      type: "session.created",
       data: {
-        sessionID: S(child),
-        parentID: S("lead"),
         agent,
-        title: event.input.description,
+        parentID: S("lead"),
+        sessionID: S(child),
+        title: event.input?.description,
       },
+      type: "session.created",
     });
+
     return () =>
-      hooks["tool.execute.after"]({
-        tool: "subagent",
-        sessionID: S("lead"),
+      present(hooks["tool.execute.after"])({
         id: callId,
-        status: "completed",
         result: {
           content: `<subagent sessionID="${S(child)}" state="${st}">`,
           metadata: { metadata: { sessionID: S(child), status: st } },
         },
+        sessionID: S("lead"),
+        status: "completed",
+        tool: "subagent",
       });
   };
+
   const followUp = async (
     id: string,
     agent: string,
@@ -387,121 +624,153 @@ async function harness(
     prompt: string
   ) => {
     const sessionID = S(child);
-    const event = {
-      tool: "subagent",
-      sessionID: S("lead"),
+
+    const event: ToolBeforeEvent = {
       agent: "directorate_liaison",
       id,
-      input: { agent, prompt, description: "again", sessionID },
+      input: { agent, description: "again", prompt, sessionID },
+      sessionID: S("lead"),
+      tool: "subagent",
     };
-    await hooks["tool.execute.before"](event);
-    const data = { sessionID, inboxID: `inbox-${id}` };
+
+    await present(hooks["tool.execute.before"])(event);
+    const data = { inboxID: `inbox-${id}`, sessionID };
+
     return {
+      deliver: () => bus.emit({ data, type: "session.inbox.delivered" }),
       enqueue: () =>
         bus.emit({
-          type: "session.inbox.enqueued",
           data: {
             ...data,
-            item: { type: "user", payload: { text: event.input.prompt } },
+            item: { payload: { text: event.input?.prompt }, type: "user" },
           },
+          type: "session.inbox.enqueued",
         }),
-      deliver: () => bus.emit({ type: "session.inbox.delivered", data }),
       returned: () =>
-        hooks["tool.execute.after"]({
-          tool: "subagent",
-          sessionID: S("lead"),
+        present(hooks["tool.execute.after"])({
           id,
-          status: "completed",
           result: { metadata: { sessionID, status: "running" } },
+          sessionID: S("lead"),
+          status: "completed",
+          tool: "subagent",
         }),
     };
   };
+
   /** As the TUI's promise client: input decoded by the method's schema, JSON back, a failure thrown as { type, message }. */
-  const client = {
-    rpc: (def: any) =>
+  const client: TestRpcClient = {
+    rpc: (def) =>
       Object.fromEntries(
-        Object.keys(def.methods).map((name) => [
+        Object.entries(def.methods).map(([name, method]) => [
           name,
-          async (input: unknown) => {
+          async (input: RpcMethodInput) => {
+            const validated = await method.input["~standard"].validate(input);
+
+            if (validated.issues) {
+              throw new Error(
+                validated.issues.map((issue) => issue.message).join("; ")
+              );
+            }
+
+            const handlers = present(rpcs.get(def.id));
+            const handler = present(handlers[name]);
+
             const exit = await Effect.runPromiseExit(
-              Schema.decodeUnknownEffect(
-                def.methods[name].input as Schema.Codec<unknown, unknown>
-              )(input).pipe(
-                Effect.flatMap(
-                  (decoded) =>
-                    rpcs.get(def.id)[name](decoded, {
-                      error: (type: string, message: string) => ({
-                        type,
-                        message,
-                      }),
-                    }) as Effect.Effect<unknown, unknown>
-                )
-              )
+              handler(validated.value, {
+                error: (type, message) => ({
+                  message,
+                  type,
+                }),
+              })
             );
-            if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
-            return JSON.parse(JSON.stringify(exit.value));
+
+            if (Exit.isFailure(exit)) {
+              throw Cause.squash(exit.cause);
+            }
+
+            return structuredClone(exit.value);
           },
         ])
       ),
   };
+
   return {
     S,
     agents,
-    skills,
-    tools,
-    hooks,
-    call,
-    sealOf,
-    followUp,
     asserted,
-    requests,
+    bus,
+    call,
+    client,
+    commands,
+    followUp,
+    hooks,
     interrupted,
+    launch,
     notices,
     notified,
-    bus,
-    launch,
-    scope,
-    rpcs,
-    commands,
     prompts,
-    client,
+    requests,
+    rpcs,
+    scope,
+    sealOf,
+    skills,
+    tools,
   };
-}
+};
+
+const decodeSeal = Schema.decodeUnknownSync(SealJson);
+
 const sealJson = (id: string) =>
-  JSON.parse(readFileSync(join(state, id, "seal.json"), "utf8"));
+  decodeSeal(readFileSync(path.join(state, id, "seal.json"), "utf-8"));
+
 const shiftClock = (id: string, minutesAgo: number, minutes = 10) => {
-  const file = join(state, id, "seal.json");
-  const s = JSON.parse(readFileSync(file, "utf8"));
+  const file = path.join(state, id, "seal.json");
+  const s = JSON.parse(readFileSync(file, "utf-8"));
   const start = Date.now() - minutesAgo * 60_000;
   writeFileSync(
     file,
     JSON.stringify({
       ...s,
+      budgetMinutes: minutes,
       createdAt: new Date(start).toISOString(),
       deadline: new Date(start + minutes * 60_000).toISOString(),
-      budgetMinutes: minutes,
     })
   );
 };
-const add = (seal: string, o: any = {}) => ({
-  seal,
-  title: "Division by zero",
-  severity: "important",
-  kind: "defect",
-  lens: "correctness",
-  path: "src/a.ts",
-  line: 2,
-  quote: "export const div = (x: number, y: number) => x / y",
-  trigger: "y=0",
+
+interface AddFindingOverrides {
+  brief?: string;
+  consequence?: string;
+  evidence?: string[];
+  kind?: string;
+  lens?: string;
+  line?: number;
+  path?: string;
+  quote?: string;
+  severity?: string;
+  title?: string;
+  trigger?: string;
+}
+
+const add = (seal: string, o: AddFindingOverrides = {}) => ({
   consequence: "Infinity",
   evidence: ["src/a.ts:2"],
+  kind: "defect",
+  lens: "correctness",
+  line: 2,
+  path: "src/a.ts",
+  quote: "export const div = (x: number, y: number) => x / y",
+  seal,
+  severity: "important",
+  title: "Division by zero",
+  trigger: "y=0",
   ...o,
 });
 
 test("registers fifteen tools, four hooks, and the settings RPC; tools assert permission; auto target", async () => {
-  const { tools, hooks, call, sealOf, asserted, rpcs } = await harness(repo());
+  const { tools, hooks, call, asserted, rpcs } = await harness(repo());
   assert.deepEqual([...rpcs.keys()], ["directorate"]);
-  assert.deepEqual([...tools.keys()].sort(), [
+  assert.deepEqual([...tools.keys()].toSorted(), [
     "directorate_configure",
     "directorate_coverage",
     "directorate_diff",
@@ -524,19 +793,23 @@ test("registers fifteen tools, four hooks, and the settings RPC; tools assert pe
       hooks["tool.execute.before"] &&
       hooks["tool.execute.after"]
   );
-  for (const [name, tool] of tools)
+
+  for (const [name, tool] of tools) {
     assert.doesNotMatch(
       JSON.stringify(Schema.toJsonSchemaDocument(tool.input)),
-      /"null"/,
+      /"null"/u,
       `${name}: optional inputs are absent keys, not anyOf-null`
     );
-  const out = (
-    await call("directorate_seal", {
-      mode: "default",
-      target: { kind: "auto" },
-    })
-  ).content;
-  assert.match(out, /local changes .* 2 files · 2 regions/s);
+  }
+
+  const contentResult = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "auto" },
+  });
+
+  const out = contentResult.content;
+
+  assert.match(out, /local changes .* 2 files · 2 regions/su);
   assert.doesNotMatch(out, /\n{3,}/u);
   assert.ok(sealOf(out));
   assert.deepEqual(asserted, ["directorate_liaison:directorate_seal"]);
@@ -548,7 +821,8 @@ test("review scope falls back from explicit input to project, global, and branch
   git("switch", "-qc", "feature");
   git("add", "src/a.ts");
   git("commit", "-qm", "branch change");
-  const { call, sealOf } = await harness(dir);
+  const { call } = await harness(dir);
+
   const seal = async (session: string, input = {}) => {
     const result = await call(
       "directorate_seal",
@@ -556,23 +830,25 @@ test("review scope falls back from explicit input to project, global, and branch
       "directorate_liaison",
       session
     );
+
     return sealJson(sealOf(result.content));
   };
+
   const branch = await seal("branch");
   assert.match(
     branch.description,
     /branch 1 commit ahead of main plus local changes/u
   );
   assert.deepEqual(
-    branch.files.map(({ path }: { path: string }) => path),
+    branch.files.map((file: { path: string }) => file.path),
     ["src/a.ts", "src/b.ts"]
   );
 
-  mkdirSync(join(home, ".opencode"), { recursive: true });
+  mkdirSync(path.join(home, ".opencode"), { recursive: true });
   writeFileSync(globalSettings, JSON.stringify({ default_scope: "local" }));
   const local = await seal("global");
   assert.deepEqual(
-    local.files.map(({ path }: { path: string }) => path),
+    local.files.map((file: { path: string }) => file.path),
     ["src/b.ts"]
   );
 
@@ -585,15 +861,12 @@ test("review scope falls back from explicit input to project, global, and branch
     },
     "build"
   );
-  assert.equal((await seal("project")).target.kind, "paths");
-  assert.equal(
-    (await seal("explicit", { scope: "local" })).baseSha,
-    local.baseSha
-  );
-  assert.equal(
-    (await seal("target", { target: { kind: "commit" } })).target.kind,
-    "commit"
-  );
+  const targetResult = await seal("project");
+  assert.equal(targetResult.target.kind, "paths");
+  const baseShaResult = await seal("explicit", { scope: "local" });
+  assert.equal(baseShaResult.baseSha, local.baseSha);
+  const targetResult2 = await seal("target", { target: { kind: "commit" } });
+  assert.equal(targetResult2.target.kind, "commit");
   await assert.rejects(
     seal("ambiguous", { scope: "branch", target: { kind: "local" } }),
     /Pass either scope or target/u
@@ -611,28 +884,34 @@ test("the plugin registers bundled review agents and skill without discovery fil
       ["directorate_compliance", "subagent", true],
     ]
   );
+
   for (const agent of agents.values()) {
     assert.ok(agent.system?.startsWith("# "));
   }
+
   const skill = skills.get("directorate-lenses");
   assert.ok(skill);
   assert.equal(skill.autoinvoke, false);
-  assert.match(skill.content, /^# Directorate lenses/);
-  assert.ok(statSync(join(skill.path, "../references/triage.md")).isFile());
+  assert.match(skill.content, /^# Directorate lenses/u);
+  assert.ok(
+    statSync(path.join(skill.path, "../references/triage.md")).isFile()
+  );
 });
 
 test("bundled registration preserves existing agent and skill overrides", async () => {
   const dir = repo();
+
   const agent: Types.DeepMutable<Agent.Info> = {
     ...Agent.Info.default(Agent.ID.make("directorate_liaison")),
     system: "Custom review instructions",
   };
+
   const skill = Skill.Info.make({
     autoinvoke: true,
     content: "Custom lens instructions",
     id: Skill.ID.make("directorate-lenses"),
     name: Skill.Name.make("Custom lenses"),
-    path: Skill.Info.fields.path.make(join(dir, "SKILL.md")),
+    path: Skill.Info.fields.path.make(path.join(dir, "SKILL.md")),
   });
 
   const { agents, skills } = await harness(
@@ -648,7 +927,7 @@ test("bundled registration preserves existing agent and skill overrides", async 
 
   assert.deepEqual(agents.get(agent.id), agent);
   assert.deepEqual(skills.get(skill.id), skill);
-  assert.deepEqual([...agents.keys()].sort(), [
+  assert.deepEqual([...agents.keys()].toSorted(), [
     "directorate_auditor",
     "directorate_compliance",
     "directorate_liaison",
@@ -662,8 +941,10 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   assert.ok(review);
 
   const sessionID = Session.ID.make(S("lead"));
+
   const text =
     "Review PR #123 with one model.\nFocus on migrations; skip generated files.\n\n ";
+
   const files = [{ uri: "file:///tmp/context.md" }];
   await Effect.runPromise(
     review.execute({
@@ -697,7 +978,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
     /Dispatch directorate_liaison with the user's request/u
   );
 
-  for (const blank of ["", " \n\t"]) {
+  await runEach(["", " \n\t"], async (blank) => {
     await Effect.runPromise(
       review.execute({ delivery: "queue", prompt: { text: blank }, sessionID })
     );
@@ -710,7 +991,8 @@ test("/directorate-review forwards free-form requests and only offers setup ques
       prompts.at(-1)?.text ?? "",
       /use the question tool to offer the mode/u
     );
-  }
+  });
+
   await Effect.runPromise(
     review.execute({
       delivery: "queue",
@@ -778,23 +1060,26 @@ test("/directorate-review forwards free-form requests and only offers setup ques
 
 test("a whole-file directory target includes unchanged files but excludes files outside it", async () => {
   const dir = repo();
-  mkdirSync(join(dir, "packages/nested"), { recursive: true });
+  mkdirSync(path.join(dir, "packages/nested"), { recursive: true });
   writeFileSync(
-    join(dir, "packages/nested/keep.ts"),
+    path.join(dir, "packages/nested/keep.ts"),
     "export const keep = 1\n"
   );
   execFileSync("git", ["-C", dir, "add", "packages"]);
   execFileSync("git", ["-C", dir, "commit", "-qm", "add package"]);
-  writeFileSync(join(dir, "packages/draft.ts"), "export const draft = 1\n");
+  writeFileSync(
+    path.join(dir, "packages/draft.ts"),
+    "export const draft = 1\n"
+  );
 
-  const { call, sealOf } = await harness(dir);
+  const { call } = await harness(dir);
   const target = { kind: "paths", paths: ["packages/"] };
   const { content } = await call("directorate_seal", { target });
   const seal = sealJson(sealOf(content));
   assert.deepEqual(
-    seal.files.map(({ path, status }: { path: string; status: string }) => [
-      path,
-      status,
+    seal.files.map((file: { path: string; status: string }) => [
+      file.path,
+      file.status,
     ]),
     [
       ["packages/draft.ts", "modified"],
@@ -807,6 +1092,7 @@ test("a whole-file directory target includes unchanged files but excludes files 
 
 test("registered agents receive their role-specific tool permissions", async () => {
   const { agents } = await harness(repo());
+
   const allowed = (agent: string) => {
     const rules = agents.get(agent)?.permissions;
     assert.ok(rules, `${agent} is registered`);
@@ -824,6 +1110,7 @@ test("registered agents receive their role-specific tool permissions", async () 
       ),
       `${agent} can load the lens skill`
     );
+
     // Direct file access reaches only the lens references; code is read through the sealed directorate_* tools.
     for (const { action, resource, effect } of rules) {
       if (
@@ -839,6 +1126,7 @@ test("registered agents receive their role-specific tool permissions", async () 
         );
       }
     }
+
     for (const action of ["webfetch", "websearch"]) {
       assert.deepEqual(
         rules.findLast((rule) => rule.action === action),
@@ -846,15 +1134,18 @@ test("registered agents receive their role-specific tool permissions", async () 
         `${agent}: ${action} is available without per-action approval`
       );
     }
+
     assert.ok(rules.every((rule) => rule.effect !== "ask"));
+
     return rules
       .filter(
         ({ action, effect }) =>
           action.startsWith("directorate_") && effect === "allow"
       )
       .map(({ action }) => action)
-      .sort();
+      .toSorted();
   };
+
   const read = [
     "directorate_diff",
     "directorate_grep",
@@ -863,17 +1154,18 @@ test("registered agents receive their role-specific tool permissions", async () 
     "directorate_ls",
     "directorate_read",
   ];
+
   assert.deepEqual(
     allowed("directorate_auditor"),
     [
       ...read.filter((t) => t !== "directorate_ledger_list"),
       "directorate_ledger_add",
       "directorate_note",
-    ].sort()
+    ].toSorted()
   );
   assert.deepEqual(
     allowed("directorate_compliance"),
-    [...read, "directorate_ledger_verdict"].sort()
+    [...read, "directorate_ledger_verdict"].toSorted()
   );
   // Seats review independently: they file, but never list the other seats' entries.
   assert.deepEqual(
@@ -882,33 +1174,33 @@ test("registered agents receive their role-specific tool permissions", async () 
       ...read.filter((t) => t !== "directorate_ledger_list"),
       "directorate_ledger_add",
       "directorate_note",
-    ].sort()
+    ].toSorted()
   );
   assert.deepEqual(allowed("directorate_liaison"), ["directorate_*"]);
 });
 
 test("ownership: only the sealing session may cover, refresh, or report", async () => {
-  const { call, sealOf } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call } = await harness(repo());
+
+  const contentResult2 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult2.content);
+
   await assert.rejects(
     call("directorate_report", { seal }, "directorate_liaison", "other-lead"),
-    /Only the session that sealed/
+    /Only the session that sealed/u
   );
   await assert.rejects(
     call(
       "directorate_coverage",
-      { seal, regions: ["R1"], disposition: "skipped", note: "x" },
+      { disposition: "skipped", note: "x", regions: ["R1"], seal },
       "directorate_liaison",
       "other-lead"
     ),
-    /Only the session that sealed/
+    /Only the session that sealed/u
   );
   await call(
     "directorate_ledger_add",
@@ -920,42 +1212,44 @@ test("ownership: only the sealing session may cover, refresh, or report", async 
     call(
       "directorate_ledger_verdict",
       {
-        seal,
-        id: "F1",
-        verdict: "refuted",
-        rationale: "r",
         evidence: ["src/a.ts:1"],
+        id: "F1",
+        rationale: "r",
+        seal,
+        verdict: "refuted",
       },
       "build",
       "build"
     ),
-    /Only directorate_liaison or directorate_compliance/
+    /Only directorate_liaison or directorate_compliance/u
   );
   await assert.rejects(
     call("directorate_ledger_verdict", {
-      seal,
-      id: "F1",
-      verdict: "refuted",
-      rationale: "r",
       evidence: ["src/a.ts:1"],
+      id: "F1",
+      rationale: "r",
+      seal,
+      verdict: "refuted",
     }),
-    /needs directorate_compliance/
+    /needs directorate_compliance/u
   );
 });
 
 test("full flow: children registered at launch, gates, compliance confirms, report stops running children", async () => {
-  const { S, call, sealOf, launch, interrupted } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
-  const d1 = (await call("directorate_diff", { seal })).content;
-  assert.match(d1, /columns: old line, new line/);
-  assert.match(d1, /^\s+2 \+export const div/m);
+  const { S, call, launch, interrupted } = await harness(repo());
+
+  const contentResult3 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult3.content);
+
+  const contentResult4 = await call("directorate_diff", { seal });
+  const d1 = contentResult4.content;
+  assert.match(d1, /columns: old line, new line/u);
+  assert.match(d1, /^\s+2 \+export const div/mu);
+
   const finish = await launch(
     "call-1",
     "directorate_auditor",
@@ -963,17 +1257,21 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
     "child1",
     "running"
   );
+
   assert.deepEqual(
-    [sealJson(seal).children[0].status, sealJson(seal).children[0].session],
+    [
+      present(sealJson(seal).children[0]).status,
+      present(sealJson(seal).children[0]).session,
+    ],
     ["running", S("child1")],
     "linked when its session was created"
   );
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Still running: directorate_auditor/
+    /Still running: directorate_auditor/u
   );
   await finish();
-  assert.equal(sealJson(seal).children[0].session, S("child1"));
+  assert.equal(present(sealJson(seal).children[0]).session, S("child1"));
   await assert.rejects(
     call(
       "directorate_ledger_add",
@@ -981,7 +1279,7 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
       "directorate_auditor",
       "child1"
     ),
-    /quote not found/
+    /quote not found/u
   );
   await call(
     "directorate_ledger_add",
@@ -992,12 +1290,12 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
   await call(
     "directorate_ledger_add",
     add(seal, {
-      title: "Speculative",
-      severity: "minor",
-      path: "src/b.ts",
-      line: 1,
-      quote: "export const b = 2",
       evidence: ["src/b.ts:1"],
+      line: 1,
+      path: "src/b.ts",
+      quote: "export const b = 2",
+      severity: "minor",
+      title: "Speculative",
     }),
     "directorate_auditor",
     "child1"
@@ -1005,111 +1303,127 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F1",
-      verdict: "confirmed",
-      rationale: "retraced",
       evidence: ["./src/a.ts:2"],
+      id: "F1",
+      rationale: "retraced",
+      seal,
+      verdict: "confirmed",
     },
     "directorate_compliance",
     "ref"
   );
-  assert.match(
-    (
-      await call(
-        "directorate_ledger_list",
-        { seal, ids: ["F1"] },
-        "directorate_compliance",
-        "ref"
-      )
-    ).content,
-    /confirmed \(important\) by directorate_compliance: retraced \[src\/a.ts:2\]/
+
+  const contentResult5 = await call(
+    "directorate_ledger_list",
+    { ids: ["F1"], seal },
+    "directorate_compliance",
+    "ref"
   );
+
   assert.match(
-    (
-      await call(
-        "directorate_ledger_list",
-        { seal, brief: true },
-        "directorate_compliance",
-        "ref"
-      )
-    ).content,
-    /- F2 \[open\] minor · Speculative — src\/b.ts:1/
+    contentResult5.content,
+    /confirmed \(important\) by directorate_compliance: retraced \[src\/a.ts:2\]/u
+  );
+
+  const contentResult6 = await call(
+    "directorate_ledger_list",
+    { brief: true, seal },
+    "directorate_compliance",
+    "ref"
+  );
+
+  assert.match(
+    contentResult6.content,
+    /- F2 \[open\] minor · Speculative — src\/b.ts:1/u
   );
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Unverified Dossier\): 1 entries/
+    /Protocol hold \(Unverified Dossier\): 1 entries/u
   );
-  const md = (await call("directorate_report", { seal, approach: "ok" }))
-    .content;
-  assert.match(md, /status: \*\*partial\*\*/);
-  assert.match(md, /\[Important\] Division by zero/);
-  assert.match(md, /### Unverified Leads[\s\S]*Speculative/);
-  assert.match(md, /directorate_auditor did not finish: Is y ever zero\?/);
+
+  const contentResult7 = await call("directorate_report", {
+    approach: "ok",
+    seal,
+  });
+
+  const md = contentResult7.content;
+
+  assert.match(md, /status: \*\*partial\*\*/u);
+  assert.match(md, /\[Important\] Division by zero/u);
+  assert.match(md, /### Unverified Leads[\s\S]*Speculative/u);
+  assert.match(md, /directorate_auditor did not finish: Is y ever zero\?/u);
   assert.deepEqual(interrupted, [S("child1")]);
   await assert.rejects(
     call("directorate_ledger_add", add(seal), "directorate_auditor", "child1"),
-    /already reported/
+    /already reported/u
   );
-  assert.equal((await call("directorate_report", { seal })).content, md);
+  const contentResult8 = await call("directorate_report", { seal });
+  assert.equal(contentResult8.content, md);
 });
 
 test("panel: seats assigned at launch, separate reads, credit across seats, a gate for missing seats, one combined report", async () => {
-  const { S, call, sealOf, hooks, bus } = await harness(repo());
+  const { S, call, hooks, bus } = await harness(repo());
   const models = ["prov/alpha#high", "prov/beta", "other/gamma#xhigh"];
   await assert.rejects(
     call("directorate_seal", {
       mode: "default",
-      target: { kind: "local" },
       panel_models: ["no-provider"],
-    }),
-    /providerID\/modelID/
-  );
-  const out = (
-    await call("directorate_seal", {
-      mode: "default",
       target: { kind: "local" },
-      panel_models: models,
-    })
-  ).content;
+    }),
+    /providerID\/modelID/u
+  );
+
+  const contentResult9 = await call("directorate_seal", {
+    mode: "default",
+    panel_models: models,
+    target: { kind: "local" },
+  });
+
+  const out = contentResult9.content;
+
   assert.match(
     out,
-    /budget 30 min/,
+    /budget 30 min/u,
     "a panel gets half again the mode's budget"
   );
-  assert.match(out, /Directorate Seats \(3\): alpha#high, beta, gamma#xhigh/);
+  assert.match(out, /Directorate Seats \(3\): alpha#high, beta, gamma#xhigh/u);
   const seal = sealOf(out);
+
   // Launched without a model, each Seat takes the next open seat; its title names the seat, and its session claims it.
-  const launch = async (call: string, child: string) => {
-    const event = {
-      tool: "subagent",
-      sessionID: S("lead"),
+  const launch = async (callId: string, child: string) => {
+    const event: ToolBeforeEvent = {
       agent: "directorate_liaison",
-      id: call,
+      id: callId,
       input: {
         agent: "directorate_seat",
-        prompt: `seal: ${seal}`,
         description: "Directorate Seat",
-      } as any,
+        prompt: `seal: ${seal}`,
+      },
+      sessionID: S("lead"),
+      tool: "subagent",
     };
-    await hooks["tool.execute.before"](event);
+
+    await present(hooks["tool.execute.before"])(event);
     parents.set(S(child), S("lead"));
     await bus.emit({
-      type: "session.created",
       data: {
-        sessionID: S(child),
-        parentID: S("lead"),
         agent: "directorate_seat",
-        title: event.input.description,
+        parentID: S("lead"),
+        sessionID: S(child),
+        title: event.input?.description,
       },
+      type: "session.created",
     });
-    return event.input;
+
+    return present(event.input);
   };
+
   const inputs = [
     await launch("p1", "pa"),
     await launch("p2", "pb"),
     await launch("p3", "pc"),
   ];
+
   assert.deepEqual(
     inputs.map((i) => [i.model, i.description]),
     models.map((m, i) => [
@@ -1118,23 +1432,35 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
     ])
   );
   assert.deepEqual(
-    sealJson(seal).children.map((c: any) => [c.model, c.session]),
-    models.map((m, i) => [m, S(["pa", "pb", "pc"][i])])
+    sealJson(seal).children.map((c) => [c.model, c.session]),
+    models.map((m, i) => [m, S(`p${String.fromCodePoint(97 + i)}`)])
   );
+
   // Every seat reads every region, apart from the Liaison and from each other.
-  for (const p of ["pa", "pb"]) {
-    assert.match(
-      (await call("directorate_diff", { seal }, "directorate_seat", p)).content,
-      /export const div/
+  await runEach(["pa", "pb"], async (p) => {
+    const contentResult10 = await call(
+      "directorate_diff",
+      { seal },
+      "directorate_seat",
+      p
     );
-    assert.match(
-      (await call("directorate_diff", { seal }, "directorate_seat", p)).content,
-      /All regions have been read/
+
+    assert.match(contentResult10.content, /export const div/u);
+
+    const contentResult11 = await call(
+      "directorate_diff",
+      { seal },
+      "directorate_seat",
+      p
     );
-  }
+
+    assert.match(contentResult11.content, /All regions have been read/u);
+  });
+
+  const contentResult12 = await call("directorate_diff", { seal });
   assert.match(
-    (await call("directorate_diff", { seal })).content,
-    /export const div/,
+    contentResult12.content,
+    /export const div/u,
     "Seat reads do not cover the Liaison"
   );
   await call(
@@ -1143,50 +1469,54 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
     "directorate_seat",
     "pa"
   );
-  const pbAdd = (
-    await call(
-      "directorate_ledger_add",
-      add(seal, { title: "Divide by zero" }),
-      "directorate_seat",
-      "pb"
-    )
-  ).content;
+
+  const contentResult13 = await call(
+    "directorate_ledger_add",
+    add(seal, { title: "Divide by zero" }),
+    "directorate_seat",
+    "pb"
+  );
+
+  const pbAdd = contentResult13.content;
+
   assert.doesNotMatch(
     pbAdd,
-    /Nearby entries/,
+    /Nearby entries/u,
     "Seats stay blind to other entries under memetic isolation"
   );
+
+  const contentResult14 = await call(
+    "directorate_ledger_list",
+    { ids: ["F1"], seal },
+    "directorate_compliance",
+    "ref"
+  );
+
   assert.match(
-    (
-      await call(
-        "directorate_ledger_list",
-        { seal, ids: ["F1"] },
-        "directorate_compliance",
-        "ref"
-      )
-    ).content,
-    /brief: none: searched guard in src\//,
+    contentResult14.content,
+    /brief: none: searched guard in src\//u,
     "directorate_ledger_list exposes brief to Compliance"
   );
+
+  const contentResult15 = await call(
+    "directorate_ledger_list",
+    { brief: true, seal },
+    "directorate_compliance",
+    "ref"
+  );
+
   assert.match(
-    (
-      await call(
-        "directorate_ledger_list",
-        { seal, brief: true },
-        "directorate_compliance",
-        "ref"
-      )
-    ).content,
-    /F1 .* by alpha#high\n.*F2 .* by beta/
+    contentResult15.content,
+    /F1 .* by alpha#high\n.*F2 .* by beta/u
   );
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F1",
-      verdict: "confirmed",
-      rationale: "retraced",
       evidence: ["src/a.ts:2"],
+      id: "F1",
+      rationale: "retraced",
+      seal,
+      verdict: "confirmed",
     },
     "directorate_compliance",
     "ref"
@@ -1194,225 +1524,378 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
+      evidence: ["src/a.ts:2"],
       id: "F2",
-      verdict: "duplicate",
       of: "F1",
       rationale: "same",
-      evidence: ["src/a.ts:2"],
+      seal,
+      verdict: "duplicate",
     },
     "directorate_compliance",
     "ref"
   );
-  for (const p of ["pa", "pb"])
-    await bus.emit({ type: "session.idle", data: { sessionID: S(p) } });
+
+  await runEach(["pa", "pb"], (p) =>
+    bus.emit({ data: { sessionID: S(p) }, type: "session.idle" })
+  );
+
   await bus.emit({
-    type: "session.execution.failed",
     data: { sessionID: S("pc") },
+    type: "session.execution.failed",
   });
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Seats\): 1 of 3 Directorate Seats returned no review: gamma#xhigh \(failed\)/
+    /Protocol hold \(Seats\): 1 of 3 Directorate Seats returned no review: gamma#xhigh \(failed\)/u
   );
   // A relaunch takes the failed seat again; when that run fails too, the report goes out without it.
-  assert.equal((await launch("p4", "pd")).model, "other/gamma#xhigh");
+  const modelResult = await launch("p4", "pd");
+  assert.equal(modelResult.model, "other/gamma#xhigh");
   await bus.emit({
-    type: "session.execution.failed",
     data: { sessionID: S("pd") },
+    type: "session.execution.failed",
   });
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Seats\)/,
+    /Protocol hold \(Seats\)/u,
     "a new failed run is a new gap"
   );
-  const md = (await call("directorate_report", { seal })).content;
-  assert.match(md, /status: \*\*partial\*\*/);
-  assert.match(md, /1 of 3 Directorate Seats did not review/);
+  const contentResult16 = await call("directorate_report", { seal });
+  const md = contentResult16.content;
+  assert.match(md, /status: \*\*partial\*\*/u);
+  assert.match(md, /1 of 3 Directorate Seats did not review/u);
   assert.match(
     md,
-    /Directorate Seats: alpha#high, beta, gamma#xhigh \(memetic isolation intact\)/
+    /Directorate Seats: alpha#high, beta, gamma#xhigh \(memetic isolation intact\)/u
   );
   assert.match(
     md,
-    /\[Important\] Division by zero\*\* — `src\/a.ts:2` · defect · correctness · seats 2\/3/
+    /\[Important\] Division by zero\*\* — `src\/a.ts:2` · defect · correctness · seats 2\/3/u
   );
   assert.match(
     md,
-    /raised by alpha#high, confirmed by directorate_compliance · also raised by beta/
+    /raised by alpha#high, confirmed by directorate_compliance · also raised by beta/u
   );
   assert.match(
     md,
-    /### Directorate Seats\n\| Seat \| Review \| Raised \| Confirmed \| Only this seat \|\n.*\n\| alpha#high \| completed \| 1 \| 1 \| — \|\n\| beta \| completed \| 1 \| 1 \| — \|\n\| gamma#xhigh \| failed \| 0 \| 0 \| — \|/
+    /### Directorate Seats\n\| Seat \| Review \| Raised \| Confirmed \| Only this seat \|\n.*\n\| alpha#high \| completed \| 1 \| 1 \| — \|\n\| beta \| completed \| 1 \| 1 \| — \|\n\| gamma#xhigh \| failed \| 0 \| 0 \| — \|/u
   );
-  assert.match(md, /Directorate Seat gamma#xhigh: its review failed/);
+  assert.match(md, /Directorate Seat gamma#xhigh: its review failed/u);
   assert.doesNotMatch(
     md,
-    /directorate_seat did not complete/,
+    /directorate_seat did not complete/u,
     "a failed seat is reported once, as its seat"
   );
 });
 
 test("panel: true seats the default models; a seat named a model by the Liaison keeps it", async () => {
-  const { S, call, sealOf, hooks } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        panel: true,
-      })
-    ).content
-  );
-  assert.equal(sealJson(seal).panel.length, 5);
-  const event = {
-    tool: "subagent",
-    sessionID: S("lead"),
+  const { S, call, hooks } = await harness(repo());
+
+  const contentResult17 = await call("directorate_seal", {
+    mode: "default",
+    panel: true,
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult17.content);
+
+  assert.equal(sealJson(seal).panel?.length, 5);
+
+  const event: ToolBeforeEvent = {
     agent: "directorate_liaison",
     id: "p1",
     input: {
       agent: "directorate_seat",
-      prompt: "x",
       model: "prov/chosen",
-    } as any,
+      prompt: "x",
+    },
+    sessionID: S("lead"),
+    tool: "subagent",
   };
-  await hooks["tool.execute.before"](event);
-  assert.equal(event.input.model, "prov/chosen");
-  assert.equal(sealJson(seal).children[0].model, "prov/chosen");
+
+  await present(hooks["tool.execute.before"])(event);
+  assert.equal(event.input?.model, "prov/chosen");
+  assert.equal(present(sealJson(seal).children[0]).model, "prov/chosen");
+
+  const contentResult18 = await call("directorate_seal", {
+    abandon: true,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
   assert.match(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        abandon: true,
-      })
-    ).content,
-    /^(?![\s\S]*Directorate Seats \()/,
+    contentResult18.content,
+    /^(?![\s\S]*Directorate Seats \()/u,
     "no panel unless asked"
   );
 });
+
+interface DialogOption {
+  category?: string;
+  description?: string;
+  disabled?: boolean;
+  group?: string;
+  title: string;
+  value: string | number | boolean | ToolInput;
+}
+
+interface DialogPrompt {
+  description?: string;
+  message?: string;
+  options?: DialogOption[];
+  title: string;
+}
+
+type DialogStepResult = DialogOption["value"] | undefined;
+
+type DialogStep = (dialog: DialogPrompt) => DialogStepResult;
+
+interface SeenDialog extends DialogPrompt {
+  kind: string;
+}
+
+interface ToastMessage {
+  description?: string;
+  message?: string;
+  title?: string;
+  variant?: string;
+}
+
+interface AlertMessage {
+  description?: string;
+  message?: string;
+  title: string;
+}
+
+interface TuiCommand {
+  id: string;
+  palette?: boolean;
+  run: () => Promise<void>;
+  slash?: { name: string };
+}
+
+interface TuiLayer {
+  commands: TuiCommand[];
+  mode?: string;
+}
+
+interface DesktopCommand {
+  id: string;
+  run: () => Promise<void>;
+  slash?: { name: string };
+}
+
+interface DesktopRegistry {
+  readonly id?: string;
+}
+
+interface DesktopContext {
+  add: (_registry: DesktopRegistry, item: () => DesktopCommand) => void;
+  client: string;
+  dialogs: {
+    alert: (a: AlertMessage) => Promise<void>;
+    confirm: (dialog: DialogPrompt) => Promise<DialogStepResult>;
+    prompt: (dialog: DialogPrompt) => Promise<DialogStepResult>;
+    select: (dialog: DialogPrompt) => Promise<DialogStepResult>;
+  };
+  sessions: {
+    current: () =>
+      | ({ location?: { directory: string } } & {
+          server: { client: TestRpcClient };
+        })
+      | undefined;
+  };
+  toast: { show: (t: ToastMessage) => void };
+}
+
+interface DesktopModule {
+  exports: {
+    default?: {
+      setup: (context: DesktopContext) => void;
+    };
+  };
+}
 
 /**
  * The TUI part against a scripted user: each select, prompt, and confirm takes the next step, which answers from the
  * dialog's options. /directorate-configure is run as the TUI runs it, through the command the plugin's keymap layer registers.
  */
-function tui(
-  client: unknown,
-  dir: string,
-  steps: ((dialog: any) => unknown)[]
-) {
-  const seen: any[] = [];
-  const toasts: any[] = [];
-  const alerts: any[] = [];
-  const layers: any[] = [];
-  const answer = (kind: string) => async (dialog: any) => {
+const tui = (client: TestRpcClient, dir: string, steps: DialogStep[]) => {
+  const seen: SeenDialog[] = [];
+  const toasts: ToastMessage[] = [];
+  const alerts: AlertMessage[] = [];
+  const layers: TuiLayer[] = [];
+
+  const answer = (kind: string) => (dialog: DialogPrompt) => {
     seen.push({ kind, ...dialog });
     const step = steps.shift();
     assert.ok(step, `no step left for ${kind} "${dialog.title}"`);
-    return step(dialog);
+
+    return Promise.resolve(step(dialog));
   };
+
   const context = {
-    location: { directory: dir },
     client,
     data: { location: { default: () => ({ directory: dir }) } },
-    keymap: { layer: (factory: () => unknown) => void layers.push(factory()) },
+    keymap: {
+      layer: (factory: () => TuiLayer) => {
+        layers.push(factory());
+      },
+    },
+    location: { directory: dir },
     ui: {
       dialog: {
-        select: answer("select"),
-        prompt: answer("prompt"),
+        alert: (a: AlertMessage) => {
+          alerts.push(a);
+
+          return Promise.resolve();
+        },
         confirm: answer("confirm"),
-        alert: async (a: any) => void alerts.push(a),
+        prompt: answer("prompt"),
+        select: answer("select"),
       },
-      toast: { show: (t: any) => void toasts.push(t) },
       format: { path: (p: string) => p },
+      toast: {
+        show: (t: ToastMessage) => {
+          toasts.push(t);
+        },
+      },
     },
   };
-  tuiPlugin.setup(context as any);
-  const command = layers[0].commands[0];
+
+  // SAFETY: test double provides every TUI Plugin.Context surface that tui.ts uses.
+  tuiPlugin.setup(
+    Object.assign(Object.create(null) as TuiPlugin.Context, context)
+  );
+  const [layer] = layers;
+  assert.ok(layer);
+  const [command] = layer.commands;
+  assert.ok(command);
+
   return {
-    layer: layers[0],
+    alerts,
     command,
+    layer,
+    left: () => steps.length,
     run: () => command.run(),
     seen,
     toasts,
-    alerts,
-    left: () => steps.length,
   };
-}
+};
+
 /**
  * The GUI part as OpenCode Desktop loads it: the built dist/gui-experimental.cjs (npm test builds it first), evaluated
  * as CommonJS text with the modules the app provides. Each dialog takes the next step, as in tui().
  */
-async function desktop(
-  client: unknown,
+const desktop = async (
+  client: TestRpcClient,
   session: { location?: { directory: string } } | undefined,
-  steps: ((dialog: any) => unknown)[]
-) {
-  const provided: Record<string, unknown> = {
-    "@opencode/plugin/gui": await import("@opencode/plugin/gui"),
-    "@opencode/plugin/rpc": await import("@opencode/plugin/rpc"),
-    effect: await import("effect"),
-  };
-  const module = { exports: {} as any };
-  const require = (id: string) =>
-    provided[id] ??
-    assert.fail(
+  steps: DialogStep[]
+) => {
+  const guiModule = await import("@opencode/plugin/gui");
+  const rpcModule = await import("@opencode/plugin/rpc");
+  const effectModule = await import("effect");
+
+  const module: DesktopModule = { exports: {} };
+
+  const require = (id: string) => {
+    if (id === "@opencode/plugin/gui") {
+      return guiModule;
+    }
+
+    if (id === "@opencode/plugin/rpc") {
+      return rpcModule;
+    }
+
+    if (id === "effect") {
+      return effectModule;
+    }
+
+    return assert.fail(
       `the GUI bundle requires ${id}, which the app does not provide`
     );
-  new Function(
-    "exports",
-    "require",
-    "module",
-    readFileSync(
-      new URL("../dist/gui-experimental.cjs", import.meta.url),
-      "utf8"
-    )
-  )(module.exports, require, module);
-  const seen: any[] = [];
-  const toasts: any[] = [];
-  const alerts: any[] = [];
-  const commands: any[] = [];
-  const ask = (kind: string) => async (dialog: any) => {
+  };
+
+  const bundleSource = readFileSync(
+    new URL("../dist/gui-experimental.cjs", import.meta.url),
+    "utf-8"
+  );
+
+  const evaluateBundle: (
+    exports: DesktopModule["exports"],
+    requireFn: typeof require,
+    mod: DesktopModule
+  ) => void = runInThisContext(
+    `(function(exports, require, module) {\n${bundleSource}\n})`
+  );
+
+  evaluateBundle(module.exports, require, module);
+  const seen: SeenDialog[] = [];
+  const toasts: ToastMessage[] = [];
+  const alerts: AlertMessage[] = [];
+  const commands: DesktopCommand[] = [];
+
+  const ask = (kind: string) => (dialog: DialogPrompt) => {
     seen.push({ kind, ...dialog });
     const step = steps.shift();
     assert.ok(step, `no step left for ${kind} "${dialog.title}"`);
-    return step(dialog);
+
+    return Promise.resolve(step(dialog));
   };
-  const ctx = {
-    client: "the app's own server: used only with no session",
-    sessions: { current: () => session && { ...session, server: { client } } },
-    dialogs: {
-      select: ask("select"),
-      prompt: ask("prompt"),
-      confirm: ask("confirm"),
-      alert: async (a: any) => void alerts.push(a),
+
+  const ctx: DesktopContext = {
+    add: (_registry, item) => {
+      commands.push(item());
     },
-    toast: { show: (t: any) => void toasts.push(t) },
-    add: (_registry: unknown, item: () => unknown) =>
-      void commands.push(item()),
+    client: "the app's own server: used only with no session",
+    dialogs: {
+      alert: (a) => {
+        alerts.push(a);
+
+        return Promise.resolve();
+      },
+      confirm: ask("confirm"),
+      prompt: ask("prompt"),
+      select: ask("select"),
+    },
+    sessions: { current: () => session && { ...session, server: { client } } },
+    toast: {
+      show: (t) => {
+        toasts.push(t);
+      },
+    },
   };
-  module.exports.default.setup(ctx);
+
+  present(module.exports.default).setup(ctx);
+  const [command] = commands;
+  assert.ok(command);
+
   return {
-    command: commands[0],
+    alerts,
+    command,
+    left: () => steps.length,
     seen,
     toasts,
-    alerts,
-    left: () => steps.length,
   };
-}
+};
+
 /** Picks the option with this title; it must be offered and enabled. */
-const pick = (title: string) => (d: any) => {
-  const o = d.options.find((x: any) => x.title === title);
+const pick = (title: string) => (d: DialogPrompt) => {
+  const options = d.options ?? [];
+  const o = options.find((x) => x.title === title);
   assert.ok(
     o && !o.disabled,
-    `"${title}" not offered in "${d.title}": ${d.options.map((x: any) => x.title).join(", ")}`
+    `"${title}" not offered in "${d.title}": ${options.map((x) => x.title).join(", ")}`
   );
+
   return o.value;
 };
-const esc = () => undefined;
+
+const esc = (): undefined => undefined;
 
 test("/directorate-configure in the TUI: a slash and palette command whose dialogs write directorate.json through the RPC", async () => {
   const dir = repo();
   const { client } = await harness(dir);
+
   const t = tui(client, dir, [
     pick("Global Charter"),
     pick("Default review scope"),
@@ -1423,14 +1906,15 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
     pick("On"),
     pick("Directorate Seats (panel models)"),
     pick("Add a Seat…"),
-    (d) => (
+    (d) => {
       assert.deepEqual(
-        d.options.map((o: any) => o.title),
+        (d.options ?? []).map((o) => o.title),
         ["prov/alpha", "prov/beta"],
         "disabled models are not offered"
-      ),
-      pick("prov/alpha")(d)
-    ),
+      );
+
+      return pick("prov/alpha")(d);
+    },
     pick("xhigh"),
     pick("Add a Seat…"),
     pick("prov/beta"),
@@ -1448,11 +1932,13 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
     pick("docs"),
     pick("ux"),
     esc,
-    (d) => (
-      assert.match(d.title, /Global Charter \(unsaved\)/),
-      pick("Save")(d)
-    ),
+    (d) => {
+      assert.match(d.title, /Global Charter \(unsaved\)/u);
+
+      return pick("Save")(d);
+    },
   ]);
+
   assert.equal(t.command.id, "directorate.configure");
   assert.equal(
     t.layer.mode,
@@ -1464,11 +1950,12 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
   await t.run();
   assert.equal(t.left(), 0);
   assert.deepEqual(t.alerts, []);
-  assert.match(t.toasts[0].message, /"500" is not 2–240 minutes/);
-  assert.deepEqual(JSON.parse(readFileSync(globalSettings, "utf8")), {
-    default_scope: "local",
-    mode: "full",
+  assert.match(present(t.toasts[0]?.message), /"500" is not 2–240 minutes/u);
+  assert.deepEqual(JSON.parse(readFileSync(globalSettings, "utf-8")), {
     budget_minutes: { full: 45 },
+    default_scope: "local",
+    lenses: { disabled: ["docs"] },
+    mode: "full",
     panel: {
       enabled: true,
       models: [
@@ -1476,13 +1963,13 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
         { model: "prov/alpha", variant: "xhigh" },
       ],
     },
-    lenses: { disabled: ["docs"] },
   });
-  assert.equal(t.toasts[1].variant, "success");
+  assert.equal(t.toasts[1]?.variant, "success");
   assert.match(
-    t.toasts[1].message,
+    present(t.toasts[1]?.message),
     new RegExp(
-      `<Filed/Saved> ${globalSettings}\\. Effective: mode full · scope local · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs\\.`
+      `<Filed/Saved> ${globalSettings}\\. Effective: mode full · scope local · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs\\.`,
+      "u"
     )
   );
 });
@@ -1490,36 +1977,41 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
 test("/directorate-configure in OpenCode Desktop: the built GUI bundle runs the same walk through the session's server", async () => {
   const dir = repo();
   const { client } = await harness(dir);
+
   const d = await desktop(client, { location: { directory: dir } }, [
-    (x) => (
+    (x) => {
       assert.deepEqual(
-        x.options.map((o: any) => o.title),
+        (x.options ?? []).map((o) => o.title),
         ["Global Charter", "Local Jurisdiction (This project)"]
-      ),
-      pick("Local Jurisdiction (This project)")(x)
-    ),
+      );
+
+      return pick("Local Jurisdiction (This project)")(x);
+    },
     pick("Default mode"),
     pick("full"),
     pick("Time budgets"),
     pick("full"),
-    (x) => (
+    (x) => {
       assert.match(
-        x.description,
-        /Type "unset" to fall back to 60, ×1\.5 for panels min/
-      ),
-      "30"
-    ),
+        present(x.description),
+        /Type "unset" to fall back to 60, ×1\.5 for panels min/u
+      );
+
+      return "30";
+    },
     pick("default"),
     () => "unset",
     esc,
-    (x) => (
+    (x) => {
       assert.equal(
-        x.options.find((o: any) => o.title === "Save").group,
+        (x.options ?? []).find((o) => o.title === "Save")?.group,
         "File"
-      ),
-      pick("Save")(x)
-    ),
+      );
+
+      return pick("Save")(x);
+    },
   ]);
+
   assert.equal(d.command.id, "configure");
   assert.deepEqual(d.command.slash, { name: "directorate-configure" });
   await d.command.run();
@@ -1527,28 +2019,31 @@ test("/directorate-configure in OpenCode Desktop: the built GUI bundle runs the 
   assert.deepEqual(d.alerts, []);
   assert.deepEqual(
     JSON.parse(
-      readFileSync(join(dir, ".opencode", "directorate.json"), "utf8")
+      readFileSync(path.join(dir, ".opencode", "directorate.json"), "utf-8")
     ),
-    { mode: "full", budget_minutes: { full: 30 } }
+    { budget_minutes: { full: 30 }, mode: "full" }
   );
-  assert.equal(d.toasts[0].variant, "success");
+  assert.equal(d.toasts[0]?.variant, "success");
   assert.match(
-    d.toasts[0].description,
-    /^<Filed\/Saved> .*\.opencode\/directorate\.json\. Effective: mode full · budgets full 30 min\.$/
+    present(d.toasts[0]?.description),
+    /^<Filed\/Saved> .*\.opencode\/directorate\.json\. Effective: mode full · budgets full 30 min\.$/u
   );
 
   // The app's select has no disabled options: in the home directory, "Local Jurisdiction (This project)" is left out.
   mkdirSync(home, { recursive: true });
   const h = await harness(home);
+
   const x = await desktop(h.client, { location: { directory: home } }, [
-    (s) => (
+    (s) => {
       assert.deepEqual(
-        s.options.map((o: any) => o.title),
+        (s.options ?? []).map((o) => o.title),
         ["Global Charter"]
-      ),
-      undefined
-    ),
+      );
+
+      return esc();
+    },
   ]);
+
   await x.command.run();
   assert.equal(x.left(), 0);
 });
@@ -1556,22 +2051,24 @@ test("/directorate-configure in OpenCode Desktop: the built GUI bundle runs the 
 test("/directorate-configure in the TUI: project over global, a rejected save is shown and fixable, unsaved changes need confirming", async () => {
   const dir = repo();
   const { client } = await harness(dir);
-  mkdirSync(join(home, ".opencode"), { recursive: true });
+  mkdirSync(path.join(home, ".opencode"), { recursive: true });
   writeFileSync(
     globalSettings,
-    JSON.stringify({ mode: "code-quality", lenses: { disabled: ["ux"] } })
+    JSON.stringify({ lenses: { disabled: ["ux"] }, mode: "code-quality" })
   );
-  mkdirSync(join(dir, ".opencode"), { recursive: true });
+  mkdirSync(path.join(dir, ".opencode"), { recursive: true });
   writeFileSync(
-    join(dir, ".opencode", "directorate.json"),
+    path.join(dir, ".opencode", "directorate.json"),
     JSON.stringify({ panel: { models: [{ model: "prov/off" }] } })
   );
+
   const t = tui(client, dir, [
     pick("Local Jurisdiction (This project)"),
     (d) => {
       const by = Object.fromEntries(
-        d.options.map((o: any) => [o.title, o.description])
+        (d.options ?? []).map((o) => [o.title, o.description])
       );
+
       assert.equal(
         by["Default mode"],
         "unset: code-quality",
@@ -1579,15 +2076,17 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
       );
       assert.equal(by["Disabled lenses"], "ux");
       assert.equal(by["Directorate Seats (panel models)"], "prov/off");
+
       return pick("Disabled lenses")(d);
     },
-    (d) => (
+    (d) => {
       assert.equal(
-        d.options.find((o: any) => o.title === "ux").description,
+        (d.options ?? []).find((o) => o.title === "ux")?.description,
         "off"
-      ),
-      pick("ux")(d)
-    ),
+      );
+
+      return pick("ux")(d);
+    },
     esc,
     pick("Save"),
     pick("Directorate Seats (panel models)"),
@@ -1596,21 +2095,29 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
     esc,
     pick("Save"),
   ]);
+
   await t.run();
   assert.equal(t.left(), 0);
-  assert.match(t.alerts[0].title, /not saved/);
-  assert.match(t.alerts[0].message, /prov\/off is not an available chat model/);
+  assert.match(present(t.alerts[0]?.title), /not saved/u);
+  assert.match(
+    present(t.alerts[0]?.message),
+    /prov\/off is not an available chat model/u
+  );
   assert.deepEqual(
     JSON.parse(
-      readFileSync(join(dir, ".opencode", "directorate.json"), "utf8")
+      readFileSync(path.join(dir, ".opencode", "directorate.json"), "utf-8")
     ),
     { lenses: { disabled: [] } },
     "an empty list still overrides the global one"
   );
-  assert.match(t.toasts[0].message, /Effective: mode code-quality\.$/);
+  assert.match(
+    present(t.toasts[0]?.message),
+    /Effective: mode code-quality\.$/u
+  );
 
   // Escape with unsaved changes asks first; keeping them returns to the menu.
-  const before = readFileSync(globalSettings, "utf8");
+  const before = readFileSync(globalSettings, "utf-8");
+
   const u = tui(client, dir, [
     pick("Global Charter"),
     pick("Default mode"),
@@ -1620,11 +2127,12 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
     esc,
     () => true,
   ]);
+
   await u.run();
   assert.equal(u.left(), 0);
   assert.equal(u.seen.filter((d) => d.kind === "confirm").length, 2);
   assert.equal(
-    readFileSync(globalSettings, "utf8"),
+    readFileSync(globalSettings, "utf-8"),
     before,
     "discarded changes are not written"
   );
@@ -1632,28 +2140,30 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
   // In the home directory the project file would be the global one: there is no project scope.
   mkdirSync(home, { recursive: true });
   const h = await harness(home);
+
   const x = tui(h.client, home, [
-    (d) => (
+    (d) => {
       assert.equal(
-        d.options.find(
-          (o: any) => o.title === "Local Jurisdiction (This project)"
-        ).disabled,
+        (d.options ?? []).find(
+          (o) => o.title === "Local Jurisdiction (This project)"
+        )?.disabled,
         true
-      ),
-      undefined
-    ),
+      );
+
+      return esc();
+    },
   ]);
+
   await x.run();
   assert.equal(x.left(), 0);
+  const { write } = h.client.rpc(DirectorateRpc);
+  assert.ok(write);
   await assert.rejects(
-    h.client
-      .rpc(DirectorateRpc)
-      .write({ scope: "project", settings: { mode: "full" } }),
-    (e: any) =>
-      e.type === "rejected" && /^No project settings here/.test(e.message)
+    write({ scope: "project", settings: { mode: "full" } }),
+    { message: /^No project settings here/u, type: "rejected" }
   );
   assert.equal(
-    readFileSync(globalSettings, "utf8"),
+    readFileSync(globalSettings, "utf-8"),
     before,
     "the global file is untouched"
   );
@@ -1663,19 +2173,20 @@ test("/directorate-configure in the TUI: project over global, a rejected save is
   const b = tui(client, dir, []);
   await b.run();
   assert.match(
-    b.alerts[0].message,
-    /directorate\.json is not valid Directorate settings/
+    present(b.alerts[0]?.message),
+    /directorate\.json is not valid Directorate settings/u
   );
 });
 
 test("directorate_configure rejects an invalid other scope before changing global settings", async () => {
   const dir = repo();
   const { call } = await harness(dir);
-  mkdirSync(join(dir, ".opencode"));
-  writeFileSync(join(dir, ".opencode/directorate.json"), "{invalid");
-  mkdirSync(join(home, ".opencode"), { recursive: true });
+  mkdirSync(path.join(dir, ".opencode"));
+  writeFileSync(path.join(dir, ".opencode/directorate.json"), "{invalid");
+  mkdirSync(path.join(home, ".opencode"), { recursive: true });
   writeFileSync(globalSettings, '{"mode":"full"}\n');
-  for (const settings of [{ mode: "default" }, {}]) {
+
+  await runEach([{ mode: "default" }, {}], async (settings) => {
     await assert.rejects(
       call(
         "directorate_configure",
@@ -1683,20 +2194,22 @@ test("directorate_configure rejects an invalid other scope before changing globa
         "build",
         "cfg"
       ),
-      /is not valid Directorate settings/
+      /is not valid Directorate settings/u
     );
-    assert.equal(readFileSync(globalSettings, "utf8"), '{"mode":"full"}\n');
-  }
+    assert.equal(readFileSync(globalSettings, "utf-8"), '{"mode":"full"}\n');
+  });
 });
 
 test("directorate_configure: validated writes per scope; the project overrides global key by key; seals use the result", async () => {
   const dir = repo();
-  const { call, sealOf, hooks, S } = await harness(dir);
-  const cfg = (input: any) =>
+  const { call, hooks, S } = await harness(dir);
+
+  const cfg = (input: ToolInput) =>
     call("directorate_configure", input, "build", "cfg");
+
   await assert.rejects(
     call("directorate_configure", { action: "show" }),
-    /review agents cannot modify Directorate settings/
+    /review agents cannot modify Directorate settings/u
   );
   await assert.rejects(
     cfg({
@@ -1704,7 +2217,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
       scope: "global",
       settings: { lenses: { disabled: ["auth"] } },
     }),
-    /auth|Expected/,
+    /auth|Expected/u,
     "the domain lenses are gone"
   );
   await assert.rejects(
@@ -1713,7 +2226,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
       scope: "global",
       settings: { panel: { models: [{ model: "prov/off" }] } },
     }),
-    /prov\/off is not an available chat model/
+    /prov\/off is not an available chat model/u
   );
   await assert.rejects(
     cfg({
@@ -1723,7 +2236,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
         panel: { models: [{ model: "prov/alpha", variant: "max" }] },
       },
     }),
-    /no thinking level "max" \(it has: high, xhigh\)/
+    /no thinking level "max" \(it has: high, xhigh\)/u
   );
   await assert.rejects(
     cfg({
@@ -1731,77 +2244,91 @@ test("directorate_configure: validated writes per scope; the project overrides g
       scope: "global",
       settings: { panel: { models: [{ model: "prov/alpha#high" }] } },
     }),
-    /put the thinking level in variant/
+    /put the thinking level in variant/u
   );
-  const g = (
-    await cfg({
-      action: "write",
-      scope: "global",
-      settings: {
-        mode: "code-quality",
-        panel: {
-          enabled: true,
-          models: [
-            { model: "prov/alpha", variant: "xhigh" },
-            { model: "prov/beta" },
-          ],
-        },
-        budget_minutes: { "code-quality": 12 },
+
+  const contentResult19 = await cfg({
+    action: "write",
+    scope: "global",
+    settings: {
+      budget_minutes: { "code-quality": 12 },
+      mode: "code-quality",
+      panel: {
+        enabled: true,
+        models: [
+          { model: "prov/alpha", variant: "xhigh" },
+          { model: "prov/beta" },
+        ],
       },
-    })
-  ).content;
-  assert.match(g, new RegExp(`Wrote ${globalSettings}`));
+    },
+  });
+
+  const g = contentResult19.content;
+
+  assert.match(g, new RegExp(`Wrote ${globalSettings}`, "u"));
   assert.deepEqual(
-    JSON.parse(readFileSync(globalSettings, "utf8")).panel.models[0],
+    JSON.parse(readFileSync(globalSettings, "utf-8")).panel.models[0],
     { model: "prov/alpha", variant: "xhigh" }
   );
-  const p = (
-    await cfg({
-      action: "write",
-      scope: "project",
-      settings: {
-        panel: { enabled: false },
-        lenses: { disabled: ["ux", "docs"] },
-      },
-    })
-  ).content;
+
+  const contentResult20 = await cfg({
+    action: "write",
+    scope: "project",
+    settings: {
+      lenses: { disabled: ["ux", "docs"] },
+      panel: { enabled: false },
+    },
+  });
+
+  const p = contentResult20.content;
+
   assert.match(
     p,
-    /\.opencode\/directorate\.json \(keys not shown[\s\S]*"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/
+    /\.opencode\/directorate\.json \(keys not shown[\s\S]*"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/u
   );
-  const shown = (await cfg({ action: "show", find: "ALP" })).content;
-  assert.match(shown, /- prov\/alpha \(Alpha\) \[high, xhigh\]/);
-  assert.doesNotMatch(shown, /prov\/beta \(/);
+  const contentResult21 = await cfg({ action: "show", find: "ALP" });
+  const shown = contentResult21.content;
+  assert.match(shown, /- prov\/alpha \(Alpha\) \[high, xhigh\]/u);
+  assert.doesNotMatch(shown, /prov\/beta \(/u);
+
   // The Liaison sees the settings before it seals.
-  const ctx: any = {
+  const ctx: SessionHookEvent = {
     agent: "directorate_liaison",
     sessionID: S("lead"),
     system: [],
     tools: {},
   };
-  await hooks["session.context"](ctx);
+
+  await present(hooks["session.context"])(ctx);
   assert.match(
-    ctx.system[0].text,
-    /^\[directorate settings\] mode code-quality · panel off/
+    present(ctx.system[0]?.text),
+    /^\[directorate settings\] mode code-quality · panel off/u
   );
+
   // Configured mode, budget, and lenses; the project turned the panel off, and a request turns it back on.
-  const out = (
-    await call("directorate_seal", { target: { kind: "local" }, panel: true })
-  ).content;
-  assert.match(out, /budget 12 min/, "a configured budget is used as-is");
-  assert.match(out, /Lenses disabled by directorate.json: ux, docs/);
-  assert.match(out, /Directorate Seats \(2\): alpha#xhigh, beta/);
+  const contentResult22 = await call("directorate_seal", {
+    panel: true,
+    target: { kind: "local" },
+  });
+
+  const out = contentResult22.content;
+
+  assert.match(out, /budget 12 min/u, "a configured budget is used as-is");
+  assert.match(out, /Lenses disabled by directorate.json: ux, docs/u);
+  assert.match(out, /Directorate Seats \(2\): alpha#xhigh, beta/u);
   const seal = sealOf(out);
   assert.equal(sealJson(seal).mode, "code-quality");
+
   // The settings system line stays identical after sealing so the Turn-1 KV-cache prefix holds.
-  const ctxAfter: any = {
+  const ctxAfter: SessionHookEvent = {
     agent: "directorate_liaison",
     sessionID: S("lead"),
     system: [],
     tools: {},
   };
-  await hooks["session.context"](ctxAfter);
-  assert.equal(ctxAfter.system[0]?.text, ctx.system[0].text);
+
+  await present(hooks["session.context"])(ctxAfter);
+  assert.equal(ctxAfter.system[0]?.text, ctx.system[0]?.text);
   await assert.rejects(
     call(
       "directorate_ledger_add",
@@ -1809,7 +2336,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
       "directorate_auditor",
       "scout"
     ),
-    /ux lens is disabled/
+    /ux lens is disabled/u
   );
   await assert.rejects(
     call(
@@ -1818,7 +2345,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
       "directorate_auditor",
       "scout"
     ),
-    /Expected "correctness" | "security"/,
+    /Expected "correctness" | "security"/u,
     "only the ten lenses are accepted"
   );
   await call(
@@ -1827,53 +2354,59 @@ test("directorate_configure: validated writes per scope; the project overrides g
     "directorate_auditor",
     "scout"
   );
-  const off = (
-    await call("directorate_seal", {
-      mode: "default",
-      target: { kind: "local" },
-      abandon: true,
-    })
-  ).content;
+
+  const contentResult23 = await call("directorate_seal", {
+    abandon: true,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const off = contentResult23.content;
+
   assert.doesNotMatch(
     off,
-    /Directorate Seats \(/,
+    /Directorate Seats \(/u,
     "the project's panel off wins over the global on"
   );
-  assert.match(off, /budget 20 min/);
+  assert.match(off, /budget 20 min/u);
+
   // {} removes a scope's file; a broken file is an error the tool names.
-  assert.match(
-    (await cfg({ action: "write", scope: "global", settings: {} })).content,
-    /Removed/
-  );
+  const contentResult24 = await cfg({
+    action: "write",
+    scope: "global",
+    settings: {},
+  });
+
+  assert.match(contentResult24.content, /Removed/u);
   writeFileSync(
-    join(dir, ".opencode", "directorate.json"),
+    path.join(dir, ".opencode", "directorate.json"),
     `{ "mode": "fast" }`
   );
   await assert.rejects(
     cfg({ action: "show" }),
-    /directorate\.json is not valid Directorate settings/
+    /directorate\.json is not valid Directorate settings/u
   );
   writeFileSync(
-    join(dir, ".opencode", "directorate.json"),
+    path.join(dir, ".opencode", "directorate.json"),
     `{ "lense": { "disabled": ["ux"] } }`
   );
   await assert.rejects(
     cfg({ action: "show" }),
-    /not valid Directorate settings.*lense/s,
+    /not valid Directorate settings.*lense/su,
     "a misspelled key in a file is an error, not ignored"
   );
 });
 
 test("gates fire again for new gaps: a new entry after an acknowledged open gate pushes back once more", async () => {
-  const { call, sealOf } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call } = await harness(repo());
+
+  const contentResult25 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult25.content);
+
   await call("directorate_diff", { seal });
   await call(
     "directorate_ledger_add",
@@ -1883,59 +2416,61 @@ test("gates fire again for new gaps: a new entry after an acknowledged open gate
   );
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Unverified Dossier\): 1 entries/
+    /Protocol hold \(Unverified Dossier\): 1 entries/u
   );
   await call(
     "directorate_ledger_add",
     add(seal, {
-      title: "Another",
-      severity: "minor",
-      path: "src/b.ts",
-      line: 1,
-      quote: "export const b = 2",
       evidence: ["src/b.ts:1"],
+      line: 1,
+      path: "src/b.ts",
+      quote: "export const b = 2",
+      severity: "minor",
+      title: "Another",
     }),
     "directorate_auditor",
     "scout"
   );
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Unverified Dossier\): 2 entries/,
+    /Protocol hold \(Unverified Dossier\): 2 entries/u,
     "F2 is new"
   );
-  const md = (await call("directorate_report", { seal })).content;
-  assert.match(md, /2 leads unverified/);
+  const contentResult26 = await call("directorate_report", { seal });
+  const md = contentResult26.content;
+  assert.match(md, /2 leads unverified/u);
 });
 
 test("a completed report closes the ledger", async () => {
-  const { call, sealOf } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call } = await harness(repo());
+
+  const contentResult27 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult27.content);
+
   await call("directorate_diff", { seal });
   await call("directorate_report", { seal });
   await assert.rejects(
     call("directorate_ledger_add", add(seal), "directorate_auditor", "scout"),
-    /already reported/
+    /already reported/u
   );
 });
 
 test("child events: early completion is reconciled; failure overrides idle", async () => {
-  const { S, call, sealOf, launch, bus } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, launch, bus } = await harness(repo());
+
+  const contentResult28 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult28.content);
+
   await call("directorate_diff", { seal });
+
   const fin1 = await launch(
     "c1",
     "directorate_auditor",
@@ -1943,9 +2478,11 @@ test("child events: early completion is reconciled; failure overrides idle", asy
     "a",
     "running"
   );
-  await bus.emit({ type: "session.idle", data: { sessionID: S("a") } });
+
+  await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin1();
-  assert.equal(sealJson(seal).children[0].status, "completed");
+  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+
   const fin2 = await launch(
     "c2",
     "directorate_auditor",
@@ -1953,32 +2490,35 @@ test("child events: early completion is reconciled; failure overrides idle", asy
     "b",
     "running"
   );
+
   await fin2();
   await bus.emit({
-    type: "session.execution.failed",
     data: { sessionID: S("b") },
+    type: "session.execution.failed",
   });
-  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
-  assert.equal(sealJson(seal).children[1].status, "failed");
+  await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
+  assert.equal(present(sealJson(seal).children[1]).status, "failed");
+  const contentResult29 = await call("directorate_report", { seal });
   assert.match(
-    (await call("directorate_report", { seal })).content,
-    /directorate_auditor did not complete: q2/
+    contentResult29.content,
+    /directorate_auditor did not complete: q2/u
   );
 });
 
 test("directorate_wait: the Liaison waits in its turn until a run finishes, and hears what it recorded", async () => {
-  const { S, call, sealOf, launch, bus } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, launch, bus } = await harness(repo());
+
+  const contentResult30 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult30.content);
+
+  const contentResult31 = await call("directorate_wait", { seal });
   assert.match(
-    (await call("directorate_wait", { seal })).content,
-    /No Auditor, Seat, or Compliance runs are running/
+    contentResult31.content,
+    /No Auditor, Seat, or Compliance runs are running/u
   );
   await launch(
     "c1",
@@ -1996,45 +2536,51 @@ test("directorate_wait: the Liaison waits in its turn until a run finishes, and 
   );
   await assert.rejects(
     call("directorate_wait", { seal }, "directorate_liaison", "other-lead"),
-    /Only the session that sealed/
+    /Only the session that sealed/u
   );
   let returned = false;
-  const waiting = call("directorate_wait", { seal }).then(
-    (out) => ((returned = true), out.content)
-  );
-  await new Promise((r) => setTimeout(r, 1_200));
+
+  const waiting = call("directorate_wait", { seal }).then((result) => {
+    returned = true;
+
+    return result.content;
+  });
+
+  await delay(1200);
   assert.equal(returned, false, "nothing finished: still waiting");
   await call("directorate_ledger_add", add(seal), "directorate_auditor", "a");
-  await bus.emit({ type: "session.idle", data: { sessionID: S("a") } });
+  await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   const out = await waiting;
   assert.match(
     out,
-    /^- directorate_auditor completed \(ses_a-[^)]+\): raised F1$/m
+    /^- directorate_auditor completed \(ses_a-[^)]+\): raised F1$/mu
   );
   assert.match(
     out,
-    /Still running \(1\): directorate_compliance \(ses_b-[^)]+\)\. .*call directorate_wait again/
+    /Still running \(1\): directorate_compliance \(ses_b-[^)]+\)\. .*call directorate_wait again/u
   );
-  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
+  await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
+  const contentResult32 = await call("directorate_wait", { seal });
   assert.match(
-    (await call("directorate_wait", { seal })).content,
-    /No Auditor, Seat, or Compliance runs are running/
+    contentResult32.content,
+    /No Auditor, Seat, or Compliance runs are running/u
   );
 });
 
 test("a Seat that returns normally after reading only one region cannot make a complete panel review", async () => {
-  const { S, call, sealOf, launch, bus } = await harness(repo());
+  const { S, call, launch, bus } = await harness(repo());
   const model = "prov/alpha";
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        target: { kind: "local" },
-        panel_models: [model],
-      })
-    ).content
-  );
+
+  const contentResult33 = await call("directorate_seal", {
+    panel_models: [model],
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult33.content);
+
   assert.ok(seal);
   await call("directorate_diff", { seal });
+
   const returned = await launch(
     "seat",
     "directorate_seat",
@@ -2042,37 +2588,38 @@ test("a Seat that returns normally after reading only one region cannot make a c
     "seat",
     "running"
   );
+
   await returned();
   await call(
     "directorate_diff",
-    { seal, regions: ["R1"] },
+    { regions: ["R1"], seal },
     "directorate_seat",
     "seat"
   );
   await bus.emit({
-    type: "session.execution.succeeded",
     data: { sessionID: S("seat") },
+    type: "session.execution.succeeded",
   });
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Seats\).*1 regions unread/
+    /Protocol hold \(Seats\).*1 regions unread/u
   );
-  const md = (await call("directorate_report", { seal })).content;
-  assert.match(md, /status: \*\*partial\*\*/);
-  assert.match(md, /Directorate Seat alpha: 1 of 2 regions unread/);
+  const contentResult34 = await call("directorate_report", { seal });
+  const md = contentResult34.content;
+  assert.match(md, /status: \*\*partial\*\*/u);
+  assert.match(md, /Directorate Seat alpha: 1 of 2 regions unread/u);
 });
 
 test("follow-ups to a subagent are new runs of its session: earlier runs keep their outcome, and directorate_wait reports the new run once", async () => {
-  const { S, call, sealOf, launch, bus, hooks, followUp } =
-    await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, launch, bus, hooks, followUp } = await harness(repo());
+
+  const contentResult35 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult35.content);
+
   await call(
     "directorate_ledger_add",
     add(seal),
@@ -2082,18 +2629,20 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   await call(
     "directorate_ledger_add",
     add(seal, {
-      title: "Second",
-      severity: "minor",
-      path: "src/b.ts",
-      line: 1,
-      quote: "export const b = 2",
       evidence: ["src/b.ts:1"],
+      line: 1,
+      path: "src/b.ts",
+      quote: "export const b = 2",
+      severity: "minor",
+      title: "Second",
     }),
     "directorate_auditor",
     "scout"
   );
+
   const runs = () =>
-    sealJson(seal).children.map((k: any) => [k.call, k.session, k.status]);
+    sealJson(seal).children.map((k) => [k.call, k.session, k.status]);
+
   await launch(
     "c1",
     "directorate_compliance",
@@ -2104,22 +2653,24 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F1",
-      verdict: "confirmed",
-      rationale: "retraced",
       evidence: ["src/a.ts:2"],
+      id: "F1",
+      rationale: "retraced",
+      seal,
+      verdict: "confirmed",
     },
     "directorate_compliance",
     "b"
   );
-  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
+  await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
+
   const f2 = await followUp(
     "c2",
     "directorate_compliance",
     "b",
     "seal: x\nentries: [F2]"
   );
+
   assert.deepEqual(runs(), [
     ["c1", S("b"), "completed"],
     ["c2", S("b"), "launching"],
@@ -2127,38 +2678,40 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   await f2.enqueue();
   await f2.deliver();
   // The child working again belongs to the follow-up, not the earlier run.
-  await hooks["tool.execute.before"]({
-    tool: "directorate_read",
-    sessionID: S("b"),
+  await present(hooks["tool.execute.before"])({
     agent: "directorate_compliance",
     id: "r1",
     input: {},
+    sessionID: S("b"),
+    tool: "directorate_read",
   });
-  assert.equal(runs()[0][2], "completed");
+  assert.equal(runs()[0]?.[2], "completed");
   const waiting = call("directorate_wait", { seal });
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F2",
-      verdict: "refuted",
-      rationale: "guarded",
       evidence: ["src/b.ts:1"],
+      id: "F2",
+      rationale: "guarded",
+      seal,
+      verdict: "refuted",
     },
     "directorate_compliance",
     "b"
   );
   await bus.emit({
-    type: "session.execution.succeeded",
     data: { sessionID: S("b") },
+    type: "session.execution.succeeded",
   });
-  const out = (await waiting).content;
-  assert.equal(out.match(/^- /gm)?.length, 1, out);
+  const contentResult36 = await waiting;
+  const out = contentResult36.content;
+  assert.equal(out.match(/^- /gmu)?.length, 1, out);
   assert.match(
     out,
-    /^- directorate_compliance completed \(ses_b-[^)]+\): decided F2 refuted$/m,
+    /^- directorate_compliance completed \(ses_b-[^)]+\): decided F2 refuted$/mu,
     "only what this run recorded"
   );
+
   // A failed follow-up fails only itself.
   const f3 = await followUp(
     "c3",
@@ -2166,14 +2719,15 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     "b",
     "seal: x\nentries: [F2]"
   );
+
   await f3.enqueue();
   await f3.deliver();
   await bus.emit({
-    type: "session.execution.failed",
     data: { sessionID: S("b") },
+    type: "session.execution.failed",
   });
   assert.deepEqual(
-    runs().map((r: any) => r[2]),
+    runs().map((r) => r[2]),
     ["completed", "completed", "failed"]
   );
   // Both calls can settle in the same busy period if it drains both prompts.
@@ -2188,8 +2742,8 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   await f5.enqueue();
   await f5.deliver();
   await bus.emit({
-    type: "session.execution.succeeded",
     data: { sessionID: S("a") },
+    type: "session.execution.succeeded",
   });
   assert.deepEqual(runs().slice(-2), [
     ["c4", S("a"), "completed"],
@@ -2198,41 +2752,49 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
 });
 
 test("a queued terminal event from a background run cannot finish an undelivered follow-up, even in the same millisecond", async () => {
-  const { S, call, sealOf, launch, bus, followUp } = await harness(repo());
-  const seal = sealOf(
-    (await call("directorate_seal", { target: { kind: "local" } })).content
-  );
+  const { S, call, launch, bus, followUp } = await harness(repo());
+
+  const contentResult37 = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult37.content);
+
   assert.ok(seal);
   const agent = "directorate_auditor";
   const sessionID = S("a");
   const first = await launch("first", agent, "question: first", "a", "running");
   await first();
   const next = await followUp("next", agent, "a", "question: next");
+
   const oldEvent = {
-    created: Date.parse(sealJson(seal).children[1].startedAt),
+    created: DateTime.toEpochMillis(
+      present(sealJson(seal).children[1]).startedAt
+    ),
     data: { sessionID },
   };
+
   await next.enqueue();
   await bus.emit({ ...oldEvent, type: "session.execution.succeeded" });
-  assert.equal(sealJson(seal).children[0].status, "completed");
+  assert.equal(present(sealJson(seal).children[0]).status, "completed");
   await next.returned();
-  assert.equal(sealJson(seal).children[1].status, "running");
+  assert.equal(present(sealJson(seal).children[1]).status, "running");
   await next.deliver();
-  await bus.emit({ type: "session.execution.succeeded", data: { sessionID } });
-  assert.equal(sealJson(seal).children[1].status, "completed");
+  await bus.emit({ data: { sessionID }, type: "session.execution.succeeded" });
+  assert.equal(present(sealJson(seal).children[1]).status, "completed");
 });
 
 test("directorate_wait: a budget that locks while it waits says to report, not to wait again", async () => {
-  const { call, sealOf, launch } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        budget_minutes: 10,
-      })
-    ).content
-  );
+  const { call, launch } = await harness(repo());
+
+  const contentResult38 = await call("directorate_seal", {
+    budget_minutes: 10,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult38.content);
+
   await launch(
     "c1",
     "directorate_auditor",
@@ -2241,144 +2803,191 @@ test("directorate_wait: a budget that locks while it waits says to report, not t
     "running"
   );
   shiftClock(seal, 10 - 1.5 / 60);
-  const out = (await call("directorate_wait", { seal })).content;
-  assert.match(out, /^The budget is locked: call directorate_report now/m);
-  assert.doesNotMatch(out, /directorate_wait again/);
+  const contentResult39 = await call("directorate_wait", { seal });
+  const out = contentResult39.content;
+  assert.match(out, /^The budget is locked: call directorate_report now/mu);
+  assert.doesNotMatch(out, /directorate_wait again/u);
 });
 
 test("only the Liaison runs a review: other agents cannot dispatch its subagents or call its tools, and do not see them", async () => {
   const { hooks } = await harness(repo());
-  const ev = (agent: string | undefined, action: string, resource: string) =>
-    ({
-      sessionID: "ses_primary",
-      agent,
-      action,
-      resources: [resource],
-      effect: "allow",
-    }) as any;
-  const decide = async (e: any) => (
-    await hooks["permission.evaluate"](e),
-    [e.effect, e.message]
+
+  const decide = async (
+    e: PermissionHookEvent
+  ): Promise<[string | undefined, string | undefined]> => {
+    await present(hooks["permission.evaluate"])(e);
+
+    return [e.effect, e.message];
+  };
+
+  await runEach(
+    ["directorate_auditor", "directorate_seat", "directorate_compliance"],
+    async (target) => {
+      const [effect, message] = await decide(
+        permissionEvent("build", "subagent", target)
+      );
+
+      assert.equal(effect, "deny", `build may not dispatch ${target}`);
+      assert.match(present(message), /Dispatch directorate_liaison/u);
+
+      const resultResult = await decide(
+        permissionEvent("directorate_liaison", "subagent", target)
+      );
+
+      assert.equal(resultResult[0], "allow");
+    }
   );
-  for (const target of [
-    "directorate_auditor",
-    "directorate_seat",
-    "directorate_compliance",
-  ]) {
-    const [effect, message] = await decide(ev("build", "subagent", target));
-    assert.equal(effect, "deny", `build may not dispatch ${target}`);
-    assert.match(message, /Dispatch directorate_liaison/);
-    assert.equal(
-      (await decide(ev("directorate_liaison", "subagent", target)))[0],
-      "allow"
-    );
-  }
-  assert.equal(
-    (await decide(ev("build", "subagent", "directorate_liaison")))[0],
-    "allow"
+
+  const resultResult2 = await decide(
+    permissionEvent("build", "subagent", "directorate_liaison")
   );
-  assert.equal((await decide(ev("build", "subagent", "explore")))[0], "allow");
-  assert.equal(
-    (await decide(ev("build", "directorate_ledger_list", "*")))[0],
-    "deny"
+
+  assert.equal(resultResult2[0], "allow");
+
+  const resultResult3 = await decide(
+    permissionEvent("build", "subagent", "explore")
   );
-  assert.equal((await decide(ev("build", "directorate_seal", "*")))[0], "deny");
-  assert.equal(
-    (await decide(ev("build", "directorate_configure", "*")))[0],
-    "allow"
+
+  assert.equal(resultResult3[0], "allow");
+
+  const resultResult4 = await decide(
+    permissionEvent("build", "directorate_ledger_list", "*")
   );
-  for (const agent of [
-    "directorate_liaison",
-    "directorate_auditor",
-    "directorate_compliance",
-    "directorate_seat",
-  ])
-    assert.equal(
-      (await decide(ev(agent, "directorate_ledger_list", "*")))[0],
-      "allow"
-    );
+
+  assert.equal(resultResult4[0], "deny");
+
+  const resultResult5 = await decide(
+    permissionEvent("build", "directorate_seal", "*")
+  );
+
+  assert.equal(resultResult5[0], "deny");
+
+  const resultResult6 = await decide(
+    permissionEvent("build", "directorate_configure", "*")
+  );
+
+  assert.equal(resultResult6[0], "allow");
+
+  await runEach(
+    [
+      "directorate_liaison",
+      "directorate_auditor",
+      "directorate_compliance",
+      "directorate_seat",
+    ],
+    async (agent) => {
+      const resultResult7 = await decide(
+        permissionEvent(agent, "directorate_ledger_list", "*")
+      );
+
+      assert.equal(resultResult7[0], "allow");
+    }
+  );
+
   // A request that names no agent is the session's agent's, as the host resolves it; with neither, the rules decide.
   sessionAgents.set("ses_primary", "build");
-  assert.equal(
-    (await decide(ev(undefined, "subagent", "directorate_compliance")))[0],
-    "deny"
+
+  const resultResult8 = await decide(
+    permissionEvent(undefined, "subagent", "directorate_compliance")
   );
-  assert.equal(
-    (await decide(ev(undefined, "directorate_seal", "*")))[0],
-    "deny"
+
+  assert.equal(resultResult8[0], "deny");
+
+  const resultResult9 = await decide(
+    permissionEvent(undefined, "directorate_seal", "*")
   );
+
+  assert.equal(resultResult9[0], "deny");
   sessionAgents.set("ses_primary", "directorate_liaison");
-  assert.equal(
-    (await decide(ev(undefined, "subagent", "directorate_compliance")))[0],
-    "allow"
+
+  const resultResult10 = await decide(
+    permissionEvent(undefined, "subagent", "directorate_compliance")
   );
+
+  assert.equal(resultResult10[0], "allow");
   sessionAgents.delete("ses_primary");
+
+  const resultResult11 = await decide(
+    permissionEvent(undefined, "subagent", "directorate_compliance")
+  );
+
   assert.equal(
-    (await decide(ev(undefined, "subagent", "directorate_compliance")))[0],
+    resultResult11[0],
     "allow",
     "an unknown caller is left to the agents' rules"
   );
+
   const [, message] = await decide(
-    ev("build", "subagent", "directorate_compliance")
+    permissionEvent("build", "subagent", "directorate_compliance")
   );
+
   assert.match(
-    message,
-    /verbatim.*If you already dispatched one, send the follow-up to that session/
+    present(message),
+    /verbatim.*If you already dispatched one, send the follow-up to that session/u
   );
-  const tools = {
-    read: {},
-    subagent: {},
-    directorate_seal: {},
+
+  const tools: SessionHookEvent["tools"] = {
+    directorate_configure: {},
     directorate_ledger_list: {},
     directorate_report: {},
-    directorate_configure: {},
+    directorate_seal: {},
+    read: {},
+    subagent: {},
   };
+
   // Every request kind gets the same tools, so compaction and generate keep the session's prompt-cache prefix.
-  for (const kind of ["context", "compaction", "generate"]) {
-    const primary: any = {
-      sessionID: "ses_primary",
-      agent: "build",
-      system: [],
-      tools: { ...tools },
-    };
-    await hooks[`session.${kind}`](primary);
-    assert.deepEqual(
-      Object.keys(primary.tools),
-      ["read", "subagent", "directorate_configure"],
-      kind
-    );
-  }
-  const liaison: any = {
-    sessionID: "ses_liaison",
+  await runEach(
+    ["context", "compaction", "generate"] as const,
+    async (kind) => {
+      const primary: SessionHookEvent = {
+        agent: "build",
+        sessionID: "ses_primary",
+        system: [],
+        tools: { ...tools },
+      };
+
+      await present(hooks[`session.${kind}`])(primary);
+      assert.deepEqual(
+        Object.keys(primary.tools).toSorted(),
+        ["directorate_configure", "read", "subagent"],
+        kind
+      );
+    }
+  );
+
+  const liaison: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: "ses_liaison",
     system: [],
     tools: { ...tools },
   };
-  await hooks["session.context"](liaison);
+
+  await present(hooks["session.context"])(liaison);
   assert.deepEqual(Object.keys(liaison.tools), Object.keys(tools));
+
   for (const agent of [
     "directorate_auditor",
     "directorate_seat",
     "directorate_compliance",
   ]) {
     assert.match(
-      readFileSync(new URL(`../agents/${agent}.md`, import.meta.url), "utf8"),
-      /^hidden: true$/m,
+      readFileSync(new URL(`../agents/${agent}.md`, import.meta.url), "utf-8"),
+      /^hidden: true$/mu,
       `${agent} is not offered to other agents`
     );
   }
 });
 
 test("child events: a failure reported by the subagent tool beats an earlier idle event", async () => {
-  const { S, call, sealOf, launch, bus } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, launch, bus } = await harness(repo());
+
+  const contentResult40 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult40.content);
+
   const fin = await launch(
     "c1",
     "directorate_auditor",
@@ -2386,77 +2995,84 @@ test("child events: a failure reported by the subagent tool beats an earlier idl
     "a",
     "failed"
   );
-  await bus.emit({ type: "session.idle", data: { sessionID: S("a") } });
+
+  await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin();
-  assert.equal(sealJson(seal).children[0].status, "failed");
+  assert.equal(present(sealJson(seal).children[0]).status, "failed");
 });
 
 test("parallel launches with the same description link even when the second launch creates and returns first", async () => {
-  const { S, call, sealOf, hooks, bus } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, hooks, bus } = await harness(repo());
+
+  const contentResult41 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult41.content);
+
   const before = async (id: string) => {
-    const event = {
-      tool: "subagent",
-      sessionID: S("lead"),
+    const event: ToolBeforeEvent = {
       agent: "directorate_liaison",
       id,
       input: {
         agent: "directorate_auditor",
-        prompt: `question: ${id}`,
         description: "Check correctness",
+        prompt: `question: ${id}`,
       },
+      sessionID: S("lead"),
+      tool: "subagent",
     };
-    await hooks["tool.execute.before"](event);
-    return event.input.description;
+
+    await present(hooks["tool.execute.before"])(event);
+
+    return present(event.input?.description);
   };
+
   const titleA = await before("c1");
   const titleB = await before("c2");
   assert.notEqual(titleA, titleB);
+
   const create = async (child: string, title: string) => {
     parents.set(S(child), S("lead"));
     await bus.emit({
-      type: "session.created",
       data: {
-        sessionID: S(child),
-        parentID: S("lead"),
         agent: "directorate_auditor",
+        parentID: S("lead"),
+        sessionID: S(child),
         title,
       },
+      type: "session.created",
     });
   };
+
   const returned = (id: string, child: string) =>
-    hooks["tool.execute.after"]({
-      tool: "subagent",
-      sessionID: S("lead"),
+    present(hooks["tool.execute.after"])({
       id,
-      status: "completed",
       result: {
         metadata: { metadata: { sessionID: S(child), status: "running" } },
       },
+      sessionID: S("lead"),
+      status: "completed",
+      tool: "subagent",
     });
+
   await create("b", titleB);
   await returned("c2", "b");
   await create("a", titleA);
   assert.deepEqual(
-    sealJson(seal).children.map((c: any) => [c.call, c.session, c.status]),
+    sealJson(seal).children.map((c) => [c.call, c.session, c.status]),
     [
       ["c1", S("a"), "running"],
       ["c2", S("b"), "running"],
     ]
   );
   // The child finishes before the subagent tool returns; a background "running" result does not undo it.
-  await bus.emit({ type: "session.idle", data: { sessionID: S("a") } });
+  await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await returned("c1", "a");
-  await bus.emit({ type: "session.idle", data: { sessionID: S("b") } });
+  await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
   assert.deepEqual(
-    sealJson(seal).children.map((c: any) => c.status),
+    sealJson(seal).children.map((c) => c.status),
     ["completed", "completed"]
   );
 });
@@ -2464,33 +3080,33 @@ test("parallel launches with the same description link even when the second laun
 test("after a plugin reload, a child's events reach its review through the parent session's record", async () => {
   const dir = repo();
   const h1 = await harness(dir, "kids");
-  const seal = h1.sealOf(
-    (
-      await h1.call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+
+  const contentResult42 = await h1.call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = h1.sealOf(contentResult42.content);
+
   await h1.launch("c1", "directorate_auditor", "question: q1", "a", "running");
   const h2 = await harness(dir, "kids");
   await h2.bus.emit({
-    type: "session.execution.failed",
     data: { sessionID: h2.S("a") },
+    type: "session.execution.failed",
   });
-  assert.equal(sealJson(seal).children[0].status, "failed");
+  assert.equal(present(sealJson(seal).children[0]).status, "failed");
 });
 
 test("hooks write the seal only for changes: unrelated subagents and running auditors' tool calls leave it alone", async () => {
-  const { S, call, sealOf, launch, hooks, bus } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { S, call, launch, hooks, bus } = await harness(repo());
+
+  const contentResult43 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult43.content);
+
   const fin = await launch(
     "c1",
     "directorate_auditor",
@@ -2498,84 +3114,85 @@ test("hooks write the seal only for changes: unrelated subagents and running aud
     "a",
     "running"
   );
+
   await fin();
-  const inode = () => statSync(join(state, seal, "seal.json")).ino;
+  const inode = () => statSync(path.join(state, seal, "seal.json")).ino;
   const before = inode();
-  await bus.emit({ type: "session.idle", data: { sessionID: S("lead") } });
-  await hooks["tool.execute.before"]({
-    tool: "subagent",
-    sessionID: S("lead"),
+  await bus.emit({ data: { sessionID: S("lead") }, type: "session.idle" });
+  await present(hooks["tool.execute.before"])({
     agent: "directorate_liaison",
     id: "e1",
     input: { agent: "explore", prompt: "look around" },
-  });
-  await hooks["tool.execute.after"]({
-    tool: "subagent",
     sessionID: S("lead"),
+    tool: "subagent",
+  });
+  await present(hooks["tool.execute.after"])({
     id: "e1",
-    status: "completed",
     result: {
       content: `<subagent sessionID="${S("x")}" state="completed">`,
       metadata: { metadata: { sessionID: S("x"), status: "completed" } },
     },
+    sessionID: S("lead"),
+    status: "completed",
+    tool: "subagent",
   });
-  await hooks["tool.execute.before"]({
-    tool: "directorate_read",
-    sessionID: S("a"),
+  await present(hooks["tool.execute.before"])({
     agent: "directorate_auditor",
     id: "r1",
-    messageID: "m",
     input: {},
+    messageID: "m",
+    sessionID: S("a"),
+    tool: "directorate_read",
   });
   assert.equal(inode(), before, "seal.json was not rewritten");
   assert.deepEqual(
-    sealJson(seal).children.map((c: any) => c.call),
+    sealJson(seal).children.map((c) => c.call),
     ["c1"]
   );
 });
 
 test("one review per session; abandon saves and notifies; resume checks the session's own review and extends a spent budget", async () => {
-  const { call, sealOf, notices } = await harness(repo());
-  const first = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call, notices } = await harness(repo());
+
+  const contentResult44 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const first = sealOf(contentResult44.content);
+
   await assert.rejects(
     call("directorate_seal", { mode: "default", target: { kind: "local" } }),
-    /already holds an active containment seal/
+    /already holds an active containment seal/u
   );
-  const second = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        abandon: true,
-      })
-    ).content
-  );
+
+  const contentResult45 = await call("directorate_seal", {
+    abandon: true,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const second = sealOf(contentResult45.content);
+
   assert.ok(
     sealJson(first).reportedAt &&
       sealJson(first).autoReported &&
       sealJson(first).abandoned
   );
-  const notice = notices[0];
+  const [notice] = notices;
   assert.ok(notice);
-  assert.match(notice, /abandoned for a new review/);
-  assert.doesNotMatch(notice, /time budget ran out/);
-  const third = sealOf(
-    (
-      await call(
-        "directorate_seal",
-        { mode: "default", target: { kind: "local" } },
-        "directorate_liaison",
-        "lead2"
-      )
-    ).content
+  assert.match(notice, /abandoned for a new review/u);
+  assert.doesNotMatch(notice, /time budget ran out/u);
+
+  const contentResult46 = await call(
+    "directorate_seal",
+    { mode: "default", target: { kind: "local" } },
+    "directorate_liaison",
+    "lead2"
   );
+
+  const third = sealOf(contentResult46.content);
+
   await assert.rejects(
     call(
       "directorate_seal",
@@ -2583,48 +3200,50 @@ test("one review per session; abandon saves and notifies; resume checks the sess
       "directorate_liaison",
       "lead2"
     ),
-    new RegExp(`already holds an active containment seal ${third}`)
+    new RegExp(`already holds an active containment seal ${third}`, "u")
   );
   assert.ok(second);
   shiftClock(second, 19, 20);
   const before = sealJson(second);
   await call("directorate_seal", { resume: second });
-  const after = sealJson(second);
-  assert.equal(after.createdAt, before.createdAt);
-  assert.equal(after.deadline, before.deadline);
+  const afterResume = sealJson(second);
+  assert.deepEqual(afterResume.createdAt, before.createdAt);
+  assert.deepEqual(afterResume.deadline, before.deadline);
   shiftClock(second, 30, 20);
-  const resumed = (
-    await call(
-      "directorate_seal",
-      { resume: second },
-      "directorate_liaison",
-      "lead3"
-    )
-  ).content;
-  assert.match(resumed, /Resumed containment `directorate-/);
+
+  const contentResult47 = await call(
+    "directorate_seal",
+    { resume: second },
+    "directorate_liaison",
+    "lead3"
+  );
+
+  const resumed = contentResult47.content;
+
+  assert.match(resumed, /Resumed containment `directorate-/u);
   const s = sealJson(second);
   assert.equal(s.ownerSession.startsWith("ses_lead3"), true);
   assert.ok(
-    Date.parse(s.deadline) > Date.now() + 4 * 60_000,
+    DateTime.toEpochMillis(s.deadline) > Date.now() + 4 * 60_000,
     "a spent budget gets more time on resume"
   );
   await assert.rejects(
     call("directorate_report", { seal: second }),
-    /Only the session that sealed/
+    /Only the session that sealed/u
   );
 });
 
 test("freshness: gate, refresh, reopened entries need re-anchoring, a second edit is stale", async () => {
   const dir = repo();
-  const { call, sealOf } = await harness(dir);
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call } = await harness(dir);
+
+  const contentResult48 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult48.content);
+
   await call("directorate_diff", { seal });
   await call(
     "directorate_ledger_add",
@@ -2633,149 +3252,159 @@ test("freshness: gate, refresh, reopened entries need re-anchoring, a second edi
     "scout"
   );
   await call("directorate_ledger_verdict", {
-    seal,
-    id: "F1",
-    verdict: "confirmed",
-    rationale: "r",
     evidence: ["src/a.ts:2"],
+    id: "F1",
+    rationale: "r",
+    seal,
+    verdict: "confirmed",
   });
   writeFileSync(
-    join(dir, "src/a.ts"),
+    path.join(dir, "src/a.ts"),
     "export const a = 2\n// guard added\nexport const div = (x: number, y: number) => (y ? x / y : 0)\n"
   );
   await assert.rejects(
     call("directorate_report", { seal }),
-    /Protocol hold \(Containment Drift\)/
+    /Protocol hold \(Containment Drift\)/u
   );
-  const r = (await call("directorate_refresh", { seal })).content;
-  assert.match(r, /Changed: src\/a.ts/);
-  assert.match(r, /Reopened for re-verification: F1/);
+  const contentResult49 = await call("directorate_refresh", { seal });
+  const r = contentResult49.content;
+  assert.match(r, /Changed: src\/a.ts/u);
+  assert.match(r, /Reopened for re-verification: F1/u);
   await assert.rejects(
     call(
       "directorate_ledger_verdict",
       {
-        seal,
-        id: "F1",
-        verdict: "confirmed",
-        rationale: "r",
         evidence: ["src/a.ts:3"],
+        id: "F1",
+        rationale: "r",
+        seal,
+        verdict: "confirmed",
       },
       "directorate_compliance",
       "ref"
     ),
-    /anchor does not match/
+    /anchor does not match/u
   );
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F1",
-      verdict: "refuted",
-      rationale: "guarded now",
       evidence: ["src/a.ts:3"],
+      id: "F1",
+      rationale: "guarded now",
+      seal,
+      verdict: "refuted",
     },
     "directorate_compliance",
     "ref"
   );
   await call("directorate_diff", { seal });
-  writeFileSync(join(dir, "src/b.ts"), "export const b = 3\n");
-  const md = (await call("directorate_report", { seal })).content;
-  assert.match(md, /status: \*\*stale\*\*/);
+  writeFileSync(path.join(dir, "src/b.ts"), "export const b = 3\n");
+  const contentResult50 = await call("directorate_report", { seal });
+  const md = contentResult50.content;
+  assert.match(md, /status: \*\*stale\*\*/u);
   assert.match(
     md,
-    /Containment drift \(changed after sealing and not re-verified\): `src\/b.ts`/
+    /Containment drift \(changed after sealing and not re-verified\): `src\/b.ts`/u
   );
-  assert.doesNotMatch(md, /### Verified Findings/);
+  assert.doesNotMatch(md, /### Verified Findings/u);
 });
 
 test("coverage: 'reviewed' needs a real reader; auditors keep their own read offsets", async () => {
   const dir = repo();
   writeFileSync(
-    join(dir, "src/wide.ts"),
-    Array.from(
+    path.join(dir, "src/wide.ts"),
+    `${Array.from(
       { length: 300 },
       (_, i) => `export const v${i} = "${"x".repeat(400)}"`
-    ).join("\n") + "\n"
+    ).join("\n")}\n`
   );
-  const { call, sealOf } = await harness(dir);
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
-  const wide = sealJson(seal).regions.find(
-    (r: any) => r.file === "src/wide.ts"
+  const { call } = await harness(dir);
+
+  const contentResult51 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult51.content);
+
+  const wide = present(
+    sealJson(seal).regions.find((r) => r.file === "src/wide.ts")
   ).id;
-  const a1 = (
-    await call(
-      "directorate_diff",
-      { seal, regions: [wide] },
-      "directorate_auditor",
-      "scoutA"
-    )
-  ).content;
-  assert.match(a1, /\(partial; call again\)/);
-  const b1 = (
-    await call(
-      "directorate_diff",
-      { seal, regions: [wide] },
-      "directorate_auditor",
-      "scoutB"
-    )
-  ).content;
+
+  const contentResult52 = await call(
+    "directorate_diff",
+    { regions: [wide], seal },
+    "directorate_auditor",
+    "scoutA"
+  );
+
+  const a1 = contentResult52.content;
+
+  assert.match(a1, /\(partial; call again\)/u);
+
+  const contentResult53 = await call(
+    "directorate_diff",
+    { regions: [wide], seal },
+    "directorate_auditor",
+    "scoutB"
+  );
+
+  const b1 = contentResult53.content;
+
   assert.doesNotMatch(
     b1,
-    /continued from body line/,
+    /continued from body line/u,
     "auditor B starts at the top, not where auditor A stopped"
   );
-  const a2 = (
-    await call(
-      "directorate_diff",
-      { seal, regions: [wide] },
-      "directorate_auditor",
-      "scoutA"
-    )
-  ).content;
-  assert.match(a2, /continued from body line/);
-  const out = (
-    await call("directorate_coverage", {
-      seal,
-      regions: ["R1"],
-      disposition: "reviewed",
-      note: "looked fine",
-    })
-  ).content;
-  assert.match(out, /R1 recorded as skimmed/);
+
+  const contentResult54 = await call(
+    "directorate_diff",
+    { regions: [wide], seal },
+    "directorate_auditor",
+    "scoutA"
+  );
+
+  const a2 = contentResult54.content;
+
+  assert.match(a2, /continued from body line/u);
+
+  const contentResult55 = await call("directorate_coverage", {
+    disposition: "reviewed",
+    note: "looked fine",
+    regions: ["R1"],
+    seal,
+  });
+
+  const out = contentResult55.content;
+
+  assert.match(out, /R1 recorded as skimmed/u);
 });
 
 test("budget: drain denies auditors not compliance; lock strips tools; role-specific budget text; release after report", async () => {
-  const { S, call, sealOf, hooks } = await harness(repo());
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        budget_minutes: 10,
-      })
-    ).content
-  );
-  const ev = (agent: string) =>
-    ({
-      sessionID: S("lead"),
-      action: "subagent",
-      resources: [agent],
-      effect: "allow",
-    }) as any;
+  const { S, call, hooks } = await harness(repo());
+
+  const contentResult56 = await call("directorate_seal", {
+    budget_minutes: 10,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult56.content);
+
+  const ev = (agent: string): PermissionHookEvent => ({
+    action: "subagent",
+    effect: "allow",
+    resources: [agent],
+    sessionID: S("lead"),
+  });
+
   shiftClock(seal, 7);
   const e1 = ev("directorate_auditor");
-  await hooks["permission.evaluate"](e1);
+  await present(hooks["permission.evaluate"])(e1);
   assert.equal(e1.effect, "deny");
-  assert.match(e1.message, /Directorate evacuation \(drain\)/);
+  assert.match(present(e1.message), /Directorate evacuation \(drain\)/u);
   const e2 = ev("directorate_compliance");
-  await hooks["permission.evaluate"](e2);
+  await present(hooks["permission.evaluate"])(e2);
   assert.equal(e2.effect, "allow");
   await call(
     "directorate_ledger_add",
@@ -2783,74 +3412,88 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
     "directorate_auditor",
     "scout"
   );
-  const scoutOut = (
-    await call(
-      "directorate_note",
-      { seal, kind: "limit", text: "stopped at drain" },
-      "directorate_auditor",
-      "scout"
-    )
-  ).content;
+
+  const contentResult57 = await call(
+    "directorate_note",
+    { kind: "limit", seal, text: "stopped at drain" },
+    "directorate_auditor",
+    "scout"
+  );
+
+  const scoutOut = contentResult57.content;
+
   assert.match(
     scoutOut,
-    /min left.*file surviving candidates now and hand off/
+    /min left.*file surviving candidates now and hand off/u
   );
+
   // Drain system notices omit ticking minutesLeft so the KV-cache prefix stays stable across turns.
-  const drainAt7: any = {
-    sessionID: S("lead"),
+  const drainAt7: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: S("lead"),
     system: [],
     tools: {},
   };
-  await hooks["session.context"](drainAt7);
+
+  await present(hooks["session.context"])(drainAt7);
   shiftClock(seal, 8);
-  const drainAt8: any = {
-    sessionID: S("lead"),
+
+  const drainAt8: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: S("lead"),
     system: [],
     tools: {},
   };
-  await hooks["session.context"](drainAt8);
+
+  await present(hooks["session.context"])(drainAt8);
   assert.equal(
     drainAt7.system.at(-1)?.text,
     drainAt8.system.at(-1)?.text,
     "drain system prompt does not tick between turns"
   );
-  assert.doesNotMatch(drainAt7.system.at(-1)?.text ?? "", /min left/);
+  assert.doesNotMatch(drainAt7.system.at(-1)?.text ?? "", /min left/u);
   assert.match(
     drainAt7.system.at(-1)?.text ?? "",
-    /DIRECTORATE \/\/ EVACUATION/
+    /DIRECTORATE \/\/ EVACUATION/u
   );
   shiftClock(seal, 11);
-  const lockCtx: any = {
-    sessionID: S("lead"),
+
+  const lockCtx: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: S("lead"),
     system: [],
     tools: {
+      directorate_note: {},
+      directorate_report: {},
+      directorate_seal: {},
       read: {},
       subagent: {},
-      directorate_report: {},
-      directorate_note: {},
-      directorate_seal: {},
     },
   };
-  await hooks["session.context"](lockCtx);
-  assert.deepEqual(Object.keys(lockCtx.tools).sort(), [
+
+  await present(hooks["session.context"])(lockCtx);
+  assert.deepEqual(Object.keys(lockCtx.tools).toSorted(), [
     "directorate_note",
     "directorate_report",
   ]);
-  const md = (await call("directorate_report", { seal })).content;
-  assert.match(md, /time budget ran out/);
-  const after: any = {
-    sessionID: S("lead"),
+  const contentResult58 = await call("directorate_report", { seal });
+  const md = contentResult58.content;
+  assert.match(md, /time budget ran out/u);
+
+  const afterReport: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: S("lead"),
     system: [],
     tools: { read: {}, subagent: {} },
   };
-  await hooks["session.context"](after);
-  assert.deepEqual(Object.keys(after.tools).sort(), ["read", "subagent"]);
+
+  await present(hooks["session.context"])(afterReport);
+  assert.deepEqual(Object.keys(afterReport.tools).toSorted(), [
+    "read",
+    "subagent",
+  ]);
   const e3 = ev("directorate_auditor");
-  await hooks["permission.evaluate"](e3);
+  await present(hooks["permission.evaluate"])(e3);
   assert.equal(e3.effect, "allow");
 });
 
@@ -2861,37 +3504,41 @@ test("after a plugin reload, the session's unreported seal is found even after a
     mode: "default",
     target: { kind: "local" },
   });
-  const live = h1.sealOf(
-    (
-      await h1.call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-        budget_minutes: 10,
-        abandon: true,
-      })
-    ).content
-  );
+
+  const contentResult59 = await h1.call("directorate_seal", {
+    abandon: true,
+    budget_minutes: 10,
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const live = h1.sealOf(contentResult59.content);
+
   shiftClock(live, 11);
   const h2 = await harness(dir, "reload");
-  const mine: any = {
-    sessionID: h2.S("lead"),
+
+  const mine: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: h2.S("lead"),
     system: [],
-    tools: { read: {}, directorate_report: {} },
+    tools: { directorate_report: {}, read: {} },
   };
-  await h2.hooks["session.context"](mine);
+
+  await present(h2.hooks["session.context"])(mine);
   assert.deepEqual(
     Object.keys(mine.tools),
     ["directorate_report"],
     "locked after reload"
   );
-  const stranger: any = {
-    sessionID: "someone-else",
+
+  const stranger: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: "someone-else",
     system: [],
     tools: { read: {} },
   };
-  await h2.hooks["session.context"](stranger);
+
+  await present(h2.hooks["session.context"])(stranger);
   assert.deepEqual(Object.keys(stranger.tools), ["read"]);
 });
 
@@ -2902,29 +3549,36 @@ test(
     const dir = repo();
     const start = Date.now();
     await Effect.runPromise(
-      Effect.gen(function* () {
+      Effect.gen(function* watchdogTest() {
         yield* TestClock.setTime(start);
         const run = Effect.runPromiseWith(yield* Effect.context());
         const h = yield* Effect.tryPromise(() => harness(dir, undefined, run));
+
         const result = yield* Effect.tryPromise(() =>
           h.call("directorate_seal", {
+            budget_minutes: 2,
             mode: "default",
             target: { kind: "local" },
-            budget_minutes: 2,
           })
         );
+
         const seal = h.sealOf(result.content);
-        assert.equal(Date.parse(sealJson(seal).deadline), start + 120_000);
+        assert.equal(
+          DateTime.toEpochMillis(sealJson(seal).deadline),
+          start + 120_000
+        );
         yield* Scope.close(h.scope, Exit.void);
         yield* TestClock.adjust("239 seconds");
         assert.equal(sealJson(seal).reportedAt, undefined);
+
         const reloaded = yield* Effect.tryPromise(() =>
           harness(dir, undefined, run)
         );
+
         yield* TestClock.adjust("30 seconds");
         assert.match(
           yield* Deferred.await(reloaded.notified),
-          /<intervened\/filed> the directive.*did not report before lockdown/
+          /<intervened\/filed> the directive.*did not report before lockdown/u
         );
         assert.deepEqual(
           h.notices,
@@ -2932,10 +3586,13 @@ test(
           "the closed plugin did not run the watchdog"
         );
         assert.equal(sealJson(seal).autoReported, true);
-        assert.ok(Date.parse(sealJson(seal).reportedAt) >= start + 240_000);
+        assert.ok(
+          DateTime.toEpochMillis(present(sealJson(seal).reportedAt)) >=
+            start + 240_000
+        );
         assert.match(
-          readFileSync(join(state, seal, "report.md"), "utf8"),
-          /status: \*\*partial\*\*/
+          readFileSync(path.join(state, seal, "report.md"), "utf-8"),
+          /status: \*\*partial\*\*/u
         );
         yield* Scope.close(reloaded.scope, Exit.void);
       }).pipe(Effect.provide(TestClock.layer()))
@@ -2945,198 +3602,213 @@ test(
 
 test("directorate_read, directorate_grep, directorate_ls, directorate_history read the seal, not later edits", async () => {
   const dir = repo();
-  const { call, sealOf } = await harness(dir);
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  const { call } = await harness(dir);
+
+  const contentResult60 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult60.content);
+
   await assert.rejects(
-    call("directorate_ls", { seal, dir: "../outside" }),
-    /must be relative to the repository/
+    call("directorate_ls", { dir: "../outside", seal }),
+    /must be relative to the repository/u
   );
-  writeFileSync(join(dir, "src/a.ts"), "rewritten\n");
-  const r = (
-    await call(
-      "directorate_read",
-      { seal, path: "src/a.ts" },
-      "directorate_auditor",
-      "scout"
-    )
-  ).content;
-  assert.match(r, /sealed post-image/);
-  assert.match(r, /2 export const div/);
+  writeFileSync(path.join(dir, "src/a.ts"), "rewritten\n");
+
+  const contentResult61 = await call(
+    "directorate_read",
+    { path: "src/a.ts", seal },
+    "directorate_auditor",
+    "scout"
+  );
+
+  const r = contentResult61.content;
+
+  assert.match(r, /sealed post-image/u);
+  assert.match(r, /2 export const div/u);
+
+  const contentResult62 = await call(
+    "directorate_read",
+    { path: "src/a.ts", seal, side: "old" },
+    "directorate_auditor",
+    "scout"
+  );
+
+  assert.match(contentResult62.content, /1 export const a = 1/u);
+
+  const contentResult63 = await call(
+    "directorate_grep",
+    { fixed: true, pattern: "export const b", seal },
+    "directorate_auditor",
+    "scout"
+  );
+
+  assert.match(contentResult63.content, /src\/b.ts:1:export const b = 2/u);
+
+  const contentResult64 = await call(
+    "directorate_ls",
+    { seal },
+    "directorate_auditor",
+    "scout"
+  );
+
   assert.match(
-    (
-      await call(
-        "directorate_read",
-        { seal, path: "src/a.ts", side: "old" },
-        "directorate_auditor",
-        "scout"
-      )
-    ).content,
-    /1 export const a = 1/
+    contentResult64.content,
+    /2 files at the seal\nsrc\/a.ts\nsrc\/b.ts/u
   );
-  assert.match(
-    (
-      await call(
-        "directorate_grep",
-        { seal, pattern: "export const b", fixed: true },
-        "directorate_auditor",
-        "scout"
-      )
-    ).content,
-    /src\/b.ts:1:export const b = 2/
+
+  const contentResult65 = await call(
+    "directorate_history",
+    { kind: "log", seal },
+    "directorate_auditor",
+    "scout"
   );
-  assert.match(
-    (await call("directorate_ls", { seal }, "directorate_auditor", "scout"))
-      .content,
-    /2 files at the seal\nsrc\/a.ts\nsrc\/b.ts/
-  );
-  assert.match(
-    (
-      await call(
-        "directorate_history",
-        { seal, kind: "log" },
-        "directorate_auditor",
-        "scout"
-      )
-    ).content,
-    /init/
-  );
+
+  assert.match(contentResult65.content, /init/u);
 });
 
 test("old-format seals in the store and hook faults never break a session", async () => {
-  const old = join(state, "directorate-20200101000000-abcdef");
+  const old = path.join(state, "directorate-20200101000000-abcdef");
   mkdirSync(old, { recursive: true });
   writeFileSync(
-    join(old, "seal.json"),
+    path.join(old, "seal.json"),
     JSON.stringify({
-      id: "directorate-20200101000000-abcdef",
-      repo: "/x",
-      mode: "default",
-      target: { kind: "local" },
       createdAt: new Date().toISOString(),
       deadline: new Date().toISOString(),
+      id: "directorate-20200101000000-abcdef",
+      mode: "default",
+      repo: "/x",
+      target: { kind: "local" },
     })
   );
-  const broken = join(state, "directorate-20200101000001-abcdef");
+  const broken = path.join(state, "directorate-20200101000001-abcdef");
   mkdirSync(broken, { recursive: true });
-  writeFileSync(join(broken, "seal.json"), "{not json");
-  const { S, call, sealOf, hooks } = await harness(repo());
-  const ev: any = {
-    sessionID: S("fresh"),
+  writeFileSync(path.join(broken, "seal.json"), "{not json");
+  const { S, call, hooks } = await harness(repo());
+
+  const ev: SessionHookEvent = {
     agent: "directorate_liaison",
+    sessionID: S("fresh"),
     system: [],
     tools: { read: {} },
   };
-  await hooks["session.context"](ev);
+
+  await present(hooks["session.context"])(ev);
   assert.deepEqual(Object.keys(ev.tools), ["read"]);
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+
+  const contentResult66 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult66.content);
+
   assert.ok(seal);
-  await hooks["tool.execute.before"]({
-    tool: "subagent",
-    sessionID: S("lead"),
+  await present(hooks["tool.execute.before"])({
     agent: "directorate_liaison",
     id: "x",
     input: null,
-  });
-  await hooks["permission.evaluate"]({
     sessionID: S("lead"),
+    tool: "subagent",
+  });
+  await present(hooks["permission.evaluate"])({
     action: "subagent",
     resources: null,
+    sessionID: S("lead"),
   });
 });
 
 test("directorate_read and directorate_history ask permission for the file too, so a deny rule withholds it", async () => {
-  const { call, sealOf, requests } = await harness(
-    repo(),
-    undefined,
-    undefined,
-    (r) => r.resources.includes("src/b.ts")
+  const { call, requests } = await harness(repo(), undefined, undefined, (r) =>
+    r.resources.includes("src/b.ts")
   );
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
-  assert.match(
-    (await call("directorate_read", { seal, path: "./src/a.ts" })).content,
-    /export const a = 2/
-  );
+
+  const contentResult67 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult67.content);
+
+  const contentResult68 = await call("directorate_read", {
+    path: "./src/a.ts",
+    seal,
+  });
+
+  assert.match(contentResult68.content, /export const a = 2/u);
   assert.deepEqual(
     requests.at(-1),
     { action: "directorate_read", resources: [seal, "src/a.ts"] },
     "the decoded path, beside the seal"
   );
   await assert.rejects(
-    call("directorate_read", { seal, path: "src/b.ts" }),
-    /directorate_read denied/
+    call("directorate_read", { path: "src/b.ts", seal }),
+    /directorate_read denied/u
   );
   await assert.rejects(
-    call("directorate_history", { seal, kind: "log", path: "src/b.ts" }),
-    /directorate_history denied/
+    call("directorate_history", { kind: "log", path: "src/b.ts", seal }),
+    /directorate_history denied/u
   );
 });
 
 test("directorate_diff stays inside OpenCode's output cut (50 KiB, 2,000 lines), so every region counted read was shown", async () => {
   const dir = repo();
   writeFileSync(
-    join(dir, "src/wide.ts"),
-    Array.from(
+    path.join(dir, "src/wide.ts"),
+    `${Array.from(
       { length: 1500 },
       (_, i) => `export const v${i} = "${"€".repeat(200)}"`
-    ).join("\n") + "\n"
+    ).join("\n")}\n`
   );
-  writeFileSync(join(dir, "src/tall.ts"), "\n".repeat(3000));
-  const { call, sealOf } = await harness(dir);
-  const seal = sealOf(
-    (
-      await call("directorate_seal", {
-        mode: "default",
-        target: { kind: "local" },
-      })
-    ).content
-  );
+  writeFileSync(path.join(dir, "src/tall.ts"), "\n".repeat(3000));
+  const { call } = await harness(dir);
+
+  const contentResult69 = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult69.content);
+
   let calls = 0;
-  for (
-    let out = "";
-    !/All regions have been read/.test(out) && calls < 200;
-    calls++
-  ) {
-    out = (await call("directorate_diff", { seal })).content;
+
+  const readUntilDone = async (): Promise<void> => {
+    if (calls >= 200) {
+      return;
+    }
+
+    const contentResult70 = await call("directorate_diff", { seal });
+    const out = contentResult70.content;
     assert.ok(
       Buffer.byteLength(out) <= 50 * 1024 && out.split("\n").length <= 2000,
       `call ${calls}: ${Buffer.byteLength(out)} bytes, ${out.split("\n").length} lines`
     );
-  }
+    calls += 1;
+
+    if (!/All regions have been read/u.test(out)) {
+      await readUntilDone();
+    }
+  };
+
+  await readUntilDone();
+
   const s = sealJson(seal);
-  assert.equal(
-    s.regions.filter((r: any) => r.ownerRead).length,
-    s.regions.length
-  );
+  assert.equal(s.regions.filter((r) => r.ownerRead).length, s.regions.length);
   assert.ok(calls > 10, `paged in ${calls} calls`);
 });
 
 test("re-check: the same Liaison session re-seals a reported review, Compliance resolves the fixed finding, and the Directive compares", async () => {
   const dir = repo();
-  const { call, sealOf } = await harness(dir);
-  const first = sealOf(
-    (await call("directorate_seal", { target: { kind: "local" } })).content
-  )!;
+  const { call } = await harness(dir);
+
+  const contentResult71 = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const first = present(sealOf(contentResult71.content));
+
   await call("directorate_diff", { seal: first });
   await call(
     "directorate_ledger_add",
@@ -3147,114 +3819,122 @@ test("re-check: the same Liaison session re-seals a reported review, Compliance 
   await call(
     "directorate_ledger_verdict",
     {
-      seal: first,
-      id: "F1",
-      verdict: "confirmed",
-      rationale: "r",
       evidence: ["src/a.ts:2"],
+      id: "F1",
+      rationale: "r",
+      seal: first,
+      verdict: "confirmed",
     },
     "directorate_compliance",
     "ref"
   );
-  const before = (await call("directorate_report", { seal: first })).content;
-  assert.match(before, /Division by zero/);
+  const contentResult72 = await call("directorate_report", { seal: first });
+  const before = contentResult72.content;
+  assert.match(before, /Division by zero/u);
 
   writeFileSync(
-    join(dir, "src/a.ts"),
+    path.join(dir, "src/a.ts"),
     "export const a = 2\nexport const div = (x: number, y: number) => (y ? x / y : 0)\n"
   );
   await assert.rejects(
-    call("directorate_seal", { recheck: first, mode: "full" }),
-    /reuses the earlier review's target and mode/
+    call("directorate_seal", { mode: "full", recheck: first }),
+    /reuses the earlier review's target and mode/u
   );
   await assert.rejects(
     call("directorate_seal", { resume: first }),
-    /pass recheck: "directorate-/
+    /pass recheck: "directorate-/u
   );
-  const sealed = (await call("directorate_seal", { recheck: first })).content;
+  const contentResult73 = await call("directorate_seal", { recheck: first });
+  const sealed = contentResult73.content;
   assert.match(
     sealed,
     new RegExp(
-      `Containment sealed \`directorate-[^\`]+\`, a re-check of \`${first}\``
+      `Containment sealed \`directorate-[^\`]+\`, a re-check of \`${first}\``,
+      "u"
     )
   );
-  assert.match(sealed, /Changed since the earlier review: src\/a\.ts/);
+  assert.match(sealed, /Changed since the earlier review: src\/a\.ts/u);
   assert.match(
     sealed,
-    /Reopened for re-decision[^\n]*\n- F1 \(important, F1 in the earlier review\) Division by zero/
+    /Reopened for re-decision[^\n]*\n- F1 \(important, F1 in the earlier review\) Division by zero/u
   );
-  const seal = sealOf(sealed)!;
+  const seal = present(sealOf(sealed));
   assert.notEqual(seal, first);
   assert.equal(sealJson(seal).recheckOf, first);
+
+  const contentResult74 = await call("directorate_ledger_list", {
+    brief: true,
+    seal,
+  });
+
   assert.match(
-    (await call("directorate_ledger_list", { seal, brief: true })).content,
-    new RegExp(`F1 \\[open\\].* · carried: confirmed as F1 in ${first}`)
+    contentResult74.content,
+    new RegExp(`F1 \\[open\\].* · carried: confirmed as F1 in ${first}`, "u")
   );
   assert.ok(
-    sealJson(seal).regions.some(
-      (r: any) => r.file === "src/b.ts" && r.ownerRead
-    ),
+    sealJson(seal).regions.some((r) => r.file === "src/b.ts" && r.ownerRead),
     "src/b.ts did not change, so it is not read again"
   );
 
   await assert.rejects(
     call("directorate_ledger_verdict", {
-      seal,
-      id: "F1",
-      verdict: "resolved",
-      rationale: "guarded",
       evidence: ["src/a.ts:2"],
+      id: "F1",
+      rationale: "guarded",
+      seal,
+      verdict: "resolved",
     }),
-    /route it to directorate_compliance/
+    /route it to directorate_compliance/u
   );
   await call("directorate_diff", { seal });
   await call(
     "directorate_ledger_verdict",
     {
-      seal,
-      id: "F1",
-      verdict: "resolved",
-      rationale: "y is checked before dividing",
       evidence: ["src/a.ts:2"],
+      id: "F1",
+      rationale: "y is checked before dividing",
+      seal,
+      verdict: "resolved",
     },
     "directorate_compliance",
     "ref2"
   );
-  const md = (await call("directorate_report", { seal })).content;
+  const contentResult75 = await call("directorate_report", { seal });
+  const md = contentResult75.content;
   assert.match(
     md,
-    /<Approved\/Tolerated> — Prior Findings Resolved\*\* · status: \*\*complete\*\*/
+    /<Approved\/Tolerated> — Prior Findings Resolved\*\* · status: \*\*complete\*\*/u
   );
-  assert.match(md, new RegExp(`re-check of \`${first}\``));
+  assert.match(md, new RegExp(`re-check of \`${first}\``, "u"));
   assert.match(
     md,
-    /### Resolved Since `directorate-[^`]+`\n- Division by zero — was `src\/a\.ts:2` \(important, F1\); resolved by/
+    /### Resolved Since `directorate-[^`]+`\n- Division by zero — was `src\/a\.ts:2` \(important, F1\); resolved by/u
   );
+  const contentResult76 = await call("directorate_report", { seal: first });
   assert.equal(
-    (await call("directorate_report", { seal: first })).content,
+    contentResult76.content,
     before,
     "the earlier Directive is unchanged"
   );
 
   // A bad re-check target fails before abandon files the session's active review.
-  const active = sealOf(
-    (
-      await call(
-        "directorate_seal",
-        { target: { kind: "local" } },
-        "directorate_liaison",
-        "lead9"
-      )
-    ).content
-  )!;
+  const contentResult77 = await call(
+    "directorate_seal",
+    { target: { kind: "local" } },
+    "directorate_liaison",
+    "lead9"
+  );
+
+  const active = present(sealOf(contentResult77.content));
+
   await assert.rejects(
     call(
       "directorate_seal",
-      { recheck: active, abandon: true },
+      { abandon: true, recheck: active },
       "directorate_liaison",
       "lead9"
     ),
-    /has not been reported/
+    /has not been reported/u
   );
   assert.equal(sealJson(active).reportedAt, undefined);
 });

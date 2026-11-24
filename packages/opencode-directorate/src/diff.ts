@@ -4,18 +4,21 @@ import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
 import { exclusionReason } from "./exclusions.ts";
 import { sha256 } from "./hash.ts";
-import { type FileEntry, type Region, invalid } from "./model.ts";
+import { invalid } from "./model.ts";
+import type { FileEntry, Region } from "./model.ts";
 
 const REGION_MAX_PATCH_LINES = 400;
 
 /** One file's part of a diff. Its names come from git's NUL-separated raw record (or ls-files), never from patch text. */
-const Piece = Schema.Struct({
+const PieceSchema = Schema.Struct({
   code: Schema.String,
-  path: Schema.String,
-  oldPath: Schema.optional(Schema.String),
   lines: Schema.Array(Schema.String),
+  oldPath: Schema.optional(Schema.String),
+  path: Schema.String,
 });
-export type Piece = typeof Piece.Type;
+
+export type Piece = typeof PieceSchema.Type;
+
 /** Patch sections a raw record owns: a typechange (a file that became a symlink, or back) has two. */
 const sectionsOf = (code: string) => (code === "T" ? 2 : 1);
 
@@ -26,46 +29,66 @@ const sectionsOf = (code: string) => (code === "T" ? 2 : 1);
  */
 export const RawDiff = Schema.String.pipe(
   Schema.decodeTo(
-    Schema.Array(Piece),
+    Schema.Array(PieceSchema),
     SchemaTransformation.makeTransformation({
       decode: SchemaGetter.transformEffect<readonly Piece[], string>(
         (out, options) => {
           const end = out.indexOf("\0\0");
-          const fields = (end < 0 ? out : out.slice(0, end)).split("\0");
+          const fields = (end === -1 ? out : out.slice(0, end)).split("\0");
           const records: Omit<Piece, "lines">[] = [];
-          for (let i = 0; fields[i]?.startsWith(":");) {
-            const code = fields[i].split(" ")[4]?.[0] ?? "M";
+
+          let i = 0;
+          let field = fields[i];
+
+          while (field?.startsWith(":")) {
+            const code = field.split(" ")[4]?.[0] ?? "M";
             const renamed = code === "R" || code === "C";
-            records.push(
-              renamed
-                ? { code, oldPath: fields[i + 1], path: fields[i + 2] }
-                : { code, path: fields[i + 1] }
-            );
+            const path = fields[i + (renamed ? 2 : 1)];
+            const oldPath = renamed ? fields[i + 1] : undefined;
+
+            if (!path || (renamed && !oldPath)) {
+              return invalid(
+                field,
+                options,
+                "git raw diff record is missing a path"
+              );
+            }
+
+            records.push(oldPath ? { code, oldPath, path } : { code, path });
             i += renamed ? 3 : 2;
+            field = fields[i];
           }
+
           const patch =
-            end < 0
+            end === -1
               ? []
               : out
                   .slice(end + 2)
-                  .replace(/\n$/, "")
+                  .replace(/\n$/u, "")
                   .split("\n");
+
           // Hunk lines start with a space, +, -, or \, so a line starting `diff --git ` is always a section header.
-          const sections = patch.flatMap((line, i) =>
-            line.startsWith("diff --git ") ? [i] : []
+          const sections = patch.flatMap((line, index) =>
+            line.startsWith("diff --git ") ? [index] : []
           );
+
           const expected = records.reduce((n, r) => n + sectionsOf(r.code), 0);
-          if (sections.length !== expected)
+
+          if (sections.length !== expected) {
             return invalid(
               out.slice(0, 200),
               options,
               `git listed ${expected} patch sections but wrote ${sections.length}`
             );
+          }
+
           let k = 0;
+
           return Effect.succeed(
             records.map((r) => {
               const from = sections[k];
               k += sectionsOf(r.code);
+
               return {
                 ...r,
                 lines: patch.slice(from, sections[k] ?? patch.length),
@@ -83,153 +106,201 @@ export const RawDiff = Schema.String.pipe(
 
 /** A name as it appears in a header The Directorate writes; display only, since names are never read back from the text. */
 export const shown = (p: string) =>
-  /[\x00-\x20"\\\x7f]/.test(p) ? JSON.stringify(p) : p;
+  [...p].some(
+    (char) => char <= " " || char === "\u007F" || char === '"' || char === "\\"
+  )
+    ? JSON.stringify(p)
+    : p;
 
-type Hunk = {
+interface Hunk {
   readonly newStart: number;
   readonly newLines: number;
   readonly patchStart: number;
   readonly patchEnd: number;
-};
+}
+
 type ParsedFile = FileEntry & {
   readonly hunks: readonly Hunk[];
   readonly patchStart: number;
   readonly patchEnd: number;
 };
-const STATUS: Record<string, FileEntry["status"]> = {
-  A: "added",
-  C: "added",
-  D: "deleted",
-  M: "modified",
-  R: "renamed",
-  T: "modified",
+
+const STATUS = new Map<string, FileEntry["status"]>([
+  ["A", "added"],
+  ["C", "added"],
+  ["D", "deleted"],
+  ["M", "modified"],
+  ["R", "renamed"],
+  ["T", "modified"],
+]);
+
+const patchStats = (lines: readonly string[]) => {
+  let added = 0;
+  let removed = 0;
+  let binary = false;
+  let inHunk = false;
+
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      inHunk = false;
+    } else if (line.startsWith("@@")) {
+      inHunk = true;
+    } else if (inHunk) {
+      added += Number(line.startsWith("+"));
+      removed += Number(line.startsWith("-"));
+    } else if (
+      line.startsWith("Binary files ") ||
+      line === "GIT binary patch"
+    ) {
+      binary = true;
+    }
+  }
+
+  return { added, binary, removed };
 };
 
 /** The stored diff text and its files, with line offsets: withheld and binary files as stubs, the rest verbatim. */
-export function assemble(pieces: readonly Piece[]): {
-  text: string;
-  files: ParsedFile[];
-} {
+export const assemble = (pieces: readonly Piece[]) => {
   const out: string[] = [];
+
   const files = pieces.map((piece): ParsedFile => {
-    let added = 0;
-    let removed = 0;
-    let binary = false;
-    let inHunk = false;
-    for (const line of piece.lines) {
-      if (line.startsWith("diff --git ")) inHunk = false;
-      else if (line.startsWith("@@")) inHunk = true;
-      else if (inHunk)
-        ((added += Number(line.startsWith("+"))),
-          (removed += Number(line.startsWith("-"))));
-      else if (line.startsWith("Binary files ") || line === "GIT binary patch")
-        binary = true;
-    }
+    const { added, binary, removed } = patchStats(piece.lines);
+
     const excluded =
       exclusionReason(piece.path) ??
       (piece.oldPath ? exclusionReason(piece.oldPath) : undefined) ??
       (binary ? "binary" : undefined);
+
     const kept = excluded
       ? [
           `diff --git ${shown(`a/${piece.oldPath ?? piece.path}`)} ${shown(`b/${piece.path}`)}`,
           `# directorate: content withheld (${excluded})`,
         ]
       : piece.lines;
+
     const patchStart = out.length + 1;
     // Section and hunk headers, by line number; each hunk ends just before the next one.
     const marks: number[] = [];
+
     const opened: {
       newStart: number;
       newLines: number;
       patchStart: number;
       next: number;
     }[] = [];
+
     for (const line of kept) {
       const n = out.push(line);
-      if (!line.startsWith("diff --git ") && !line.startsWith("@@")) continue;
+
+      if (!line.startsWith("diff --git ") && !line.startsWith("@@")) {
+        continue;
+      }
+
       marks.push(n);
+
       const m = line.startsWith("@@")
-        ? /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
+        ? /^@@ -\d+(?:,\d+)? \+(?<start>\d+)(?:,(?<count>\d+))? @@/u.exec(line)
         : undefined;
-      if (line.startsWith("@@"))
+
+      if (line.startsWith("@@")) {
         opened.push({
-          newStart: m ? Number(m[1]) : 0,
           newLines: m && m[2] !== undefined ? Number(m[2]) : 1,
-          patchStart: n,
+          newStart: m ? Number(m[1]) : 0,
           next: marks.length,
+          patchStart: n,
         });
+      }
     }
+
     const patchEnd = out.length;
+
     const hunks = opened.map(({ next, ...h }) => ({
       ...h,
       patchEnd: (marks[next] ?? patchEnd + 1) - 1,
     }));
-    const status = binary ? "binary" : (STATUS[piece.code] ?? "modified");
+
+    const status = binary ? "binary" : (STATUS.get(piece.code) ?? "modified");
+
     return {
-      path: piece.path,
-      oldPath: piece.oldPath,
-      status: status === "modified" && !hunks.length ? "mode" : status,
       added,
-      removed,
       excluded,
       hunks,
-      patchStart,
+      oldPath: piece.oldPath,
       patchEnd,
+      patchStart,
+      path: piece.path,
+      removed,
+      status: status === "modified" && !hunks.length ? "mode" : status,
     };
   });
-  return { text: out.length ? `${out.join("\n")}\n` : "", files };
-}
+
+  return { files, text: out.length ? `${out.join("\n")}\n` : "" };
+};
 
 /** Regions of at most REGION_MAX_PATCH_LINES patch lines per hunk; withheld and binary files have none. */
-export const buildRegions = Effect.fn("Directorate.buildRegions")(function* (
-  files: readonly ParsedFile[],
-  text: string
-) {
-  const lines = text.split("\n");
-  const regions: Region[] = [];
-  let k = 0;
-  for (const f of files) {
-    if (f.status === "binary" || f.excluded) continue;
-    const header = lines
-      .slice(f.patchStart - 1, (f.hunks[0]?.patchStart ?? f.patchEnd + 1) - 1)
-      .filter((line) => !line.startsWith("index "))
-      .join("\n");
-    const key = (start: number, end: number, hunk = "") =>
-      sha256(`${header}\0${hunk}\0${lines.slice(start - 1, end).join("\n")}`);
-    if (!f.hunks.length) {
-      regions.push({
-        id: `R${++k}`,
-        file: f.path,
-        newStart: 0,
-        newEnd: 0,
-        patchStart: f.patchStart,
-        patchEnd: f.patchEnd,
-        readBy: [],
-        key: yield* key(f.patchStart, f.patchEnd),
-      });
-      continue;
-    }
-    for (const h of f.hunks) {
-      let next = h.newStart;
-      for (let s = h.patchStart; s <= h.patchEnd; s += REGION_MAX_PATCH_LINES) {
-        const e = Math.min(h.patchEnd, s + REGION_MAX_PATCH_LINES - 1);
-        // New-side lines in this chunk (the @@ line is not one); a removal-only chunk anchors at the hunk start.
-        const count = lines
-          .slice(Math.max(s, h.patchStart + 1) - 1, e)
-          .filter((l) => l.startsWith("+") || l.startsWith(" ")).length;
+export const buildRegions = Effect.fn("Directorate.buildRegions")(
+  function* buildRegions(files: readonly ParsedFile[], text: string) {
+    const lines = text.split("\n");
+    const regions: Region[] = [];
+    let k = 0;
+
+    for (const f of files) {
+      if (f.status === "binary" || f.excluded) {
+        continue;
+      }
+
+      const header = lines
+        .slice(f.patchStart - 1, (f.hunks[0]?.patchStart ?? f.patchEnd + 1) - 1)
+        .filter((line) => !line.startsWith("index "))
+        .join("\n");
+
+      const key = (start: number, end: number, hunk = "") =>
+        sha256(`${header}\0${hunk}\0${lines.slice(start - 1, end).join("\n")}`);
+
+      if (!f.hunks.length) {
         regions.push({
-          id: `R${++k}`,
           file: f.path,
-          newStart: count ? next : h.newStart,
-          newEnd: count ? next + count - 1 : h.newStart,
-          patchStart: s,
-          patchEnd: e,
+          id: `R${(k += 1)}`,
+          key: yield* key(f.patchStart, f.patchEnd),
+          newEnd: 0,
+          newStart: 0,
+          patchEnd: f.patchEnd,
+          patchStart: f.patchStart,
           readBy: [],
-          key: yield* key(s, e, lines[h.patchStart - 1]),
         });
-        next += count;
+        continue;
+      }
+
+      for (const h of f.hunks) {
+        let next = h.newStart;
+
+        for (
+          let s = h.patchStart;
+          s <= h.patchEnd;
+          s += REGION_MAX_PATCH_LINES
+        ) {
+          const e = Math.min(h.patchEnd, s + REGION_MAX_PATCH_LINES - 1);
+
+          // New-side lines in this chunk (the @@ line is not one); a removal-only chunk anchors at the hunk start.
+          const count = lines
+            .slice(Math.max(s, h.patchStart + 1) - 1, e)
+            .filter((l) => l.startsWith("+") || l.startsWith(" ")).length;
+
+          regions.push({
+            file: f.path,
+            id: `R${(k += 1)}`,
+            key: yield* key(s, e, lines[h.patchStart - 1]),
+            newEnd: count ? next + count - 1 : h.newStart,
+            newStart: count ? next : h.newStart,
+            patchEnd: e,
+            patchStart: s,
+            readBy: [],
+          });
+          next += count;
+        }
       }
     }
+
+    return regions;
   }
-  return regions;
-});
+);

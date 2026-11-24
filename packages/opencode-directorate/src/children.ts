@@ -3,35 +3,44 @@
 // changed, so callers write only changes.
 import { DateTime } from "effect";
 
-import { type Actor, type Child, PANELIST, type Seal } from "./model.ts";
+import { PANELIST } from "./model.ts";
+import type { Actor, Child, Seal } from "./model.ts";
 
 export const childOutstanding = (seal: Seal) =>
   seal.children.filter(
     (c) => c.status === "running" || c.status === "launching"
   );
+
 export const childQuestion = (c: Pick<Child, "prompt">) =>
   c.prompt
     .split("\n")
-    .find((l) => /^(question|entries):/i.test(l.trim()))
+    .find((l) => /^(?:question|entries):/iu.test(l.trim()))
     ?.trim()
-    .replace(/^(question|entries):\s*/i, "") ?? c.prompt.slice(0, 160);
+    .replace(/^(?:question|entries):\s*/iu, "") ?? c.prompt.slice(0, 160);
+
 /** A panel seat as readers see it: the model without its provider. */
 export const seatName = (model: string) => model.slice(model.indexOf("/") + 1);
+
 /** A child as readers see it: a Seat by its model, anyone else by role. */
 export const childName = (c: Pick<Child, "agent" | "model">) =>
   c.agent === PANELIST && c.model ? seatName(c.model) : c.agent;
+
 /** Whoever raised or decided something, named as `childName` names them. */
 export const actorName = (seal: Seal, a: Actor) => {
   const c = seal.children.find((x) => x.session === a.session);
+
   return c ? childName(c) : a.agent;
 };
+
 /** A seat completes only if one of its finished sessions read the entire current generation. */
 export const panelSeats = (seal: Seal) =>
   (seal.panel ?? []).map((model) => {
     const runs = seal.children.filter(
       (c) => c.agent === PANELIST && c.model === model
     );
+
     const completed = runs.filter((c) => c.status === "completed");
+
     const unread = Math.min(
       seal.regions.length,
       ...completed.map(
@@ -41,23 +50,31 @@ export const panelSeats = (seal: Seal) =>
           ).length
       )
     );
+
     const latest = runs.at(-1)?.status;
-    const status =
-      completed.length && unread === 0
-        ? "completed"
-        : latest === "running" || latest === "launching"
-          ? latest
-          : completed.length
-            ? "partial"
-            : (latest ?? "not launched");
+
+    let status: Child["status"] | "partial" | "not launched" =
+      latest ?? "not launched";
+
+    if (completed.length && unread === 0) {
+      status = "completed";
+    } else if (
+      completed.length &&
+      latest !== "running" &&
+      latest !== "launching"
+    ) {
+      status = "partial";
+    }
+
     return {
       model,
-      status,
-      unread,
       runs,
       sessions: new Set(runs.flatMap((c) => (c.session ? [c.session] : []))),
+      status,
+      unread,
     };
   });
+
 /** The next seat a Directorate Seat launch takes: the first with no run that is launching, running, or completed. */
 export const missingSeats = (seal: Seal) =>
   panelSeats(seal).filter(
@@ -66,22 +83,31 @@ export const missingSeats = (seal: Seal) =>
       s.status === "not launched" ||
       s.status === "partial"
   );
+
 export const openSeat = (seal: Seal) => missingSeats(seal)[0]?.model;
+
+const childKey = (c: Child) =>
+  `${c.agent}\0${c.model ?? ""}\0${childQuestion(c)}`;
+
 /** Failed children whose question no later run of the same agent (and model) completed. */
-export function childFailures(seal: Seal) {
-  const key = (c: Child) => `${c.agent}\0${c.model ?? ""}\0${childQuestion(c)}`;
+export const childFailures = (seal: Seal) => {
   const done = new Set<string>();
+
   return seal.children
     .toReversed()
     .filter((c) => {
-      if (c.status === "completed") done.add(key(c));
-      return c.status === "failed" && !done.has(key(c));
+      if (c.status === "completed") {
+        done.add(childKey(c));
+      }
+
+      return c.status === "failed" && !done.has(childKey(c));
     })
-    .reverse();
-}
+    .toReversed();
+};
 
 const update = (seal: Seal, step: (c: Child) => Child): Seal | undefined => {
   const children = seal.children.map(step);
+
   return children.some((c, i) => c !== seal.children[i])
     ? { ...seal, children }
     : undefined;
@@ -92,18 +118,22 @@ export const launched = (seal: Seal, child: Child): Seal => ({
   ...seal,
   children: [...seal.children, child],
 });
+
 export const launchTitle = (
   child: Pick<Child, "description" | "agent" | "call">
 ) => `${child.description ?? child.agent} · ${child.call}`;
 
 /** Claim only the launch whose correlation suffix was sent to OpenCode. */
-export function claimed(
+export const claimed = (
   seal: Seal,
   session: string,
   agent: string,
   title: string | undefined
-): Seal | undefined {
-  if (seal.children.some((c) => c.session === session)) return undefined;
+): Seal | undefined => {
+  if (seal.children.some((c) => c.session === session)) {
+    return undefined;
+  }
+
   const claim = seal.children.find(
     (c) =>
       !c.session &&
@@ -111,16 +141,19 @@ export function claimed(
       c.status === "launching" &&
       launchTitle(c) === title
   );
+
   return (
     claim &&
     update(seal, (c) =>
       c === claim ? { ...c, session, status: "running" } : c
     )
   );
-}
+};
+
 /** A session's latest run; follow-ups can register before older events are consumed. */
 const latest = (seal: Seal, session: string) =>
   seal.children.findLast((c) => c.session === session);
+
 /** OpenCode's subagent tool forwards the prompt text, but not the parent tool call ID. */
 export const followUpPrompt = (c: Pick<Child, "call" | "prompt">) =>
   `${c.prompt}\n\n[Directorate follow-up: ${c.call}]`;
@@ -147,25 +180,29 @@ export const inboxSettled = (
   delivered: boolean,
   at: DateTime.Utc
 ) =>
-  update(seal, (c) =>
-    c.session === session &&
-    c.followUp?.inbox === inbox &&
-    !c.followUp.delivered &&
-    (c.status === "launching" || c.status === "running")
-      ? delivered
-        ? { ...c, followUp: { inbox, delivered: true }, status: "running" }
-        : { ...c, status: "failed", endedAt: at }
-      : c
-  );
+  update(seal, (c) => {
+    if (
+      c.session !== session ||
+      c.followUp?.inbox !== inbox ||
+      c.followUp.delivered ||
+      (c.status !== "launching" && c.status !== "running")
+    ) {
+      return c;
+    }
+
+    return delivered
+      ? { ...c, followUp: { delivered: true, inbox }, status: "running" }
+      : { ...c, endedAt: at, status: "failed" };
+  });
 
 /** An execution can drain several delivered prompts, but never settles one still in the inbox. */
-export function finished(
+export const finished = (
   seal: Seal,
   session: string,
   status: "completed" | "failed",
   endedAt: DateTime.Utc,
   durable: boolean
-) {
+) => {
   const runs = seal.children.filter(
     (c) =>
       c.session === session &&
@@ -174,7 +211,9 @@ export function finished(
         : DateTime.toEpochMillis(c.startedAt) <=
           DateTime.toEpochMillis(endedAt))
   );
+
   const latestRun = runs.at(-1);
+
   return update(seal, (c) =>
     runs.includes(c) &&
     (c.status === "running" ||
@@ -183,19 +222,22 @@ export function finished(
         c === latestRun &&
         !c.followUp &&
         c.status === "completed"))
-      ? { ...c, status, endedAt }
+      ? { ...c, endedAt, status }
       : c
   );
-}
+};
+
 /** A completed child doing more work without a new launch is running again. */
-export function resumed(seal: Seal, session: string) {
+export const resumed = (seal: Seal, session: string) => {
   const run = latest(seal, session);
+
   return update(seal, (c) =>
     c === run && c.status === "completed"
-      ? { ...c, status: "running", endedAt: undefined }
+      ? { ...c, endedAt: undefined, status: "running" }
       : c
   );
-}
+};
+
 /**
  * The subagent tool returned for launch `call`, naming the child's session and how it ended. Failure wins; an outcome
  * the session events already recorded is never undone by a background "running".
@@ -208,24 +250,27 @@ export const returned = (
   endedAt: DateTime.Utc
 ) =>
   update(seal, (c) => {
-    if (c.call !== call) return c;
+    if (c.call !== call) {
+      return c;
+    }
+
     const linked = session ?? c.session;
     const sameSession = linked === c.session;
-    const status =
-      (sameSession && c.status === "failed") || outcome === "failed"
-        ? "failed"
-        : sameSession && c.status === "completed"
-          ? "completed"
-          : outcome;
+
+    const settled =
+      sameSession && (c.status === "failed" || c.status === "completed");
+
+    const status = outcome === "failed" || !settled ? outcome : c.status;
+
     return c.session === linked && c.status === status
       ? c
       : {
           ...c,
-          session: linked,
-          status,
           endedAt:
             status === "running"
               ? undefined
               : ((sameSession ? c.endedAt : undefined) ?? endedAt),
+          session: linked,
+          status,
         };
   });

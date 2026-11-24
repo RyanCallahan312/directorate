@@ -20,6 +20,7 @@
           "effect/Path",
           "effect/Crypto",
           "effect/PlatformError",
+          "effect/encoding/Yaml",
           "effect/process",
           "@effect/platform-node-shared/NodeChildProcessSpawner",
           "@effect/platform-node-shared/NodeCrypto",

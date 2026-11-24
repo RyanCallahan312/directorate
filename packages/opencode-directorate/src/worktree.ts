@@ -8,43 +8,53 @@ import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
 
 const IO_CONCURRENCY = 16;
+
 /** A working-tree path as captured: its bytes (a symlink as its link text) and mode, or absent. */
-type LiveEntry = {
+interface LiveEntry {
   readonly buf?: Buffer;
   readonly mode: "absent" | "link" | "exec" | "file";
-};
+}
 
 /** Missing is a fact about the worktree; any other filesystem error is not. */
 const orMissing = <A, R>(self: Effect.Effect<A, PlatformError, R>) =>
   self.pipe(
     Effect.catchReason("PlatformError", "NotFound", () => Effect.undefined)
   );
+
 const unreadable = (path: string) =>
   Effect.mapError(
     (e: PlatformError) =>
       new ReviewError({ message: `Cannot read ${path}: ${e.message}` })
   );
 
-const make = Effect.gen(function* () {
+const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
   const git = yield* Git;
   const crypto = yield* Crypto.Crypto;
+
   const hash = (s: string | Uint8Array) =>
     sha256(s).pipe(Effect.provideService(Crypto.Crypto, crypto));
 
   /** One path policy for the worktree: a path below a symlink or a non-directory is absent. */
-  const stat = Effect.fnUntraced(function* (repo: string, path: string) {
+  const stat = Effect.fnUntraced(function* stat(repo: string, path: string) {
     const parts = path.split("/");
-    for (let i = 1; i < parts.length; i++) {
+
+    for (let i = 1; i < parts.length; i += 1) {
       const st = yield* orMissing(
         fs.lstat(paths.join(repo, ...parts.slice(0, i)))
       );
-      if (st?.type !== "Directory") return { abs: "", st: undefined };
+
+      if (st?.type !== "Directory") {
+        return { abs: "", st: undefined };
+      }
     }
+
     const abs = paths.join(repo, path);
+
     return { abs, st: yield* orMissing(fs.lstat(abs)) };
   });
+
   /** Whether a file or symlink exists under the path policy, without reading it. */
   const present = (repo: string, path: string) =>
     stat(repo, path).pipe(
@@ -53,34 +63,47 @@ const make = Effect.gen(function* () {
       ),
       unreadable(path)
     );
+
   /** Working-tree entry under the path policy; a leaf symlink is its link text. Unreadable files fail rather than read as deleted. */
   const entry = Effect.fn("Worktree.entry")(
-    function* (
+    function* entry(
       repo: string,
       path: string
     ): Effect.fn.Return<LiveEntry, PlatformError> {
       const { abs, st } = yield* stat(repo, path);
+
       if (st?.type === "SymbolicLink") {
         const link = yield* orMissing(fs.readLink(abs));
+
         return link === undefined
           ? { mode: "absent" }
           : { buf: Buffer.from(`symlink -> ${link}\n`), mode: "link" };
       }
-      if (st?.type !== "File") return { mode: "absent" };
+
+      if (st?.type !== "File") {
+        return { mode: "absent" };
+      }
+
       const buf = yield* orMissing(fs.readFile(abs));
+
+      // Each of the last three octal digits is odd when its execute bit is set.
+      const executable = /[1357]/u.test(st.mode.toString(8).slice(-3));
+
       return buf === undefined
         ? { mode: "absent" }
-        : { buf: Buffer.from(buf), mode: st.mode & 0o111 ? "exec" : "file" };
+        : { buf: Buffer.from(buf), mode: executable ? "exec" : "file" };
     },
     (effect, _repo, path) => effect.pipe(unreadable(path))
   );
+
   /** An entry's signature: its mode and content hash, or "deleted". */
   const sign = (e: LiveEntry) =>
     e.buf === undefined
       ? Effect.succeed("deleted")
       : hash(e.buf).pipe(Effect.map((digest) => `${e.mode}:${digest}`));
+
   /** Signature of every changed, non-secret path in the post-image. */
-  const sigs = Effect.fn("Worktree.sigs")(function* (
+  const sigs = Effect.fn("Worktree.sigs")(function* sigs(
     repo: string,
     base: string,
     scope?: readonly string[]
@@ -88,13 +111,20 @@ const make = Effect.gen(function* () {
     const names = (yield* git.changedNames(repo, base, scope)).filter(
       (f) => !isSecret(f)
     );
+
     const signed = yield* Effect.forEach(
       names,
-      (f) => entry(repo, f).pipe(Effect.flatMap(sign)),
+      (f) =>
+        entry(repo, f).pipe(
+          Effect.flatMap(sign),
+          Effect.map((signature) => [f, signature] as const)
+        ),
       { concurrency: IO_CONCURRENCY }
     );
-    return Object.fromEntries(names.map((f, i) => [f, signed[i]]));
+
+    return Object.fromEntries(signed);
   });
+
   /** One fingerprint for a set of signatures against a base. */
   const fingerprintOf = (
     base: string,
@@ -102,21 +132,21 @@ const make = Effect.gen(function* () {
   ) =>
     hash(
       `wt:${base}\0${Object.entries(signatures)
-        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .toSorted(([a], [b]) => (a < b ? -1 : 1))
         .map(([k, v]) => `${k}\0${v}`)
         .join("\0")}`
     );
 
   return {
-    present,
     entry,
-    sign,
-    sigs,
-    fingerprintOf,
     fingerprint: (repo: string, base: string, scope?: readonly string[]) =>
       sigs(repo, base, scope).pipe(
         Effect.flatMap((s) => fingerprintOf(base, s))
       ),
+    fingerprintOf,
+    present,
+    sign,
+    sigs,
   };
 });
 

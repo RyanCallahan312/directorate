@@ -1,6 +1,6 @@
 # The Directorate — Theme & Voice Guide
 
-The Directorate (`directorate*`) frames evidence-gated code review as submitting a mutable artifact to a calm, procedural, extra-dimensional oversight agency (*Control* / *Severance* / *SCP*).
+The Directorate (`directorate*`) frames evidence-gated code review as submitting a mutable artifact to a calm, procedural, extra-dimensional oversight agency (_Control_ / _Severance_ / _SCP_).
 
 ## Core Rules (Dial 2.4)
 

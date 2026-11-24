@@ -12,23 +12,29 @@ class CommandError extends Data.TaggedError("DirectorateCommandError")<{
 // unlike AppProcess, an oversized stream fails instead of being cut, so a truncated diff is never sealed.
 const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
 
+const emptyOutput = () => {
+  const chunks: Uint8Array[] = [];
+
+  return { bytes: 0, chunks };
+};
+
 // Bound each stream independently, before concatenating, and drain both to avoid pipe deadlocks.
 const collect = (name: string, limit: number) =>
-  Stream.runFoldEffect(
-    () => ({ chunks: [] as Uint8Array[], bytes: 0 }),
-    (acc, chunk: Uint8Array) => {
-      if (acc.bytes + chunk.length > limit)
-        return Effect.fail(
-          new CommandError({ message: `${name} exceeded ${limit} bytes` })
-        );
-      acc.chunks.push(chunk);
-      acc.bytes += chunk.length;
-      return Effect.succeed(acc);
+  Stream.runFoldEffect(emptyOutput, (acc, chunk: Uint8Array) => {
+    if (acc.bytes + chunk.length > limit) {
+      return Effect.fail(
+        new CommandError({ message: `${name} exceeded ${limit} bytes` })
+      );
     }
-  );
+
+    acc.chunks.push(chunk);
+    acc.bytes += chunk.length;
+
+    return Effect.succeed(acc);
+  });
 
 export const command = Effect.fn("Directorate.command")(
-  function* (
+  function* command(
     name: string,
     args: readonly string[],
     options: {
@@ -40,32 +46,39 @@ export const command = Effect.fn("Directorate.command")(
   ) {
     const { cwd, env, maxOutputBytes = MAX_OUTPUT_BYTES } = options;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+
     const child = yield* spawner.spawn(
       ChildProcess.make(name, args, {
         cwd,
         env,
         extendEnv: true,
+        forceKillAfter: "1 second",
+        killSignal: "SIGKILL",
         shell: false,
         stdin: "ignore",
-        killSignal: "SIGKILL",
-        forceKillAfter: "1 second",
       })
     );
+
     const { stdout, stderr, code } = yield* Effect.all(
       {
-        stdout: child.stdout.pipe(collect("stdout", maxOutputBytes)),
-        stderr: child.stderr.pipe(collect("stderr", maxOutputBytes)),
         code: child.exitCode,
+        stderr: child.stderr.pipe(collect("stderr", maxOutputBytes)),
+        stdout: child.stdout.pipe(collect("stdout", maxOutputBytes)),
       },
       { concurrency: 3 }
     );
+
     const output = Buffer.concat(stdout.chunks, stdout.bytes);
-    if (code === 0) return output;
+
+    if (code === 0) {
+      return output;
+    }
+
     return yield* new CommandError({
-      message:
-        Buffer.concat(stderr.chunks, stderr.bytes).toString("utf8").trim() ||
-        `exited with code ${code}`,
       code,
+      message:
+        Buffer.concat(stderr.chunks, stderr.bytes).toString("utf-8").trim() ||
+        `exited with code ${code}`,
       stdout: output,
     });
   },
@@ -75,7 +88,7 @@ export const command = Effect.fn("Directorate.command")(
     "NotFound",
     (reason) =>
       Effect.fail(
-        new CommandError({ message: reason.message, code: "NotFound" })
+        new CommandError({ code: "NotFound", message: reason.message })
       ),
     (_, error) => Effect.fail(new CommandError({ message: error.message }))
   ),

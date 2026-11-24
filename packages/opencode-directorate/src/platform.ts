@@ -14,6 +14,7 @@ const nodeLayer = Layer.mergeAll(
   NodeChildProcessSpawner.layer,
   NodeCrypto.layer
 ).pipe(Layer.provideMerge(Layer.merge(NodeFileSystem.layer, NodePath.layer)));
+
 export const platformLayer = Layer.mergeAll(
   Store.layer,
   Worktree.layer,
@@ -22,4 +23,5 @@ export const platformLayer = Layer.mergeAll(
   Layer.provideMerge(Layer.merge(Git.layer, StateRoot.layer)),
   Layer.provideMerge(nodeLayer)
 );
+
 export type Platform = Layer.Success<typeof platformLayer>;

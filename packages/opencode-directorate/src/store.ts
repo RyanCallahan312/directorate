@@ -2,13 +2,12 @@
 // and snapshot, the report, and the cross-process mutation lock.
 import {
   Clock,
-  Config,
   Context,
-  Data,
   DateTime,
   Effect,
   Exit,
   FileSystem,
+  Function,
   Layer,
   Option,
   Path,
@@ -18,63 +17,45 @@ import {
 } from "effect";
 
 import { failure, ReviewError } from "./error.ts";
-import { type Ledger, type Seal, LedgerJson, SealJson } from "./model.ts";
+import { LockBusy } from "./lock-busy.ts";
+import { LedgerJson, SealJson } from "./model.ts";
+import type { Ledger, Seal } from "./model.ts";
+import { StateRoot } from "./state-root.ts";
+
+export { StateRoot } from "./state-root.ts";
 
 const KEEP_DAYS = 14;
 const IO_CONCURRENCY = 16;
-const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/;
-
-/** Where seals live: DIRECTORATE_STATE_DIR, else $XDG_STATE_HOME/opencode-directorate, else ~/.local/state/opencode-directorate. */
-export class StateRoot extends Context.Service<StateRoot, string>()(
-  "directorate/StateRoot"
-) {
-  static readonly layer = Layer.effect(
-    StateRoot,
-    Effect.gen(function* () {
-      const path = yield* Path.Path;
-      return yield* Config.NonEmptyString("DIRECTORATE_STATE_DIR").pipe(
-        Config.orElse(() =>
-          Config.NonEmptyString("XDG_STATE_HOME").pipe(
-            Config.map((dir) => path.join(dir, "opencode-directorate"))
-          )
-        ),
-        Config.orElse(() =>
-          Config.NonEmptyString("HOME").pipe(
-            Config.map((home) =>
-              path.join(home, ".local", "state", "opencode-directorate")
-            )
-          )
-        )
-      );
-    }).pipe(Effect.orDie)
-  );
-}
-
-/** Another writer holds the seal's mutation lock. */
-class LockBusy extends Data.TaggedError("DirectorateLockBusy") {}
+const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/u;
 
 const decodeSeal = Schema.decodeEffect(SealJson);
 const decodeLedger = Schema.decodeEffect(LedgerJson);
+
 // Encoding validates too: a malformed in-memory seal or ledger is a bug, never a file on disk.
 const encodeSeal = (s: Seal) =>
   Schema.encodeEffect(SealJson)(s).pipe(Effect.orDie);
+
 const encodeLedger = (l: Ledger) =>
   Schema.encodeEffect(LedgerJson)(l).pipe(Effect.orDie);
+
 export const emptyLedger: Ledger = { entries: [], notes: [] };
 
-const make = Effect.gen(function* () {
+const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
   const root = yield* StateRoot;
+
   const file = (id: string, ...names: string[]) =>
     paths.join(root, id, ...names);
+
   const snapDir = (s: Pick<Seal, "id" | "gen">) =>
     file(s.id, s.gen ? `snapshot.g${s.gen}` : "snapshot");
+
   /** The diff of the seal's current generation; earlier generations stay beside it. */
   const diffFile = (s: Pick<Seal, "id" | "gen">) =>
     file(s.id, s.gen ? `diff.g${s.gen}.patch` : "diff.patch");
 
-  const writeText = Effect.fn("Store.writeText")(function* (
+  const writeText = Effect.fn("Store.writeText")(function* writeText(
     path: string,
     text: string
   ) {
@@ -82,20 +63,24 @@ const make = Effect.gen(function* () {
       directory: paths.dirname(path),
       prefix: ".directorate-write-",
     });
+
     yield* fs.writeFileString(tmp, text, { mode: 0o600 });
     yield* fs.rename(tmp, path);
   }, Effect.scoped);
 
   /** Runs body under the seal's cross-process lock. */
-  const withLock = Effect.fn("Store.withLock")(function* <A, E, R>(
+  const withLock = Effect.fn("Store.withLock")(function* withLock<A, E, R>(
     id: string,
     body: Effect.Effect<A, E, R>
   ) {
-    if (!SEAL_ID.test(id))
+    if (!SEAL_ID.test(id)) {
       return yield* failure(
         `Unknown seal id "${id}". Call directorate_seal first.`
       );
+    }
+
     const path = file(id, "mutation.lock");
+
     const acquire = Effect.acquireRelease(
       fs.makeDirectory(path).pipe(
         Effect.catchReason(
@@ -107,6 +92,7 @@ const make = Effect.gen(function* () {
       ),
       () => fs.remove(path, { recursive: true }).pipe(Effect.orDie)
     );
+
     // Retry outside acquisition: a waiting fiber can stop, but mkdir and release registration are atomic.
     return yield* Effect.scoped(
       Effect.andThen(
@@ -127,11 +113,13 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const load = Effect.fn("Store.load")(function* (id: string) {
-    if (!SEAL_ID.test(id))
+  const load = Effect.fn("Store.load")(function* load(id: string) {
+    if (!SEAL_ID.test(id)) {
       return yield* failure(
         `Unknown seal id "${id}". Call directorate_seal first, or directorate_ledger_list with no seal to list recent seals.`
       );
+    }
+
     const raw = yield* fs.readFileString(file(id, "seal.json")).pipe(
       Effect.catchReason(
         "PlatformError",
@@ -140,6 +128,7 @@ const make = Effect.gen(function* () {
         (_, e) => failure(`Cannot read seal ${id}: ${e.message}`)
       )
     );
+
     return yield* decodeSeal(raw).pipe(
       Effect.mapError(
         (e) =>
@@ -147,17 +136,25 @@ const make = Effect.gen(function* () {
       )
     );
   });
+
   const save = (s: Seal) =>
     encodeSeal(s).pipe(
       Effect.flatMap((text) => writeText(file(s.id, "seal.json"), text))
     );
-  const loadLedger = Effect.fn("Store.loadLedger")(function* (id: string) {
+
+  const loadLedger = Effect.fn("Store.loadLedger")(function* loadLedger(
+    id: string
+  ) {
     const raw = yield* fs
       .readFileString(file(id, "ledger.json"))
       .pipe(
         Effect.catchReason("PlatformError", "NotFound", () => Effect.undefined)
       );
-    if (raw === undefined) return emptyLedger;
+
+    if (raw === undefined) {
+      return emptyLedger;
+    }
+
     return yield* decodeLedger(raw).pipe(
       Effect.mapError(
         (e) =>
@@ -167,6 +164,7 @@ const make = Effect.gen(function* () {
       )
     );
   });
+
   const saveLedger = (id: string, l: Ledger) =>
     encodeLedger(l).pipe(
       Effect.flatMap((text) => writeText(file(id, "ledger.json"), text))
@@ -177,7 +175,7 @@ const make = Effect.gen(function* () {
    * is removed; once it is written, the seal is published and stays.
    */
   const create = <A, E, R>(id: string, body: Effect.Effect<A, E, R>) =>
-    fs.makeDirectory(root, { recursive: true, mode: 0o700 }).pipe(
+    fs.makeDirectory(root, { mode: 0o700, recursive: true }).pipe(
       Effect.andThen(
         Effect.acquireUseRelease(
           fs.makeDirectory(file(id), { mode: 0o700 }),
@@ -189,7 +187,7 @@ const make = Effect.gen(function* () {
                   Effect.flatMap((published) =>
                     published
                       ? Effect.void
-                      : fs.remove(file(id), { recursive: true, force: true })
+                      : fs.remove(file(id), { force: true, recursive: true })
                   ),
                   Effect.orDie
                 )
@@ -203,53 +201,66 @@ const make = Effect.gen(function* () {
     Effect.map((names) =>
       names
         .filter((n) => SEAL_ID.test(n))
-        .sort()
-        .reverse()
+        .toSorted()
+        .toReversed()
     )
   );
+
   const modified = (path: string) =>
     fs.stat(path).pipe(
       Effect.map((st) => Option.getOrUndefined(st.mtime)?.getTime()),
-      Effect.orElseSucceed(() => undefined)
+      Effect.orElseSucceed((): number | undefined => undefined)
     );
+
   /** Seals in the store, newest first. `maxAgeMs` is measured from createdAt, which resuming moves. */
-  const list = Effect.fn("Store.list")(function* (
-    opts: { repo?: string; limit?: number; maxAgeMs?: number } = {}
+  const list = Effect.fn("Store.list")(function* list(
+    opts: { repo?: string | undefined; limit?: number; maxAgeMs?: number } = {}
   ) {
     const now = yield* Clock.currentTimeMillis;
+
     const young = (millis: number | undefined) =>
       opts.maxAgeMs === undefined ||
       (millis !== undefined && now - millis <= opts.maxAgeMs);
+
     const seals = yield* Effect.forEach(
       yield* ids,
-      Effect.fnUntraced(function* (id) {
+      Effect.fnUntraced(function* seals(id) {
         // createdAt is never later than the seal's last write, so seals not written since the cutoff are skipped unread.
         if (
           opts.maxAgeMs !== undefined &&
           !young(yield* modified(file(id, "seal.json")))
-        )
-          return undefined;
-        return yield* load(id).pipe(Effect.orElseSucceed(() => undefined));
+        ) {
+          return;
+        }
+
+        return yield* load(id).pipe(
+          Effect.orElseSucceed(Function.constUndefined)
+        );
       }),
       { concurrency: IO_CONCURRENCY }
     );
+
     const out = seals.filter(
       (s): s is Seal =>
         s !== undefined &&
         (!opts.repo || s.repo === opts.repo) &&
         young(DateTime.toEpochMillis(s.createdAt))
     );
+
     return opts.limit ? out.slice(0, opts.limit) : out;
   });
+
   /** Removes seals not written for KEEP_DAYS. */
-  const gc = Effect.fn("Store.gc")(function* () {
+  const gc = Effect.fn("Store.gc")(function* gc() {
     const now = yield* Clock.currentTimeMillis;
     yield* Effect.forEach(
       yield* ids,
-      Effect.fnUntraced(function* (id) {
+      Effect.fnUntraced(function* prune(id) {
         const mtime = yield* modified(file(id));
-        if (mtime !== undefined && now - mtime > KEEP_DAYS * 86_400_000)
-          yield* fs.remove(file(id), { recursive: true, force: true });
+
+        if (mtime !== undefined && now - mtime > KEEP_DAYS * 86_400_000) {
+          yield* fs.remove(file(id), { force: true, recursive: true });
+        }
       }),
       { concurrency: IO_CONCURRENCY, discard: true }
     );
@@ -264,6 +275,7 @@ const make = Effect.gen(function* () {
           () => `${id} was reported, but its report file is missing.`
         )
       );
+
   /** The report and its reported seal, written together. */
   const publish = (s: Seal, md: string) =>
     writeText(file(s.id, "report.md"), md).pipe(
@@ -273,65 +285,82 @@ const make = Effect.gen(function* () {
 
   // A generation's captured files: the diff text, and a snapshot of the worktree files it shows.
   const readDiff = (s: Seal) => fs.readFileString(diffFile(s));
+
   const writeDiff = (s: Seal, text: string) =>
     fs.writeFileString(diffFile(s), text);
+
   const resetSnapshot = (s: Seal) =>
     fs
-      .remove(snapDir(s), { recursive: true, force: true })
+      .remove(snapDir(s), { force: true, recursive: true })
       .pipe(Effect.andThen(fs.makeDirectory(snapDir(s), { recursive: true })));
-  const writeSnapshot = Effect.fn("Store.writeSnapshot")(function* (
-    s: Seal,
-    path: string,
-    buf: Buffer
-  ) {
-    const dir = snapDir(s);
-    const dest = paths.join(dir, path);
-    for (
-      let p = paths.dirname(dest);
-      p.length > dir.length;
-      p = paths.dirname(p)
-    ) {
-      const st = yield* fs.lstat(p).pipe(Effect.orElseSucceed(() => undefined));
-      if (st && st.type !== "Directory") yield* fs.remove(p, { force: true });
+
+  const writeSnapshot = Effect.fn("Store.writeSnapshot")(
+    function* writeSnapshot(s: Seal, path: string, buf: Buffer) {
+      const dir = snapDir(s);
+      const dest = paths.join(dir, path);
+
+      for (
+        let p = paths.dirname(dest);
+        p.length > dir.length;
+        p = paths.dirname(p)
+      ) {
+        const st = yield* fs
+          .lstat(p)
+          .pipe(Effect.orElseSucceed(Function.constUndefined));
+
+        if (st && st.type !== "Directory") {
+          yield* fs.remove(p, { force: true });
+        }
+      }
+
+      yield* fs.makeDirectory(paths.dirname(dest), { recursive: true });
+
+      if (
+        (yield* fs
+          .lstat(dest)
+          .pipe(Effect.orElseSucceed(Function.constUndefined)))?.type ===
+        "Directory"
+      ) {
+        yield* fs.remove(dest, { force: true, recursive: true });
+      }
+
+      yield* fs.writeFile(dest, buf);
     }
-    yield* fs.makeDirectory(paths.dirname(dest), { recursive: true });
-    if (
-      (yield* fs.lstat(dest).pipe(Effect.orElseSucceed(() => undefined)))
-        ?.type === "Directory"
-    )
-      yield* fs.remove(dest, { recursive: true, force: true });
-    yield* fs.writeFile(dest, buf);
-  });
+  );
+
   const readSnapshot = (s: Seal, path: string) =>
-    fs.readFile(paths.join(snapDir(s), path)).pipe(
-      Effect.map(Buffer.from),
-      Effect.orElseSucceed(() => undefined)
-    );
+    fs
+      .readFile(paths.join(snapDir(s), path))
+      .pipe(
+        Effect.map(Buffer.from),
+        Effect.orElseSucceed(Function.constUndefined)
+      );
+
   const dropSnapshot = (s: Seal, path: string) =>
     fs.remove(paths.join(snapDir(s), path), { force: true });
 
   return {
-    root,
-    diffFile,
-    withLock,
-    load,
-    save,
-    loadLedger,
-    saveLedger,
     create,
-    list,
+    diffFile,
+    dropSnapshot,
     gc,
-    readReport,
+    list,
+    load,
+    loadLedger,
     publish,
     readDiff,
-    writeDiff,
-    resetSnapshot,
-    writeSnapshot,
+    readReport,
     readSnapshot,
-    dropSnapshot,
+    resetSnapshot,
+    root,
+    save,
     /** The ledger and the seal, written together. */
     saveBoth: (s: Seal, l: Ledger) =>
       saveLedger(s.id, l).pipe(Effect.andThen(save(s)), Effect.uninterruptible),
+    saveLedger,
+    withLock,
+    writeDiff,
+    writeSnapshot,
   };
 });
 

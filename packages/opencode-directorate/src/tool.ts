@@ -11,11 +11,14 @@ import type { Platform } from "./platform.ts";
 import { Host, Sessions } from "./session.ts";
 
 type Services = Platform | Host | Sessions;
+
 /** A tool, hook, or locked-section body: a generator over Effects that may use the plugin's services. */
 type Body<Args extends unknown[], A> = (
   ...args: Args
 ) => Effect.fn.Return<A, Error, Services>;
+
 type Editor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
+
 export type DefineTool = <Input extends Schema.Codec<unknown, unknown>>(spec: {
   name: string;
   description: string;
@@ -35,6 +38,7 @@ export const actor = (c: Tool.Context): Actor => ({
   agent: c.agent,
   session: c.sessionID,
 });
+
 /** A tool result; while the seal is open, it ends with the caller's budget line. */
 export const done = (seal: Seal, text: string, agent?: string) =>
   Clock.currentTimeMillis.pipe(
@@ -44,22 +48,27 @@ export const done = (seal: Seal, text: string, agent?: string) =>
         : `${text}\n\n${budgetLine(seal, now, agent)}`,
     }))
   );
+
 /** A reported seal accepts no changes; an owner-only tool also needs the session that sealed it. */
 export const writable = (
   seal: Seal,
   c: Tool.Context,
   name: string,
   ownerOnly = false
-) =>
-  seal.reportedAt
+) => {
+  if (seal.reportedAt) {
+    return failure(
+      `${seal.id} was already reported${seal.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`
+    );
+  }
+
+  return ownerOnly && seal.ownerSession !== c.sessionID
     ? failure(
-        `${seal.id} was already reported${seal.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`
+        `Only the session that sealed ${seal.id} may call ${name}. To take over an interrupted review, call directorate_seal with resume: "${seal.id}".`
       )
-    : ownerOnly && seal.ownerSession !== c.sessionID
-      ? failure(
-          `Only the session that sealed ${seal.id} may call ${name}. To take over an interrupted review, call directorate_seal with resume: "${seal.id}".`
-        )
-      : Effect.void;
+    : Effect.void;
+};
+
 /** Runs body under the seal's lock, on a freshly loaded seal. */
 export const locked = <A>(
   c: Tool.Context,
@@ -69,6 +78,7 @@ export const locked = <A>(
   Effect.flatMap(Effect.service(Sessions), (sessions) =>
     sessions.locked(c.sessionID, sealId, (seal) => Effect.gen(() => body(seal)))
   );
+
 /** A change to an open seal, under its lock. */
 export const mutate = <A>(
   c: Tool.Context,
@@ -77,12 +87,13 @@ export const mutate = <A>(
   body: Body<[seal: Seal], A>,
   ownerOnly = false
 ) =>
-  locked(c, sealId, function* (seal) {
+  locked(c, sealId, function* mutateSeal(seal) {
     yield* writable(seal, c, name, ownerOnly);
+
     return yield* body(seal);
   });
 
-const toolError = (error: unknown) =>
+const toolError = (error: Error) =>
   error instanceof Tool.Error
     ? error
     : new Tool.Error({
@@ -90,9 +101,10 @@ const toolError = (error: unknown) =>
       });
 
 /** Binds tools and hooks to the plugin's services; tool and hook bodies never see the host's request context. */
-export const adapter = Effect.gen(function* () {
+export const adapter = Effect.gen(function* adapter() {
   const services = yield* Effect.context<Services>();
   const host = yield* Host;
+
   /**
    * Role and permission checks, before any seal is read. The resources are the seal and any file the call reads, so a
    * rule such as `{ action: "directorate_read", resource: "*.env", effect: "deny" }` withholds that file from review.
@@ -104,17 +116,19 @@ export const adapter = Effect.gen(function* () {
     files: readonly string[]
   ) =>
     host.permission.assert({
-      sessionID: c.sessionID,
-      agent: c.agent,
-      source: { type: "tool", messageID: c.messageID, id: c.id },
       action: name,
+      agent: c.agent,
       resources: [sealId ?? "*", ...files],
       save: [],
+      sessionID: c.sessionID,
+      source: { id: c.id, messageID: c.messageID, type: "tool" },
     });
+
   return {
     /** Hooks run in host fibers: give them the plugin's services, and log (never raise) their failures. */
     hook: <A>(name: string, body: Body<[event: A], void>) => {
       const run = Effect.fn(`Directorate.${name}`)(body);
+
       return (event: A) =>
         run(event).pipe(Effect.provideContext(services), recover(name));
     },
@@ -126,7 +140,8 @@ export const adapter = Effect.gen(function* () {
       (editor: Editor): DefineTool =>
       (spec) => {
         const { files = () => [], ...definition } = spec;
-        const run = Effect.fn(spec.name)(function* (
+
+        const run = Effect.fn(spec.name)(function* run(
           input: typeof spec.input.Type,
           c: Tool.Context
         ) {
@@ -139,16 +154,18 @@ export const adapter = Effect.gen(function* () {
               : undefined,
             files(input).filter(Predicate.isString)
           );
+
           return yield* spec.execute(input, c);
         });
+
         editor.add({
           ...definition,
-          options: { codemode: false },
           execute: (input, c) =>
             run(input, c).pipe(
               Effect.provideContext(services),
               Effect.mapError(toolError)
             ),
+          options: { codemode: false },
         });
       },
   };

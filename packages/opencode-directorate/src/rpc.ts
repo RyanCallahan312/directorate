@@ -4,53 +4,59 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { Schema } from "effect";
 
-import { Settings, SettingsScope } from "./model.ts";
+import { SettingsSchema, SettingsScopeSchema } from "./model.ts";
 
 const std = Schema.toStandardSchemaV1;
+
 /** Why the server refused: a settings file it cannot read, or a model or thinking level OpenCode cannot run. */
 const rejected = { rejected: std(Schema.Struct({})) };
 
 /** What the settings method returns. */
 const SettingsViewSchema = Schema.Struct({
+  effective: Schema.String,
   /** No project file where the project directory holds the global one. */
   files: Schema.Struct({
     global: Schema.String,
     project: Schema.optionalKey(Schema.String),
   }),
-  global: Settings,
-  project: Settings,
-  effective: Schema.String,
+  global: SettingsSchema,
   models: Schema.Array(
     Schema.Struct({
-      ref: Schema.String,
       name: Schema.String,
+      ref: Schema.String,
       variants: Schema.Array(Schema.String),
     })
   ),
+  project: SettingsSchema,
 });
+
 export type SettingsView = typeof SettingsViewSchema.Type;
+
 const WriteResultSchema = Schema.Struct({
+  effective: Schema.String,
   path: Schema.String,
   removed: Schema.Boolean,
-  effective: Schema.String,
 });
+
 export type WriteResult = typeof WriteResultSchema.Type;
 
 export const DirectorateRpc = Rpc.define({
+  events: {},
   id: "directorate",
   methods: {
     /** Both files, what they add up to, and the chat models a Directorate Seat can use. */
     settings: {
+      errors: rejected,
       input: std(Schema.Undefined),
       output: std(SettingsViewSchema),
-      errors: rejected,
     },
     /** Replaces one scope's file; {} removes it. */
     write: {
-      input: std(Schema.Struct({ scope: SettingsScope, settings: Settings })),
-      output: std(WriteResultSchema),
       errors: rejected,
+      input: std(
+        Schema.Struct({ scope: SettingsScopeSchema, settings: SettingsSchema })
+      ),
+      output: std(WriteResultSchema),
     },
   },
-  events: {},
 });
