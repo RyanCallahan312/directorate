@@ -11,7 +11,7 @@ The Directorate (`opencode-directorate`) is an Effect-native OpenCode plugin. It
 
 Read tools are `directorate_diff`, `directorate_read`, `directorate_ls`, `directorate_grep`, `directorate_history` and `directorate_ledger_list`. Agent permissions live in each agent's front matter (`agents/directorate_*.md`).
 
-**Only the Liaison runs a review.** Any other agent (such as `build`) dispatches `directorate_liaison` with the target and focus, waits for its result, and relays the Directive verbatim. To re-check after fixing findings, it sends a follow-up to the same Liaison session. The plugin enforces this:
+**Only the Liaison runs a review.** Any other agent (such as `build`) dispatches `directorate_liaison` with the target and focus, waits for its result, and relays the Directive verbatim. To re-check after fixing findings, it sends a follow-up to the same Liaison session (see [Re-check after fixes](#re-check-after-fixes)). The plugin enforces this:
 
 - Agents outside The Directorate see no `directorate_*` tools except `directorate_configure`, on every request kind (steps, compaction, generate), so their prompt-cache prefix stays the same. A call is denied with a pointer to the Liaison; a request that names no agent counts as the session's agent, as OpenCode resolves it.
 - Only the Liaison may dispatch Auditors, Seats, and Compliance. Those three agents are `hidden`, so other agents are not offered them.
@@ -64,6 +64,19 @@ Write what you want after the command in plain language, for example `/directora
 For an explicit scope flag, start the arguments with `--scope branch`, `--scope local` (uncommitted changes only), or `--scope repository` (including unchanged files). For example, `/directorate-review --scope local in code-quality mode`.
 
 `/directorate-review scope to everything in packages/` reviews eligible files recursively under `packages/`, including unchanged files, instead of reviewing the branch diff. Paths are relative to the repository root; normal exclusions still apply.
+
+## Re-check after fixes
+
+After fixing findings, ask the agent that ran the review to re-check it, or run `/directorate-review --recheck <seal id>` (the id is on the Directive's Containment line; without it, the latest Directive is re-checked). The request goes to the same Liaison session as a follow-up when there is one, and to a new Liaison otherwise.
+
+A re-check (`directorate_seal recheck: <id>`) is a new seal linked to the reported one, which stays as it was:
+
+- **Same target, re-captured.** It uses the earlier review's target and mode, and keeps its base, so committing the fixes is not a new change. Commit pairs re-resolve as freshness does (a range or PR moves with its refs). It runs without a panel.
+- **Only what changed is read.** Regions the earlier review read whose content did not change keep their receipts; skimmed and skipped regions are read again. The Liaison looks for new defects only in code changed since then.
+- **Findings carry over.** Verified findings and unverified leads become entries of the re-check. A verified finding stays confirmed if nothing it rests on (anchor, evidence, verdict evidence) changed; otherwise it reopens, and only Compliance decides it: `confirmed` (still present, re-anchored), `resolved` (the fix stops it; evidence is the fixing lines), or `refuted` (it never held). Unverified leads always reopen.
+- **The Directive compares.** Each verified finding is marked still present or new, a **Resolved Since** section lists what the fixes stopped, and the Containment line names the earlier seal.
+
+The budget is half the mode's default, at least 10 minutes, unless `budget_minutes` is passed.
 
 ## The review, as a state chart
 
@@ -276,8 +289,10 @@ stateDiagram-v2
     Refuted --> Confirmed: Compliance<br/>re-decides
     Confirmed --> Open: refresh changed a file<br/>its anchor or evidence uses
     Refuted --> Open: refresh changed a file<br/>its anchor or evidence uses
-    Duplicate --> Open: refresh changed one of its files,<br/>or the entry it duplicated was refuted
+    Duplicate --> Open: refresh changed one of its files,<br/>or the entry it duplicated was refuted or resolved
+    Open --> Resolved: re-check only: Compliance<br/>finds the fix stops it
     Confirmed --> [*]: in the Directive
+    Resolved --> [*]: under Resolved Since
 
     classDef open fill:#fef9c3,stroke:#a16207,stroke-width:2px,color:#713f12
     classDef confirmed fill:#dcfce7,stroke:#16a34a,stroke-width:3px,color:#14532d
@@ -288,13 +303,14 @@ stateDiagram-v2
     class Confirmed confirmed
     class Refuted refuted
     class Duplicate dup
+    class Resolved confirmed
 ```
 
 Who may decide an entry:
 
 - `directorate_liaison` may decide open **minor** entries raised by Auditors or Seats, confirming them only as minor, and may withdraw its own open entries.
-- `directorate_compliance` decides everything else and may re-decide.
-- No session can confirm an entry it raised.
+- `directorate_compliance` decides everything else and may re-decide. In a re-check, it alone decides findings carried as verified from the earlier review.
+- No session can confirm or resolve an entry it raised. Only carried entries can be resolved.
 
 ## How the code is laid out
 

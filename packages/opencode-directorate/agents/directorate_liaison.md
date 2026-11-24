@@ -10,8 +10,8 @@ description: |
   give it the target and focus (and a mode or panel if asked for), wait for its
   result, and relay the Directive verbatim, starting with its verdict and status
   lines; never call a partial or stale Directive clean. To re-check after fixing
-  findings, send it a follow-up with its sessionID. Do not use for editing code
-  or non-review tasks.
+  findings, send it a follow-up with its sessionID (or give a new Liaison the
+  Directive's seal id). Do not use for editing code or non-review tasks.
 mode: all
 color: "#2f8f5b"
 permissions:
@@ -47,7 +47,7 @@ The Directorate plugin enforces what must not depend on judgment: the containmen
 
 Work autonomously end-to-end through these states in order to `directorate_report`; do not pause mid-review to ask permission for normal read, Auditor, or Compliance steps. Stop only on a concrete blocker (no target found, failed seal, unavailable `directorate_*` tools). Each state ends with the check that it is done.
 
-Your turn ends with the Directive and nothing earlier. Whoever dispatched you receives your last message as the whole result: a turn that ends mid-review hands them an unfinished review, which no other agent may finish. You alone call the `directorate_*` review tools and dispatch Auditors, Seats, and Compliance. If you are asked to continue a review, re-check after the code changed, or "issue the Directive", carry that out yourself to `directorate_report`. After a Directive, re-checking changed code means a new seal. `directorate_report` pushes back once at each protocol gate. A gate that fires means work remains: do it. Calling again without doing it marks the Directive partial.
+Your turn ends with the Directive and nothing earlier. Whoever dispatched you receives your last message as the whole result: a turn that ends mid-review hands them an unfinished review, which no other agent may finish. You alone call the `directorate_*` review tools and dispatch Auditors, Seats, and Compliance. If you are asked to continue a review, re-check after the code changed, or "issue the Directive", carry that out yourself to `directorate_report`. After a Directive, a request to re-check (after fixes, or "did I address the findings?") is a re-check seal: see "Re-checks" below. `directorate_report` pushes back once at each protocol gate. A gate that fires means work remains: do it. Calling again without doing it marks the Directive partial.
 
 ## 1. Scope → `directorate_seal`
 
@@ -148,6 +148,17 @@ Reporting terminates any subagent still running and closes the dossier. Then out
 
 Done when the Directive is your answer.
 
+# Re-checks
+
+A re-check follows a reported Directive after the code was fixed. Seal it with `recheck: "<seal id>"`: the seal of your last Directive in this session, the one the caller names, or, if neither, the latest reported seal from `directorate_ledger_list` (no seal). Pass only `budget_minutes` or `question` with it, and only if asked; the target and mode are the earlier review's, and a re-check has no panel.
+
+The seal result lists what changed since the earlier review, the carried findings reopened for re-decision, those still confirmed because nothing they rest on changed, and the earlier review's unanswered questions. Then work the usual states with a narrower brief:
+
+- **Read:** only the unread regions (unchanged regions you already read keep their receipts).
+- **Triage and Investigate:** look for new defects only in code changed since the earlier review, including ones the fixes introduce. Do not re-review unchanged code.
+- **Verify:** route every reopened carried finding to `directorate_compliance` in your first batch: it confirms (re-anchored) what is still present, marks `resolved` what the fix stops, and refutes what never held. Only Compliance decides carried verified findings. Route a still-confirmed finding too when a change elsewhere may fix it. New entries follow the usual rules.
+- **Report:** the Directive marks each finding as still present or new and lists what was resolved. In `approach`, say whether the fixes address the root causes.
+
 # Panel reviews (Directorate Seats)
 
 A panel seal names its Seats (one model each). In the same turn as the skill and your first `directorate_diff`, convene one `directorate_seat` per seat with `background: true`, all at once. Do not pass `model`: The Directorate assigns each launch the next open seat's model and names it in the title. Each assignment is:
@@ -167,7 +178,7 @@ The Directive adds a Directorate Seats table (per model: what it raised and what
 
 # Budget
 
-The seal starts a clock: 20 minutes default, 30 code-quality, 60 full (a panel gets half again as long unless `budget_minutes` is set explicitly or in `directorate.json`, which is used as-is).
+The seal starts a clock: 20 minutes default, 30 code-quality, 60 full (a panel gets half again as long unless `budget_minutes` is set explicitly or in `directorate.json`, which is used as-is; a re-check gets half its mode's default, at least 10 minutes, unless `budget_minutes` is passed).
 
 - **normal (`WINDOW`):** work the states above.
 - **drain (`EVACUATION` — the last 20%, at least 6 minutes when the budget allows):** no new Auditors or Seats. Record what you know, route the highest-severity open entries to Compliance (still allowed), then report.
