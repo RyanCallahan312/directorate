@@ -1430,6 +1430,15 @@ test("directorate_configure: validated writes per scope; the project overrides g
   assert.match(out, /Directorate Seats \(2\): alpha#xhigh, beta/);
   const seal = sealOf(out);
   assert.equal(sealJson(seal).mode, "code-quality");
+  // The settings system line stays identical after sealing so the Turn-1 KV-cache prefix holds.
+  const ctxAfter: any = {
+    agent: "directorate_liaison",
+    sessionID: S("lead"),
+    system: [],
+    tools: {},
+  };
+  await hooks["session.context"](ctxAfter);
+  assert.equal(ctxAfter.system[0]?.text, ctx.system[0].text);
   await assert.rejects(
     call(
       "directorate_ledger_add",
@@ -2301,6 +2310,7 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   const e1 = ev("directorate_auditor");
   await hooks["permission.evaluate"](e1);
   assert.equal(e1.effect, "deny");
+  assert.match(e1.message, /Directorate evacuation \(drain\)/);
   const e2 = ev("directorate_compliance");
   await hooks["permission.evaluate"](e2);
   assert.equal(e2.effect, "allow");
@@ -2312,13 +2322,42 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   );
   const scoutOut = (
     await call(
-      "directorate_ledger_list",
-      { seal },
+      "directorate_note",
+      { seal, kind: "limit", text: "stopped at drain" },
       "directorate_auditor",
       "scout"
     )
   ).content;
-  assert.match(scoutOut, /file surviving candidates now and hand off/);
+  assert.match(
+    scoutOut,
+    /min left.*file surviving candidates now and hand off/
+  );
+  // Drain system notices omit ticking minutesLeft so the KV-cache prefix stays stable across turns.
+  const drainAt7: any = {
+    sessionID: S("lead"),
+    agent: "directorate_liaison",
+    system: [],
+    tools: {},
+  };
+  await hooks["session.context"](drainAt7);
+  shiftClock(seal, 8);
+  const drainAt8: any = {
+    sessionID: S("lead"),
+    agent: "directorate_liaison",
+    system: [],
+    tools: {},
+  };
+  await hooks["session.context"](drainAt8);
+  assert.equal(
+    drainAt7.system.at(-1)?.text,
+    drainAt8.system.at(-1)?.text,
+    "drain system prompt does not tick between turns"
+  );
+  assert.doesNotMatch(drainAt7.system.at(-1)?.text ?? "", /min left/);
+  assert.match(
+    drainAt7.system.at(-1)?.text ?? "",
+    /DIRECTORATE \/\/ EVACUATION/
+  );
   shiftClock(seal, 11);
   const lockCtx: any = {
     sessionID: S("lead"),

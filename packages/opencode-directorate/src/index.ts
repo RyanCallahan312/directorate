@@ -16,7 +16,7 @@ import {
   Stream,
 } from "effect";
 
-import { budget, budgetLine } from "./budget.ts";
+import { budget, budgetNotice } from "./budget.ts";
 import {
   childName,
   childOutstanding,
@@ -821,10 +821,10 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
           return;
         }
         const seal = yield* sessions.active(event.sessionID);
-        if (!seal) {
-          // Before sealing, the Liaison sees the configured defaults, which decide the target in full mode.
-          if (agent !== REVIEWER) return;
+        if (agent === REVIEWER) {
+          // Emit configured defaults on every Liaison turn so the system prefix stays stable across sealing.
           const directory =
+            seal?.repo ??
             (yield* sessions.directory(event.sessionID)) ??
             host.location.directory;
           const line = yield* settings.load(directory).pipe(
@@ -836,12 +836,13 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
               type: "text",
               text: `[directorate settings] ${line}`,
             });
-          return;
         }
+        if (!seal) return;
         const now = yield* Clock.currentTimeMillis;
         const b = budget(seal, now);
         if (b.phase === "normal") return;
-        event.system.push({ type: "text", text: budgetLine(seal, now, agent) });
+        // Static phase notice (no ticking minutesLeft) avoids busting the KV-cache prefix every 6s during drain.
+        event.system.push({ type: "text", text: budgetNotice(b.phase, agent) });
         if (b.phase === "locked") {
           const keep = new Set(LOCKED_TOOLS[agent] ?? []);
           for (const name of Object.keys(event.tools ?? {}))
@@ -877,8 +878,9 @@ Once the options are settled, dispatch directorate_liaison with the chosen targe
       if (!seal) return;
       const b = budget(seal, yield* Clock.currentTimeMillis);
       if (b.phase === "locked" || (b.phase === "drain" && target !== REFUTER)) {
+        const stage = b.phase === "locked" ? "lockdown" : "evacuation";
         event.effect = "deny";
-        event.message = `Directorate lockdown (${b.phase}): <We/The Directorate> deny new ${target || "subagent"} dispatches. Verify what you hold and call directorate_report.`;
+        event.message = `Directorate ${stage} (${b.phase}): <We/The Directorate> deny new ${target || "subagent"} dispatches. Verify what you hold and call directorate_report.`;
       }
     })
   );

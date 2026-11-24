@@ -24,14 +24,14 @@ const PHASE_HEADER: Record<Phase, string> = {
   drain: "DIRECTORATE // EVACUATION",
   locked: "DIRECTORATE // LOCKDOWN",
 };
+const REVIEWER_TEXT: Record<Phase, string> = {
+  normal: "observe and investigate",
+  drain:
+    "DRAIN: dispatch no new Auditors or Seats; route open entries to Compliance, then call directorate_report",
+  locked: "LOCKED: <Containment/Window> expired — call directorate_report now",
+};
 const PHASE_TEXT: Record<string, Record<Phase, string>> = {
-  [REVIEWER]: {
-    normal: "observe and investigate",
-    drain:
-      "DRAIN: dispatch no new Auditors or Seats; route open entries to Compliance, then call directorate_report",
-    locked:
-      "LOCKED: <Containment/Window> expired — call directorate_report now",
-  },
+  [REVIEWER]: REVIEWER_TEXT,
   [SCOUT]: {
     normal: "investigate",
     drain: "DRAIN: file surviving candidates now and hand off",
@@ -50,11 +50,17 @@ const PHASE_TEXT: Record<string, Record<Phase, string>> = {
     locked: "LOCKED: record proved verdicts and stop",
   },
 };
+const phaseText = (agent: string, phase: Phase) =>
+  (PHASE_TEXT[agent] ?? REVIEWER_TEXT)[phase];
 export function budgetLine(
   seal: Pick<Seal, "createdAt" | "deadline" | "budgetMinutes">,
   now: number,
   agent: string = REVIEWER
 ) {
   const b = budget(seal, now);
-  return `[${PHASE_HEADER[b.phase]}] ${b.minutesLeft} min left of ${seal.budgetMinutes} · phase ${b.phase} · ${(PHASE_TEXT[agent] ?? PHASE_TEXT[REVIEWER])[b.phase]}`;
+  return `[${PHASE_HEADER[b.phase]}] ${b.minutesLeft} min left of ${seal.budgetMinutes} · phase ${b.phase} · ${phaseText(agent, b.phase)}`;
+}
+/** Static phase notice for system prompts (no ticking minutesLeft, so KV-cache prefixes stay stable). */
+export function budgetNotice(phase: Phase, agent: string = REVIEWER) {
+  return `[${PHASE_HEADER[phase]}] phase ${phase} · ${phaseText(agent, phase)}`;
 }
