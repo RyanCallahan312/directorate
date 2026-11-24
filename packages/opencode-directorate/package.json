@@ -1,6 +1,19 @@
 {
   "name": "opencode-directorate",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Evidence-gated code review for OpenCode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RyanCallahan312/directorate.git",
+    "directory": "packages/opencode-directorate"
+  },
+  "files": [
+    "src",
+    "dist/gui-experimental.cjs",
+    "agents",
+    "skills",
+    "directorate.example.json"
+  ],
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -10,6 +23,7 @@
   },
   "scripts": {
     "build": "vite build",
+    "prepack": "npm run build",
     "lsp": "effect-tsgo tsc --lsp --stdio",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"

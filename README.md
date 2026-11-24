@@ -21,3 +21,20 @@ After `bun run build`, launch `opencode` from the workspace root. The project co
 Add workspace packages under `packages/`. TypeScript packages can extend `tsconfig.base.json`.
 
 Install patches TypeScript for Effect diagnostics. The root Oxlint config enables the Effect-specific rules, and the [`effect-ts` agent skill](.agents/skills/effect-ts/SKILL.md) documents the installed API and conventions. Declare `effect` in each workspace package that uses it; the root dev dependency supports the skill's checks.
+
+## Publish to npm
+
+From the workspace root, install dependencies and pack the plugin. The plugin's `prepack` script builds the Desktop bundle automatically:
+
+```sh
+bun install --frozen-lockfile
+npm pack --workspace opencode-directorate
+```
+
+Install the resulting `.tgz` in a scratch environment and verify it loads in OpenCode. With an npm account authorized to publish the package, publish that same artifact:
+
+```sh
+npm publish ./opencode-directorate-0.1.0.tgz --access public
+```
+
+Bump the plugin's version in `packages/opencode-directorate/package.json` before each subsequent release and use the matching tarball name.

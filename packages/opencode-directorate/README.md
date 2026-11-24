@@ -25,20 +25,35 @@ The plugin enforces the parts of a review that should not depend on judgment:
 - **Freshness (Containment Drift):** a Directive on code that moved after the seal is marked stale.
 - **Time:** the window drains (`EVACUATION`), then locks (`LOCKDOWN`). A watchdog intervenes and files a Directive for a Liaison that never does.
 
+## Install from npm
+
+Once published, install the package in a stable location so OpenCode can load the plugin and discover its bundled agents and skill from the same copy:
+
+```sh
+npm install --global opencode-directorate@0.1.0
+package="$(npm root --global)/opencode-directorate"
+```
+
+Use OpenCode 2.2.3, the version the plugin targets. Then follow the configuration below.
+
 ## Install from a checkout
 
-From the workspace root, run `bun install --frozen-lockfile` and `bun run build`. Add the absolute path to `packages/opencode-directorate` to `plugins` in your global `~/.config/opencode/opencode.jsonc`:
+From the workspace root, run `bun install --frozen-lockfile` and `bun run build`, then set `package="$PWD/packages/opencode-directorate"`.
+
+### Configure OpenCode
+
+Add the absolute path in `$package` to the `plugins` array in `~/.config/opencode/opencode.jsonc`. Set `experimental.subagent_depth` to at least `2` so the Liaison can dispatch its reviewers when called by another agent. Replace any existing Directorate entry instead of loading it twice.
 
 ```jsonc
 {
-  "plugins": ["/path/to/directorate/packages/opencode-directorate"],
+  "plugins": ["/absolute/path/to/opencode-directorate"],
+  "experimental": { "subagent_depth": 3 },
 }
 ```
 
-Install the bundled Markdown in OpenCode's global discovery directories. Run these commands from the workspace root (skip any links already managed by your dotfiles):
+OpenCode loads the plugin code but does not automatically discover its bundled Markdown. Link the agents and skill into OpenCode's global discovery directories (skip any links already managed by your dotfiles):
 
 ```sh
-package="$PWD/packages/opencode-directorate"
 config="$HOME/.config/opencode"
 mkdir -p "$config/agents" "$config/skills"
 ln -s "$package"/agents/directorate_*.md "$config/agents/"
