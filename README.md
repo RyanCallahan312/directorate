@@ -1,6 +1,6 @@
 # Directorate
 
-A Bun/Turborepo workspace for Effect 4, with no packages yet.
+The Directorate is an evidence-gated code review plugin for OpenCode. See the [`opencode-directorate` package](packages/opencode-directorate/README.md) for installation and usage.
 
 ## Workspace development
 
@@ -13,6 +13,10 @@ bun run build       # build the workspaces
 bun run dev         # start workspace development processes
 bun run format      # apply formatting and safe lint fixes
 ```
+
+## Dogfood in OpenCode
+
+After `bun run build`, launch `opencode` from the workspace root. The project config loads the local plugin. To run reviews, follow the [package setup](packages/opencode-directorate/README.md#install-from-a-checkout) to link its agents and skill. Try: “Use The Directorate to review my local changes in default mode with one model.” Use `/directorate-configure` to change settings for this project.
 
 Add workspace packages under `packages/`. TypeScript packages can extend `tsconfig.base.json`.
 

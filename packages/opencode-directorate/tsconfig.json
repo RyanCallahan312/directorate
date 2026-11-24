@@ -1,0 +1,33 @@
+{
+  "$schema": "../../node_modules/@effect/tsgo/schema.json",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "composite": false,
+    "incremental": false,
+    "declaration": false,
+    "declarationMap": false,
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "allowedUnstableApis": [
+          "effect/FileSystem",
+          "effect/Path",
+          "effect/Crypto",
+          "effect/PlatformError",
+          "effect/process",
+          "@effect/platform-node-shared/NodeChildProcessSpawner",
+          "@effect/platform-node-shared/NodeCrypto",
+          "@effect/platform-node-shared/NodeFileSystem",
+          "@effect/platform-node-shared/NodePath"
+        ]
+      }
+    ]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vite.config.ts"]
+}

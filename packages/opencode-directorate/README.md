@@ -1,0 +1,375 @@
+# The Directorate: evidence-gated code review for OpenCode
+
+The Directorate (`opencode-directorate`) is an Effect-native OpenCode plugin. It gives four agents a fixed, evidence-gated code-review workflow:
+
+| Agent | Role | `directorate_*` tools it may call |
+| --- | --- | --- |
+| 🟢 `directorate_liaison` | **Liaison (Lead).** Seals the target in containment, reads every changed region, decides what to investigate, issues the Directive. | all `directorate_*` except `directorate_configure` |
+| 🔵 `directorate_auditor` | **Auditor (Investigator).** Answers one narrow question and files candidate findings to the dossier. | read tools, `directorate_ledger_add`, `directorate_note` |
+| 🟠 `directorate_seat` | **Directorate Seat (Panel seat).** In a panel review, reviews the whole change independently on its own model under memetic isolation. | read tools except `directorate_ledger_list`, `directorate_ledger_add`, `directorate_note` |
+| 🟣 `directorate_compliance` | **Compliance (Verifier).** Confirms or refutes findings in a separate session. | read tools, `directorate_ledger_verdict` |
+
+Read tools are `directorate_diff`, `directorate_read`, `directorate_ls`, `directorate_grep`, `directorate_history` and `directorate_ledger_list`. Agent permissions live in each agent's front matter (`agents/directorate_*.md`).
+
+**Only the Liaison runs a review.** Any other agent (such as `build`) dispatches `directorate_liaison` with the target and focus, waits for its result, and relays the Directive verbatim. To re-check after fixing findings, it sends a follow-up to the same Liaison session. The plugin enforces this:
+
+- Agents outside The Directorate see no `directorate_*` tools except `directorate_configure`, on every request kind (steps, compaction, generate), so their prompt-cache prefix stays the same. A call is denied with a pointer to the Liaison; a request that names no agent counts as the session's agent, as OpenCode resolves it.
+- Only the Liaison may dispatch Auditors, Seats, and Compliance. Those three agents are `hidden`, so other agents are not offered them.
+- The Liaison waits for its subagents with `directorate_wait`, inside its turn. Ending its turn to wait would hand the caller an unfinished review.
+
+The plugin enforces the parts of a review that should not depend on judgment:
+
+- **Containment (the seal):** what is under review is pinned (commits, or a snapshot of the working tree), so reads never drift.
+- **Coverage:** every changed region must be read, or skipped with a reason.
+- **Verification:** a finding reaches the Directive only after a _different session_ confirms it.
+- **Freshness (Containment Drift):** a Directive on code that moved after the seal is marked stale.
+- **Time:** the window drains (`EVACUATION`), then locks (`LOCKDOWN`). A watchdog intervenes and files a Directive for a Liaison that never does.
+
+## Install from a checkout
+
+From the workspace root, run `bun install --frozen-lockfile` and `bun run build`. Add the absolute path to `packages/opencode-directorate` to `plugins` in your global `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "plugins": ["/path/to/directorate/packages/opencode-directorate"],
+}
+```
+
+Install the bundled Markdown in OpenCode's global discovery directories. Run these commands from the workspace root (skip any links already managed by your dotfiles):
+
+```sh
+package="$PWD/packages/opencode-directorate"
+config="$HOME/.config/opencode"
+mkdir -p "$config/agents" "$config/skills"
+ln -s "$package"/agents/directorate_*.md "$config/agents/"
+ln -s "$package/skills/directorate_lenses" "$config/skills/directorate_lenses"
+```
+
+`directorate.example.json` is optional. Copy it as `directorate.json` into the global config directory only if you want those defaults and don't already have a settings file. Keep the live file separate: `/directorate-configure` replaces it on save.
+
+## The review, as a state chart
+
+One Liaison session owns one review at a time. The seal (`seal.json`) is the state; tools move it along.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Sealing: directorate_seal(mode, target)
+    Sealing --> [*]: target cannot be resolved<br/>(for example an unfetched PR)
+    Sealing --> Reviewing: diff, snapshot, and regions captured
+
+    state Reviewing {
+        direction LR
+        Normal --> Drain: last 20% of the budget<br/>(at least 6 min)
+        Drain --> Locked: deadline
+    }
+
+    Reviewing --> Gates: directorate_report
+    Gates --> Reviewing: a protocol gate pushes back<br/>(once per new gap)
+    Gates --> Reported: every gate passed or acknowledged<br/>(none push back once locked)
+    Reviewing --> Refreshing: directorate_refresh, once<br/>(the drift gate suggests it)
+    Refreshing --> Reviewing: target re-pinned: changed regions unread,<br/>affected findings reopen
+
+    Reviewing --> Reported: directorate_seal abandon, or<br/>deadline + 2 min (the watchdog intervenes)
+    Reported --> [*]: report.md saved,<br/>running children stopped
+
+    classDef start fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef work fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef drain fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef locked fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    classDef gate fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef done fill:#e0f2fe,stroke:#0284c7,stroke-width:3px,color:#0c4a6e
+
+    class Sealing start
+    class Normal work
+    class Refreshing start
+    class Drain drain
+    class Locked locked
+    class Gates gate
+    class Reported done
+```
+
+**Targets.** `auto` (local changes, plus the branch's commits beyond the default branch), `local`, `commit`, `range`, `pr`, or `paths` (whole files, for a full review).
+
+**Budget phases.** The default budget is 20, 30, or 60 minutes for `default`, `code-quality`, and `full` mode. While a seal is open, each `directorate_*` tool result about it ends with a `[DIRECTORATE // ...]` budget line telling the caller where it stands.
+
+| Phase | Header | Starts | What changes |
+| --- | --- | --- | --- |
+| 🟢 **normal** | `DIRECTORATE // WINDOW` | at the seal | everything is allowed |
+| 🟡 **drain** | `DIRECTORATE // EVACUATION` | in the last 20% of the budget, or the last 6 minutes if that is longer (never more than half the budget) | no new Auditors or Seats; Compliance is still allowed |
+| 🔴 **locked** | `DIRECTORATE // LOCKDOWN` | at the deadline | each role keeps only its closing tools; protocol gates no longer push back |
+
+**Protocol gates.** `directorate_report` checks five gates in order. Each one pushes back once for each new gap. Calling `directorate_report` again lets the Directive through and records the gap: the review is marked partial, or stale if containment drifted.
+
+| Gate | Pushes back when | Resolve by |
+| --- | --- | --- |
+| Coverage | regions are unread | reading them with `directorate_diff`, or recording `directorate_coverage` dispositions |
+| Seats (Panel) | a Directorate Seat failed or never launched | relaunching a `directorate_seat` for it |
+| Active Personnel (Children) | Auditors, Seats, or Compliance are still running | `directorate_wait`, which returns as each one finishes |
+| Containment Drift (Freshness) | the code moved since the seal | `directorate_refresh` (allowed once; a move that is not refreshed makes the Directive stale) |
+| Unverified Dossier (Open entries) | findings are unverified | verdicts, mostly from `directorate_compliance` |
+
+**Resume.** `directorate_seal resume: <id>` lets another session take over an unreported review. If its budget is in drain or locked, the clock restarts with half the current budget (at least 5 minutes), unless the call passes `budget_minutes`.
+
+### Auditors, Seats, and Compliance
+
+Each subagent the Liaison dispatches has its own record in the seal (`children.ts`). A follow-up to a finished child (the subagent tool with its `sessionID`) is a new run of that session with its own record, and keeps the Seat it was launched for. Session events change only the latest run, so a failed follow-up never undoes an earlier completed one. A follow-up to a child that is still running joins that run.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Launching: Liaison calls subagent
+    Launching --> Running: child session created
+    Running --> Completed: session goes idle
+    Running --> Failed: execution failed<br/>or interrupted
+    Launching --> Failed: subagent tool errored
+    Completed --> Running: works again<br/>without a new launch
+    Completed --> Failed: a failure outranks<br/>any earlier outcome
+    Completed --> [*]
+    Failed --> [*]: reported as unanswered,<br/>unless a retry completes it
+
+    classDef launching fill:#e0e7ff,stroke:#4f46e5,stroke-width:2px,color:#312e81
+    classDef running fill:#cffafe,stroke:#0891b2,stroke-width:2px,color:#164e63
+    classDef ok fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef bad fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+
+    class Launching launching
+    class Running running
+    class Completed ok
+    class Failed bad
+```
+
+### Panel reviews (Directorate Seats)
+
+Several frontier models each review the whole change; The Directorate merges their work into one verified Directive. Ask for it with `directorate_seal panel: true` (the default seats are listed in `DEFAULT_PANEL` in `model.ts`) or `panel_models: ["provider/model#variant", ...]`. A panel works with any mode, and its default budget is 1.5× the mode's.
+
+```mermaid
+flowchart LR
+    L["🟢 directorate_liaison<br/>seals with panel"] --> P1["🟠 directorate_seat<br/>seat 1"]
+    L --> P2["🟠 directorate_seat<br/>seat 2"]
+    L --> P3["🟠 directorate_seat<br/>seat N"]
+    P1 --> Ledger[("shared dossier")]
+    P2 --> Ledger
+    P3 --> Ledger
+    L --> Ledger
+    Ledger --> R["🟣 directorate_compliance<br/>confirms one, marks repeats duplicate"]
+    R --> Report["📄 one Directive<br/>seats k/N per finding + Directorate Seats table"]
+
+    classDef lead fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef seat fill:#ffedd5,stroke:#ea580c,stroke-width:2px,color:#7c2d12
+    classDef store fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
+    classDef verify fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    class L lead
+    class P1,P2,P3 seat
+    class Ledger,Report store
+    class R verify
+```
+
+- **Seats are assigned by the plugin.** The Liaison launches one `directorate_seat` per seat with no `model`. The Directorate's `execute.before` hook gives each launch the next open seat's model and adds the seat to its title, so the Liaison never copies model IDs.
+- **Memetic isolation (independent reads).** Coverage is tracked per reader session, so every Seat reads every region. Seats cannot list the dossier, so they don't anchor on each other's entries.
+- **One verification path.** Seat entries go through Compliance like everything else. When several Seats raise the same root cause, one entry is confirmed and the rest become duplicates. The Directive credits every Seat that raised it (`seats 2/5`). Agreement is never treated as evidence.
+- **The Directive** adds a `Directorate Seats` line, a `seats k/N` tag on each finding, and a **Directorate Seats** table. For each model, the table shows whether its review completed, how many entries it raised, how many were confirmed, and which confirmed findings no other seat raised. A Seat that failed or never ran is listed under Outside Containment (Not Reviewed) and makes the Directive partial.
+- **Caveat:** Compliance inherits the parent session's model unless configured or launched with a model override. Verification runs in a separate session, but not necessarily on a different model.
+
+### Settings: `/directorate-configure`
+
+`/directorate-configure` works in the TUI and in OpenCode Desktop. Type it in the prompt or composer, or pick **Configure The Directorate** in the command palette. It opens dialogs, not an agent turn, and both apps run the same steps (`configure-flow.ts`):
+
+1. **Pick a file:** Global Charter or Local Jurisdiction (this project).
+2. **Change any of:**
+   - the default mode
+   - whether a panel runs by default
+   - the Directorate Seats (panel models), each with a thinking level chosen from the ones that model offers
+   - the time budgets
+   - the disabled lenses
+3. **Save.** Escape steps back, and leaving with unsaved changes asks first.
+
+Each row shows the current value, or what an unset key falls back to.
+
+```mermaid
+flowchart LR
+    tuiUser(["TUI<br/>/directorate-configure"]) --> tui["tui.ts"]
+    guiUser(["Desktop<br/>/directorate-configure"]) --> gui["gui.ts"]
+    tui & gui --> flow["configure-flow.ts<br/>dialogs"]
+    flow -- "settings · write<br/>(rpc.ts)" --> rpc["configure.ts<br/>settings RPC"]
+    rpc --> check{"models and<br/>thinking levels<br/>available?"}
+    check -- yes --> file[("directorate.json")]
+    check -- no --> alert["alert: not saved"] --> flow
+
+    classDef tuiC fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef srvC fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef fileC fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef badC fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+    class tuiUser,guiUser,tui,gui,flow tuiC
+    class rpc,check srvC
+    class file fileC
+    class alert badC
+```
+
+Neither app part reads or writes files. The settings RPC (`rpc.ts`, exported as `opencode-directorate/rpc`) runs on the server, so with a remote server the settings land on the server's machine. The desktop app uses the server of the session in front, at that session's directory, or its own server when no session is open.
+
+**Desktop builds.** OpenCode Desktop loads a plugin's GUI part as one prebuilt CommonJS file. `gui.ts` is built to `dist/gui-experimental.cjs` (the package's `./gui-experimental` export) with OpenCode's Vite preset (`vite.config.ts`):
+
+- Run `bun run build` from the workspace root after changing `gui.ts`, `configure-flow.ts`, `rpc.ts` or `model.ts`. `dist/` is generated, not checked in.
+- The workspace's `bun run test` builds the bundle first, then loads it the way the app does.
+- The bundle needs only `effect`, `@opencode/plugin/gui` and `@opencode/plugin/rpc`, which the app provides. An agent can also change settings with the `directorate_configure` tool, when you ask it to. Directorate review agents cannot call that tool.
+
+| File | Applies to |
+| --- | --- |
+| `directorate.json` in OpenCode's global config directory: `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode` (`$DIRECTORATE_SETTINGS` overrides) | every repository |
+| `<repo>/.opencode/directorate.json` | this repository; overrides the global file key by key |
+
+```json
+{
+  "mode": "full",
+  "panel": {
+    "enabled": true,
+    "models": [
+      { "model": "claude-agent/opus", "variant": "high" },
+      { "model": "openai/gpt-6.2-astra", "variant": "xhigh" }
+    ]
+  },
+  "budget_minutes": { "full": 90 },
+  "lenses": { "disabled": ["ux", "docs"] }
+}
+```
+
+- **Precedence:** a `directorate_seal` request, then the project file, then the global file, then Directorate defaults. Asking for one model (`panel: false`) overrides `panel.enabled`.
+- **Checked on write:** each panel model must be an enabled chat model in OpenCode, and each `variant` (thinking level) must be one that model offers. The dialogs offer only those. A file that names a model no longer available is refused on save, and the alert names that model.
+- **Checked on read:** a hand-edited file with an unknown key or a bad value is an error, never silently ignored. `/directorate-configure` reports it instead of editing over it.
+- **Budgets** set here are used as-is, including for panels. Unset budgets keep the defaults (20/30/60 minutes, 1.5× for a panel).
+- **Disabled lenses** are recorded on the seal. The Liaison is told not to assign them, and `directorate_ledger_add` rejects entries filed under them.
+
+### Findings
+
+A finding is a dossier (ledger) entry (`ledger.json`, rules in `ledger.ts`). Only **confirmed** entries become findings in the Directive. Open entries, and duplicates of unconfirmed ones, are listed as _Unverified Leads_.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Open: directorate_ledger_add<br/>(quote must match the sealed code)
+    Open --> Confirmed: a different session<br/>retraces it
+    Open --> Refuted: counterevidence
+    Open --> Duplicate: same root cause<br/>as another entry
+    Confirmed --> Refuted: Compliance<br/>re-decides
+    Refuted --> Confirmed: Compliance<br/>re-decides
+    Confirmed --> Open: refresh changed a file<br/>its anchor or evidence uses
+    Refuted --> Open: refresh changed a file<br/>its anchor or evidence uses
+    Duplicate --> Open: refresh changed one of its files,<br/>or the entry it duplicated was refuted
+    Confirmed --> [*]: in the Directive
+
+    classDef open fill:#fef9c3,stroke:#a16207,stroke-width:2px,color:#713f12
+    classDef confirmed fill:#dcfce7,stroke:#16a34a,stroke-width:3px,color:#14532d
+    classDef refuted fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#374151
+    classDef dup fill:#fae8ff,stroke:#c026d3,stroke-width:2px,color:#701a75
+
+    class Open open
+    class Confirmed confirmed
+    class Refuted refuted
+    class Duplicate dup
+```
+
+Who may decide an entry:
+
+- `directorate_liaison` may decide open **minor** entries raised by Auditors or Seats, confirming them only as minor, and may withdraw its own open entries.
+- `directorate_compliance` decides everything else and may re-decide.
+- No session can confirm an entry it raised.
+
+## How the code is laid out
+
+Each layer depends only on the layers below it. Services are Effect `Context.Service`s with a `layer`, built once when the plugin starts: `platform.ts` assembles `Git`, `Worktree`, `Store`, `SettingsStore`, and the Node platform, and `index.ts` adds `Host` (the OpenCode plugin context) and `Sessions`. The package also exports a TUI part (`tui.ts`), a desktop GUI part (`gui.ts`, built to `dist/`), and the RPC definition they share with the server (`rpc.ts`). Both app parts run the same dialog steps (`configure-flow.ts`). The TUI and GUI APIs are promise-based, so those three files are plain async code; everything they call runs in Effect on the server.
+
+```mermaid
+flowchart TB
+    tuiPart(["tui.ts · gui.ts: TUI and Desktop<br/>/directorate-configure dialogs"])
+    host(["OpenCode host<br/>tools · hooks · events · sessions · RPC"])
+
+    subgraph workflow["Workflow"]
+        index["index.ts<br/>seal · refresh · protocol gates<br/>budget hooks · watchdog · child events"]
+    end
+
+    subgraph adapters["OpenCode adapters"]
+        tool["tool.ts<br/>permission check · services · errors"]
+        readTools["read-tools.ts<br/>diff · read · ls · grep · history · coverage"]
+        ledgerTools["ledger-tools.ts<br/>add · verdict · list · note"]
+        configure["configure.ts<br/>directorate_configure · settings RPC"]
+    end
+
+    subgraph domain["Review domain"]
+        seal["seal.ts<br/>capture · create · refresh"]
+        report["report.ts<br/>assess · render · finalize"]
+        browse["browse.ts<br/>paged views"]
+        content["content.ts<br/>sealed files · quotes · evidence"]
+        target["target.ts<br/>ends · fingerprints"]
+        diff["diff.ts<br/>raw diff · regions"]
+    end
+
+    subgraph services["Services"]
+        sessions["Sessions<br/>session ↔ seal"]
+        store["Store<br/>seal directory · lock"]
+        worktree["Worktree<br/>live files · signatures"]
+        git["Git<br/>git · gh"]
+        settings["SettingsStore<br/>directorate.json"]
+    end
+
+    subgraph rules["Pure rules: no services"]
+        pure["model · errors · exclusions<br/>coverage · ledger · children · budget"]
+    end
+
+    node(["Node platform<br/>FileSystem · Path · Crypto · ChildProcessSpawner"])
+
+    tuiPart -- "rpc.ts" --> host
+    host --> workflow
+    workflow --> adapters
+    workflow & adapters --> domain
+    workflow & adapters --> services
+    domain --> services
+    services --> rules & node
+
+    classDef hostC fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef flowC fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef adaptC fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef domainC fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef pureC fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,stroke-dasharray:4 3,color:#0c4a6e
+    classDef svcC fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+
+    class tuiPart,host,node hostC
+    class index flowC
+    class tool,readTools,ledgerTools,configure adaptC
+    class seal,report,browse,content,target,diff domainC
+    class pure pureC
+    class sessions,store,worktree,git,settings svcC
+```
+
+A few rules hold everywhere:
+
+- **Immutable state.** Seals and ledgers are read-only Schema types. Every change returns a new value, and only real changes are written.
+- **Schemas at boundaries.** Saved JSON, tool inputs (`RepoPath`, `RepoScope`, `LineRef`), GitHub responses, and git's raw diff (`RawDiff`) are decoded with Effect Schema.
+- **Withheld paths.** Secret-like files (`.env`, keys, credentials) and `.git` are redacted and never shown. Lockfiles and generated files are listed but not diffed.
+- **Installed dependencies.** `directorate_read` also reads gitignored files in dependency directories (such as `node_modules`), and `directorate_ls` lists such a directory one level deep from disk, with each link's resolved target, so agents find store paths (such as Bun's `node_modules/.bun/<name>@<version>+<hash>`) instead of guessing them. Both resolve symlinks first, so Bun and pnpm store links work, and then check the resolved path (`installed` in `content.ts`): it must stay inside the repository, be ignored, and not be secret-like.
+- **Listings match reads.** For local and paths seals, `directorate_ls` lists the base tree plus the changes captured at sealing, the same files `directorate_read` serves, not the live tree.
+- **Bounded output.** The reading tools stay under OpenCode's 50 KiB / 2,000-line cut, and long regions continue on the next call.
+
+## What a seal stores
+
+Seals live under `$DIRECTORATE_STATE_DIR`. If that is unset, they live in `$XDG_STATE_HOME/opencode-directorate`, else in `~/.local/state/opencode-directorate`. Seals not written for 14 days are removed.
+
+```text
+directorate-20261124071813-5eecd7/
+├── seal.json          the state: target, SHAs, regions, children, gates, budget
+├── ledger.json        entries and notes
+├── diff.patch         the sealed diff (diff.g1.patch after a refresh)
+├── snapshot/          changed working-tree files as sealed (snapshot.g1/ after a refresh)
+├── report.md          written once, when the seal is reported
+└── mutation.lock      present only while a writer holds the seal
+```
+
+## Development
+
+```sh
+bun install --frozen-lockfile
+bun run check  # from the workspace root; builds the GUI, typechecks, and runs node --test
+```
+
+- **Effect version:** `effect` is a peer dependency pinned to the version the OpenCode host ships (4.0.6). The plugin uses the host's runtime and never starts its own.
+- **Reloading:** use `/reload` to force OpenCode to pick up changes from this checkout.

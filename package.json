@@ -12,7 +12,7 @@
     "format": "ultracite fix",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "check": "bun run lint && bun run typecheck && bun run test",
+    "check": "bun run --parallel --no-exit-on-error lint typecheck test",
     "fix": "ultracite fix",
     "prepare": "effect-tsgo patch --typescript"
   },

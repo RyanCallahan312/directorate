@@ -1,0 +1,34 @@
+{
+  "name": "opencode-directorate",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.ts",
+    "./rpc": "./src/rpc.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "scripts": {
+    "build": "vite build",
+    "lsp": "effect-tsgo tsc --lsp --stdio",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-node-shared": "4.0.6",
+    "@opencode/schema": "2.2.3"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.2.3",
+    "@types/node": "24.19.2",
+    "effect": "4.0.6",
+    "solid-js": "1.9.20",
+    "typescript": "7.0.2",
+    "vite": "7.3.8",
+    "vite-plugin-solid": "2.11.17"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.2.3",
+    "effect": "4.0.6"
+  }
+}
