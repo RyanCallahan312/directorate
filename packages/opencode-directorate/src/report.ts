@@ -278,7 +278,7 @@ export function assess(
   const seatless = missingSeats(seal);
   if (seatless.length)
     partial(
-      `${seatless.length} of ${seal.panel?.length} panel seats did not review`
+      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review`
     );
   if (fresh.unverified) partial("freshness could not be verified");
   if (fresh.stale) {

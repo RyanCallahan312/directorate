@@ -19,6 +19,7 @@ import {
   Kind,
   Lens,
   NoteKind,
+  PANELIST,
   RepoPath,
   Severity,
   Side,
@@ -113,7 +114,8 @@ export function ledgerTools(tool: DefineTool) {
           );
           const evidence = yield* checkEvidence(seal, input.evidence);
           const ledger = yield* store.loadLedger(seal.id);
-          const near = nearby(ledger, anchor);
+          // Seats operate under memetic isolation: never reveal other entries' titles or ids.
+          const near = c.agent === PANELIST ? [] : nearby(ledger, anchor);
           const entry: Entry = {
             id: `F${ledger.entries.length + 1}`,
             raisedBy: actor(c),
@@ -312,6 +314,7 @@ export function ledgerTools(tool: DefineTool) {
               `consequence: ${e.consequence}`,
               `evidence: ${e.evidence.join(", ")}`,
               e.fix ? `fix: ${e.fix}` : "",
+              e.brief ? `brief: ${e.brief}` : "",
               e.verdicts.length
                 ? `verdicts:\n${e.verdicts.map((v) => `- ${v.verdict}${v.severity ? ` (${v.severity})` : ""}${v.of ? ` of ${v.of}` : ""} by ${v.by.agent}: ${v.rationale} [${v.evidence.join(", ")}]`).join("\n")}`
                 : "",

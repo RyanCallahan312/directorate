@@ -17,7 +17,7 @@ export const childQuestion = (c: Pick<Child, "prompt">) =>
     .replace(/^(question|entries):\s*/i, "") ?? c.prompt.slice(0, 160);
 /** A panel seat as readers see it: the model without its provider. */
 export const seatName = (model: string) => model.slice(model.indexOf("/") + 1);
-/** A child as readers see it: a panelist by its seat, anyone else by role. */
+/** A child as readers see it: a Seat by its model, anyone else by role. */
 export const childName = (c: Pick<Child, "agent" | "model">) =>
   c.agent === PANELIST && c.model ? seatName(c.model) : c.agent;
 /** Whoever raised or decided something, named as `childName` names them. */
@@ -41,7 +41,7 @@ export const panelSeats = (seal: Seal) =>
       sessions: new Set(runs.flatMap((c) => (c.session ? [c.session] : []))),
     };
   });
-/** The next seat a panelist launch takes: the first with no run that is launching, running, or completed. */
+/** The next seat a Directorate Seat launch takes: the first with no run that is launching, running, or completed. */
 export const openSeat = (seal: Seal) =>
   panelSeats(seal).find(
     (s) => s.status === "failed" || s.status === "not launched"
@@ -64,7 +64,7 @@ const update = (seal: Seal, step: (c: Child) => Child): Seal | undefined => {
     : undefined;
 };
 
-/** The lead launched a scout or refuter. */
+/** The Liaison launched an Auditor, Seat, or Compliance run. */
 export const launched = (seal: Seal, child: Child): Seal => ({
   ...seal,
   children: [...seal.children, child],

@@ -798,12 +798,36 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
     /export const div/,
     "Seat reads do not cover the Liaison"
   );
-  await call("directorate_ledger_add", add(seal), "directorate_seat", "pa");
   await call(
     "directorate_ledger_add",
-    add(seal, { title: "Divide by zero" }),
+    add(seal, { brief: "none: searched guard in src/" }),
     "directorate_seat",
-    "pb"
+    "pa"
+  );
+  const pbAdd = (
+    await call(
+      "directorate_ledger_add",
+      add(seal, { title: "Divide by zero" }),
+      "directorate_seat",
+      "pb"
+    )
+  ).content;
+  assert.doesNotMatch(
+    pbAdd,
+    /Nearby entries/,
+    "Seats stay blind to other entries under memetic isolation"
+  );
+  assert.match(
+    (
+      await call(
+        "directorate_ledger_list",
+        { seal, ids: ["F1"] },
+        "directorate_compliance",
+        "ref"
+      )
+    ).content,
+    /brief: none: searched guard in src\//,
+    "directorate_ledger_list exposes brief to Compliance"
   );
   assert.match(
     (
@@ -864,7 +888,7 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
   );
   const md = (await call("directorate_report", { seal })).content;
   assert.match(md, /status: \*\*partial\*\*/);
-  assert.match(md, /1 of 3 panel seats did not review/);
+  assert.match(md, /1 of 3 Directorate Seats did not review/);
   assert.match(
     md,
     /Directorate Seats: alpha#high, beta, gamma#xhigh \(memetic isolation intact\)/
