@@ -1,6 +1,6 @@
 # Directorate
 
-The Directorate is an evidence-gated code review plugin for OpenCode. See the [`opencode-directorate` package](packages/opencode-directorate/README.md) for installation and usage.
+The Directorate is an evidence-gated code review plugin for OpenCode. See the [`@rc312/opencode-directorate` package](packages/opencode-directorate/README.md) for installation and usage.
 
 ## Workspace development
 
@@ -28,13 +28,13 @@ From the workspace root, install dependencies and pack the plugin. The plugin's 
 
 ```sh
 bun install --frozen-lockfile
-npm pack --workspace opencode-directorate
+npm pack --workspace @rc312/opencode-directorate
 ```
 
 Install the resulting `.tgz` in a scratch environment and verify it loads in OpenCode. With an npm account authorized to publish the package, publish that same artifact:
 
 ```sh
-npm publish ./opencode-directorate-0.1.0.tgz --access public
+npm publish ./rc312-opencode-directorate-0.1.0.tgz --access public
 ```
 
 Bump the plugin's version in `packages/opencode-directorate/package.json` before each subsequent release and use the matching tarball name.

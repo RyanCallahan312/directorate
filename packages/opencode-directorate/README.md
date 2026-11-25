@@ -1,6 +1,6 @@
 # The Directorate: evidence-gated code review for OpenCode
 
-The Directorate (`opencode-directorate`) is an Effect-native OpenCode plugin. It gives four agents a fixed, evidence-gated code-review workflow:
+The Directorate (`@rc312/opencode-directorate`) is an Effect-native OpenCode plugin. It gives four agents a fixed, evidence-gated code-review workflow:
 
 | Agent | Role | `directorate_*` tools it may call |
 | --- | --- | --- |
@@ -27,11 +27,11 @@ The plugin enforces the parts of a review that should not depend on judgment:
 
 ## Install from npm
 
-Once published, install the package in a stable location so OpenCode can load it:
+Install the package in a stable location so OpenCode can load it:
 
 ```sh
-npm install --global opencode-directorate@0.1.0
-package="$(npm root --global)/opencode-directorate"
+npm install --global @rc312/opencode-directorate@0.1.0
+package="$(npm root --global)/@rc312/opencode-directorate"
 ```
 
 Use OpenCode 2.2.3, the version the plugin targets. Then follow the configuration below.
@@ -46,7 +46,7 @@ Add the absolute path in `$package` to the `plugins` array in `~/.config/opencod
 
 ```jsonc
 {
-  "plugins": ["/absolute/path/to/opencode-directorate"],
+  "plugins": ["/absolute/path/to/node_modules/@rc312/opencode-directorate"],
   "experimental": { "subagent_depth": 3 },
 }
 ```
@@ -303,7 +303,7 @@ flowchart LR
     class alert badC
 ```
 
-Neither app part reads or writes files. The settings RPC (`rpc.ts`, exported as `opencode-directorate/rpc`) runs on the server, so with a remote server the settings land on the server's machine. The desktop app uses the server of the session in front, at that session's directory, or its own server when no session is open.
+Neither app part reads or writes files. The settings RPC (`rpc.ts`, exported as `@rc312/opencode-directorate/rpc`) runs on the server, so with a remote server the settings land on the server's machine. The desktop app uses the server of the session in front, at that session's directory, or its own server when no session is open.
 
 **Desktop builds.** OpenCode Desktop loads a plugin's GUI part as one prebuilt CommonJS file. `gui.ts` is built to `dist/gui-experimental.cjs` (the package's `./gui-experimental` export) with OpenCode's Vite preset (`vite.config.ts`):
 

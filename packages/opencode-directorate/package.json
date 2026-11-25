@@ -1,5 +1,5 @@
 {
-  "name": "opencode-directorate",
+  "name": "@rc312/opencode-directorate",
   "version": "0.1.0",
   "description": "Evidence-gated code review for OpenCode",
   "license": "MIT",
