@@ -1,7 +1,6 @@
 // Directorate sealing: capture a target's diff, snapshot, and regions into a containment seal, and re-capture it once when the code moves.
 import {
   Bytes,
-  Crypto,
   Data,
   DateTime,
   Effect,
@@ -12,6 +11,7 @@ import {
   Predicate,
   Schema,
 } from "effect";
+import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
 import { unansweredQuestions } from "./children.ts";
@@ -647,7 +647,9 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
 
 /** A new seal's id: its creation time, and a random suffix. */
 const sealId = Effect.fnUntraced(function* sealId(createdAt: DateTime.Utc) {
-  const suffix = Hex.encode(yield* (yield* Crypto.Crypto).randomBytes(3));
+  const suffix = Hex.encode(
+    yield* (yield* SecureRandom.SecureRandom).randomBytes(3)
+  );
 
   return `directorate-${DateTime.formatIso(createdAt)
     .replaceAll(/[-:TZ.]/gu, "")

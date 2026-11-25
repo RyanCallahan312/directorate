@@ -1,13 +1,6 @@
 // Directorate live working-tree access, under one path policy, and the signatures that tell whether it moved since the seal.
-import {
-  Bytes,
-  Context,
-  Crypto,
-  Effect,
-  FileSystem,
-  Layer,
-  Path,
-} from "effect";
+import { Bytes, Context, Effect, FileSystem, Layer, Path } from "effect";
+import { Digest } from "effect/crypto";
 import type { PlatformError } from "effect/PlatformError";
 
 import { ReviewError } from "./error.ts";
@@ -40,10 +33,10 @@ const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
   const git = yield* Git;
-  const crypto = yield* Crypto.Crypto;
+  const hasher = yield* Digest.Digest;
 
   const hash = (s: string | Uint8Array) =>
-    sha256(s).pipe(Effect.provideService(Crypto.Crypto, crypto));
+    sha256(s).pipe(Effect.provideService(Digest.Digest, hasher));
 
   /** One path policy for the worktree: a path below a symlink or a non-directory is absent. */
   const stat = Effect.fnUntraced(function* stat(repo: string, path: string) {

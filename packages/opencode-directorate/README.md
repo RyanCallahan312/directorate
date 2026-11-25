@@ -34,7 +34,7 @@ npm install --global @rc312/opencode-directorate@0.1.0
 package="$(npm root --global)/@rc312/opencode-directorate"
 ```
 
-Use OpenCode 2.2.3, the version the plugin targets. Then follow the configuration below.
+Use OpenCode 2.4.1, the version the plugin targets. Then follow the configuration below.
 
 ## Install from a checkout
 
@@ -96,7 +96,7 @@ While Ship is **waiting**, `status` shows the exact inbox ID and the latest Open
 
 When OpenCode delivers a new ordinary user prompt after Ship's input, Ship pauses and hands control back to you. Background notices do not count as user input. Once your work is done, use `resume` to reassess and continue. The loop also pauses if a step makes no progress, an execution carrying Ship's input fails or is interrupted by the user, or the session moves. After a move, stop or replace the old ship from the session's new location rather than resuming the old review there.
 
-Ship resumes automatically after an OpenCode reload or restart. It checks the saved seal and current working tree once the in-flight turn has settled, without resetting its limits or sending a second copy of queued input. If it can't verify delivery, it won't guess. It pauses instead of continuing when a turn it missed was interrupted or failed, a user prompt arrived while the plugin was away, the review's Liaison was interrupted or its session is gone, or a subagent's completion notice never arrived. Reviews a ship started are continued only by that ship, even after it is stopped. A ship or review driven by another live OpenCode server process on the same database is left to that process. Explicit pauses still require `resume`.
+Ship resumes automatically after an OpenCode reload or restart. It checks the saved seal and current working tree once the in-flight turn has settled, without resetting its limits or sending a second copy of queued input. If a crash left it unable to tell whether a continuation was queued or cancelled, Ship pauses instead of sending it again. It also pauses when a turn it missed was interrupted or failed, a user prompt arrived while the plugin was away, the review's Liaison was interrupted or its session is gone, or a subagent's completion notice never arrived. Reviews a ship started are continued only by that ship, even after it is stopped. A ship or review driven by another live OpenCode server process on the same database is left to that process. Explicit pauses still require `resume`.
 
 If OpenCode installs a checkpoint that hides an automatic continuation or its origin after promotion, Ship pauses rather than sending fix instructions from a summary. Precomputing a summary alone does not pause Ship. Use `/directorate-ship resume` to reassess from the saved Directive; the old continuation is not needed.
 
@@ -483,6 +483,6 @@ bun install --frozen-lockfile
 bun run check  # from the workspace root; lints, checks formatting, builds the GUI, typechecks, and runs node --test
 ```
 
-- **Effect version:** `effect` is a peer dependency pinned to the version the OpenCode host ships (4.0.6). The plugin uses the host's runtime and never starts its own.
+- **Effect version:** `effect` is a peer dependency pinned to the version the OpenCode host ships (4.1.0). The plugin uses the host's runtime and never starts its own.
 - **Reloading:** use `/reload` to force OpenCode to pick up changes from this checkout.
 - **Theme & copy:** see [THEME.md](THEME.md) for The Directorate's naming, vocabulary, and Dial 2.4 voice rules.

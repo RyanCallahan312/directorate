@@ -33,6 +33,7 @@ import {
   launched,
   openSeat,
   missingSeats,
+  recoverFollowUps,
   resumed,
   returned,
   seatName,
@@ -64,10 +65,9 @@ import { ProcessIdentity } from "./process-identity.ts";
 import { readTools } from "./read-tools.ts";
 import {
   activity,
-  createdAt,
   foreign,
+  interruptedReview,
   locationKey,
-  turns,
 } from "./recovery.ts";
 import { RepoScope } from "./repo-path.ts";
 import { finalize } from "./report.ts";
@@ -228,6 +228,9 @@ const recheckSummary = (
 const perSession = (runs: readonly Child[]) => [
   ...new Map(runs.map((x) => [x.session ?? x.call, x])).values(),
 ];
+
+const timeOfWake = ({ admittedAt }: NonNullable<Seal["recovery"]>) =>
+  admittedAt ? DateTime.toEpochMillis(admittedAt) : -Infinity;
 
 const register = Effect.fn("Directorate.register")(function* register() {
   const host = yield* Host;
@@ -537,6 +540,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
                     owner: a.agent,
                     ownerSession: a.session,
                     pid,
+                    resumedAt: now,
                   };
 
                   const taken: Seal =
@@ -1407,7 +1411,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
   /** Events missed across a reload leave a finished run recorded as running: settle it from the host's own record. */
   const settleChildren = Effect.fn("Directorate.settleChildren")(
     function* settleChildren(seal: Seal) {
-      for (const { session } of perSession(childOutstanding(seal))) {
+      const outstanding = childOutstanding(seal);
+
+      for (const { session } of perSession(outstanding)) {
         const info = session ? yield* sessions.info(session) : undefined;
         const act = info ? yield* activity(host, info) : undefined;
 
@@ -1417,28 +1423,39 @@ const register = Effect.fn("Directorate.register")(function* register() {
           !info ||
           !act ||
           act.state === "running" ||
-          (act.state === "orphaned" && !info.time.busy)
+          (act.state === "orphaned" && !act.session.time.busy)
         ) {
           continue;
         }
 
-        const completed = act.state === "idle" && info.outcome === "succeeded";
+        const completed =
+          act.state === "idle" && act.session.outcome === "succeeded";
 
         const endedAt =
           act.state === "idle"
             ? DateTime.makeUnsafe(act.at)
             : yield* DateTime.now;
 
-        // A follow-up still in the inbox is not settled by its session's earlier run.
-        yield* sessions.update(seal.id, (s) =>
-          finished(
-            s,
-            session,
-            completed ? "completed" : "failed",
-            endedAt,
-            true
-          )
-        );
+        const messages = outstanding.some(
+          (run) => run.session === session && run.followUp
+        )
+          ? yield* host.session.context({ sessionID: act.session.id })
+          : [];
+
+        // The session's last outcome is not proof of how an exact follow-up ended.
+        yield* sessions.update(seal.id, (s) => {
+          const followed = recoverFollowUps(s, session, messages);
+
+          return (
+            finished(
+              followed ?? s,
+              session,
+              completed ? "completed" : "failed",
+              endedAt,
+              "initial"
+            ) ?? followed
+          );
+        });
       }
     }
   );
@@ -1447,18 +1464,18 @@ const register = Effect.fn("Directorate.register")(function* register() {
    * A standalone review whose Liaison ended a turn without reporting before this instance loaded: wake it once. A review
    * the user stopped, or one a ship owns, is not this sweep's to continue.
    */
+  const recoverable = (seal: Seal) =>
+    seal.owner === REVIEWER &&
+    !seal.reportedAt &&
+    !seal.halted &&
+    seal.ship === undefined &&
+    DateTime.toEpochMillis(seal.createdAt) < loadedAt;
+
   const recoverReview = Effect.fn("Directorate.recoverReview")(
     function* recoverReview(seal: Seal) {
       const sealedAt = DateTime.toEpochMillis(seal.createdAt);
 
-      if (
-        seal.owner !== REVIEWER ||
-        seal.ship !== undefined ||
-        seal.halted ||
-        (seal.recovery?.ownerSession === seal.ownerSession &&
-          seal.recovery.admitted) ||
-        sealedAt >= loadedAt
-      ) {
+      if (!recoverable(seal)) {
         return;
       }
 
@@ -1484,7 +1501,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
         const stalled =
           act.state === "orphaned" ||
           (act.state === "idle" &&
-            session.outcome === "succeeded" &&
+            act.session.outcome === "succeeded" &&
             act.at >= sealedAt);
 
         return stalled ? session.id : undefined;
@@ -1496,30 +1513,23 @@ const register = Effect.fn("Directorate.register")(function* register() {
         return;
       }
 
-      const messages = yield* host.session.context({ sessionID });
-
-      // An interruption this plugin never saw, even one a later successful turn has since followed.
-      const stopped =
-        seal.halted === undefined &&
-        turns(messages).some(
-          (turn) =>
-            turn.outcome === "interrupted" && createdAt(turn) >= sealedAt
-        );
-
       yield* store.withLock(
         seal.id,
         Effect.gen(function* resumeOwner() {
           const current = yield* store.load(seal.id);
 
           if (
-            current.reportedAt ||
-            current.halted ||
-            current.ownerSession !== sessionID
+            !recoverable(current) ||
+            current.ownerSession !== sessionID ||
+            (yield* foreign(current.pid)) ||
+            (yield* stalledOwner) !== sessionID
           ) {
             return;
           }
 
-          if (stopped) {
+          const messages = yield* host.session.context({ sessionID });
+
+          if (interruptedReview(current, messages)) {
             return yield* store.save({ ...current, halted: true });
           }
 
@@ -1528,12 +1538,25 @@ const register = Effect.fn("Directorate.register")(function* register() {
               ? current.recovery
               : undefined;
 
-          if (prior?.admitted || (yield* stalledOwner) !== sessionID) {
+          const delivered =
+            prior &&
+            messages.some(
+              (message) =>
+                message.type === "synthetic" && message.id === prior.id
+            );
+
+          // A still-queued wake does not need a duplicate, nor does one already handled by this instance.
+          if (
+            prior?.admitted &&
+            (!delivered || timeOfWake(prior) >= loadedAt)
+          ) {
             return;
           }
 
+          const retry = prior?.admitted ? undefined : prior;
+
           const recovery = {
-            id: prior?.id ?? SessionMessage.ID.create(),
+            id: retry?.id ?? SessionMessage.ID.create(),
             ownerSession: sessionID,
           };
 
@@ -1541,11 +1564,11 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
           // The intent is saved before the wake, and the wake's ID is reused until its admission is saved: the host
           // keeps the first admission of an ID, so neither a lost wake nor a lost acknowledgement repeats or drops it.
-          if (!prior) {
+          if (!retry) {
             yield* store.save({ ...mine, recovery });
           }
 
-          if (!messages.some((message) => message.id === recovery.id)) {
+          if (!delivered || !retry) {
             yield* host.session.synthetic({
               delivery: "queue",
               id: SessionMessage.ID.make(recovery.id),
@@ -1556,7 +1579,11 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
           yield* store.save({
             ...mine,
-            recovery: { ...recovery, admitted: true },
+            recovery: {
+              ...recovery,
+              admitted: true,
+              admittedAt: yield* DateTime.now,
+            },
           });
         }).pipe(Effect.uninterruptible)
       );
@@ -1564,7 +1591,10 @@ const register = Effect.fn("Directorate.register")(function* register() {
   );
 
   const sweep = Effect.gen(function* sweep() {
-    yield* ship.recoverShips.pipe(recover("ship recovery sweep failed"));
+    const shipOwners = yield* ship.recoverShips.pipe(
+      recover("ship recovery sweep failed")
+    );
+
     const bound = yield* sessions.boundSeals;
     const now = yield* Clock.currentTimeMillis;
 
@@ -1590,7 +1620,26 @@ const register = Effect.fn("Directorate.register")(function* register() {
         // Another live server's review is not this one's to settle or wake.
         if (!(yield* foreign(seal.pid))) {
           yield* settleChildren(seal).pipe(
-            Effect.andThen(recoverReview(seal)),
+            Effect.andThen(
+              Effect.gen(function* recoverOwner() {
+                if (!shipOwners || seal.ship !== undefined) {
+                  return;
+                }
+
+                const shipID = shipOwners.get(seal.id);
+
+                if (shipID) {
+                  // Older seals stored membership only on the Ship. Retain it even if Ship is stopped later.
+                  return yield* sessions.update(seal.id, (current) =>
+                    current.ship === undefined
+                      ? { ...current, ship: shipID }
+                      : undefined
+                  );
+                }
+
+                yield* recoverReview(seal);
+              })
+            ),
             ignore(`could not recover review ${seal.id}`, "Warn")
           );
         }

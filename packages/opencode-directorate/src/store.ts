@@ -83,19 +83,11 @@ const make = Effect.gen(function* make() {
   const removeDir = (dir: string) =>
     fs.remove(dir, { force: true, recursive: true });
 
-  /** Runs body under the seal's cross-process lock. */
-  const withLock = Effect.fn("Store.withLock")(function* withLock<A, E, R>(
+  const locked = Effect.fnUntraced(function* locked<A, E, R>(
     id: string,
+    path: string,
     body: Effect.Effect<A, E, R>
   ) {
-    if (!SEAL_ID.test(id)) {
-      return yield* failure(
-        `Unknown seal id "${id}". Call directorate_seal first.`
-      );
-    }
-
-    const path = file(id, "mutation.lock");
-
     const readHolder = () =>
       fs
         .readFileString(paths.join(path, "holder"))
@@ -165,7 +157,10 @@ const make = Effect.gen(function* make() {
 
         // The lock appears with its holder record, so a lock's record identifies it from the moment it exists.
         const tmp = yield* fs
-          .makeTempDirectory({ directory: file(id), prefix: ".mutation.lock-" })
+          .makeTempDirectory({
+            directory: paths.dirname(path),
+            prefix: ".mutation.lock-",
+          })
           .pipe(Effect.catch((error) => failure(`${id}: ${error.message}`)));
 
         const discard = removeDir(tmp).pipe(Effect.ignore);
@@ -222,6 +217,25 @@ const make = Effect.gen(function* make() {
       )
     );
   });
+
+  /** Runs body under the seal's cross-process lock. */
+  const withLock = <A, E, R>(id: string, body: Effect.Effect<A, E, R>) =>
+    SEAL_ID.test(id)
+      ? locked(id, file(id, "mutation.lock"), body)
+      : failure(`Unknown seal id "${id}". Call directorate_seal first.`);
+
+  const withShipLock = <A, E, R>(id: string, body: Effect.Effect<A, E, R>) =>
+    fs
+      .makeDirectory(file(".ship-locks"), { recursive: true })
+      .pipe(
+        Effect.andThen(
+          locked(
+            id,
+            file(".ship-locks", `${encodeURIComponent(id)}.lock`),
+            body
+          )
+        )
+      );
 
   const load = Effect.fn("Store.load")(function* load(id: string) {
     if (!SEAL_ID.test(id)) {
@@ -462,6 +476,7 @@ const make = Effect.gen(function* make() {
       saveLedger(s.id, l).pipe(Effect.andThen(save(s)), Effect.uninterruptible),
     saveLedger,
     withLock,
+    withShipLock,
     writeDiff,
     writeSnapshot,
   };

@@ -1,10 +1,12 @@
 // Directorate Auditors, Seats, and Compliance, as a region of the review's state chart: launching → running → completed | failed, and a
 // completed child that works again is running again. Each transition returns the new seal, or undefined if nothing
 // changed, so callers write only changes.
+import type { SessionMessage } from "@opencode/schema/session-message";
 import { DateTime } from "effect";
 
 import { PANELIST, REFUTER, SCOUT } from "./model.ts";
 import type { Actor, Child, Ledger, Seal } from "./model.ts";
+import { createdAt } from "./recovery.ts";
 
 export const childOutstanding = (seal: Seal) =>
   seal.children.filter(
@@ -244,13 +246,67 @@ export const inboxSettled = (
       : { ...c, endedAt: at, status: "failed" };
   });
 
+/** A promoted follow-up belongs to the first terminal marker after that exact input. */
+export const recoverFollowUps = (
+  seal: Seal,
+  session: string,
+  messages: readonly SessionMessage.Info[]
+) =>
+  update(seal, (child) => {
+    if (
+      child.session !== session ||
+      !child.followUp ||
+      (child.status !== "running" && child.status !== "launching")
+    ) {
+      return child;
+    }
+
+    const { inbox } = child.followUp;
+
+    const input = messages.findIndex(
+      (message) =>
+        message.type === "user" &&
+        (inbox
+          ? message.id === inbox
+          : message.text === followUpPrompt(child) &&
+            createdAt(message) >= DateTime.toEpochMillis(child.startedAt))
+    );
+
+    const delivered = messages[input];
+
+    if (!delivered) {
+      return child;
+    }
+
+    const turn = messages
+      .slice(input + 1)
+      .find((message) => message.type === "idle");
+
+    if (!turn && child.followUp.delivered) {
+      return child;
+    }
+
+    const result = {
+      ...child,
+      followUp: { delivered: true, inbox: delivered.id },
+    };
+
+    return turn
+      ? {
+          ...result,
+          endedAt: turn.time.created,
+          status: turn.outcome === "succeeded" ? "completed" : "failed",
+        }
+      : { ...result, status: "running" };
+  });
+
 /** An execution can drain several delivered prompts, but never settles one still in the inbox. */
 export const finished = (
   seal: Seal,
   session: string,
   status: "completed" | "failed",
   endedAt: DateTime.Utc,
-  durable: boolean
+  durable: boolean | "initial"
 ) => {
   const runs = seal.children.filter(
     (c) =>
@@ -265,9 +321,11 @@ export const finished = (
 
   return update(seal, (c) =>
     runs.includes(c) &&
+    (durable !== "initial" || !c.followUp) &&
     (c.status === "running" ||
       c.status === "launching" ||
-      (status === "failed" &&
+      (durable !== "initial" &&
+        status === "failed" &&
         c === latestRun &&
         !c.followUp &&
         c.status === "completed"))

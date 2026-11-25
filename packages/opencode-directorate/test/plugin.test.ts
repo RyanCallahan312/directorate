@@ -476,6 +476,7 @@ const harness = async (
   });
 
   let promptFailure: Error | undefined;
+  const finishOnWait = new Map<string, () => void>();
 
   const enqueue = (item: InboxItem) => {
     const held = inbox.find(({ id }) => id === item.id);
@@ -512,7 +513,7 @@ const harness = async (
           })
         ),
     },
-    app: { version: "2.2.3" },
+    app: { version: "2.4.1" },
     command: {
       transform: (register: (editor: CommandEditor) => void) =>
         Effect.sync(() => {
@@ -740,6 +741,9 @@ const harness = async (
         }).pipe(Effect.tap(() => Deferred.succeed(notified, input.text))),
       wait: ({ sessionID }: { sessionID: string }) =>
         Effect.suspend(() => {
+          finishOnWait.get(sessionID)?.();
+          finishOnWait.delete(sessionID);
+
           if (!executing.has(sessionID)) {
             return Effect.void;
           }
@@ -927,7 +931,7 @@ const harness = async (
     };
 
     await present(hooks["tool.execute.before"])(event);
-    const data = { inboxID: `inbox-${id}`, sessionID };
+    const data = { inboxID: SessionMessage.ID.create(), sessionID };
 
     return {
       deliver: () => bus.emit({ data, type: "session.inbox.delivered" }),
@@ -938,6 +942,13 @@ const harness = async (
             item: { payload: { text: event.input?.prompt }, type: "user" },
           },
           type: "session.inbox.enqueued",
+        }),
+      projectDelivery: () =>
+        projectInput({
+          ...inboxEntry(Session.ID.make(sessionID), data.inboxID),
+          delivery: "queue",
+          payload: { text: present(event.input?.prompt) },
+          type: "user",
         }),
       returned: () =>
         present(hooks["tool.execute.after"])({
@@ -1052,16 +1063,20 @@ const harness = async (
           ? `<conversation-checkpoint>\n<summary>${item.summary}</summary>\n</conversation-checkpoint>`
           : item.text;
 
-      return text
-        ? [
-            {
+      if (!text) {
+        return [];
+      }
+
+      return [
+        item.metadata === undefined
+          ? { content: [{ text, type: "text" }], id: item.id, role: "user" }
+          : {
               content: [{ text, type: "text" }],
               id: item.id,
               metadata: item.metadata,
               role: "user",
             },
-          ]
-        : [];
+      ];
     });
 
     await present(hooks[`session.${hook}`])({
@@ -1142,6 +1157,9 @@ const harness = async (
           type: "compaction",
         })
       );
+    },
+    completeOnWait: (session: string) => {
+      finishOnWait.set(S(session), () => projectOutcome("succeeded", session));
     },
     createSession,
     deleteSession: (session: string) => {
@@ -2882,7 +2900,10 @@ const patchShip = (sessionID: string, patch: Record<string, Schema.Json>) => {
   storage.set(shipKey(sessionID), { ...shipState(sessionID), ...patch });
 };
 
-const patchSeal = (id: string, patch: Record<string, Schema.Json>) => {
+const patchSeal = (
+  id: string,
+  patch: Record<string, Schema.Json | undefined>
+) => {
   const file = path.join(state, id, "seal.json");
   writeFileSync(
     file,
@@ -2976,7 +2997,7 @@ test(
 );
 
 test(
-  "/directorate-ship re-submits a continuation whose admission a crash cut short, under the same ID",
+  "/directorate-ship does not requeue a possibly cancelled fix after a crash",
   { timeout: 20_000 },
   () =>
     virtual(async ({ load, sweep }) => {
@@ -2985,34 +3006,21 @@ test(
       const lead = h.S("lead");
       await shipWithQueuedFix(h);
       const id = h.synthetics[0]?.id;
-      const held = () => inbox.filter((item) => item.id === id).length;
-
-      // As a crash after the host's enqueue and before the ship's checkpoint leaves it.
-      patchShip(lead, { admitting: true });
-      const acknowledged = await load(dir, "ship-intent");
-      await sweep();
-      assert.equal(acknowledged.synthetics.length, 0, "the host held it");
-      assert.equal(held(), 1);
-      assert.equal(shipState(lead).admitting, undefined);
-      assert.equal(shipState(lead).status, "waiting");
-
-      // As a crash before the host's enqueue leaves it.
+      // The host enqueued the item but Ship did not save the acknowledgment. The user cancelled it while Ship was away.
       patchShip(lead, { admitting: true });
       inbox.splice(
         inbox.findIndex((item) => item.id === id),
         1
       );
-      const resent = await load(dir, "ship-intent");
+      const reloaded = await load(dir, "ship-intent");
       await sweep();
-      assert.deepEqual(
-        resent.synthetics.map((sent) => sent.id),
-        [id]
-      );
-      assert.equal(shipState(lead).rounds, 1, "limits are not spent twice");
-      assert.match((await resent.deliver()) ?? "", /Fix all confirmed/u);
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "paused");
+      assert.deepEqual(shipState(lead).inbox, { continuation: true, id });
+      assert.match(String(shipState(lead).reason), /could not confirm/iu);
 
       await sweep();
-      assert.equal(resent.synthetics.length, 1, "one effective continuation");
+      assert.equal(reloaded.synthetics.length, 0);
     })
 );
 
@@ -3107,6 +3115,9 @@ test(
       assert.equal(shipState(lead).status, "active");
 
       reloaded.projectOutcome("interrupted", "reviewer");
+      // A later success must not hide the missed interruption.
+      reloaded.projectOutcome("started", "reviewer");
+      reloaded.projectOutcome("succeeded", "reviewer");
       await sweep();
       assert.equal(reloaded.synthetics.length, 0);
       assert.equal(shipState(lead).status, "paused");
@@ -3115,7 +3126,7 @@ test(
 );
 
 test(
-  "/directorate-ship alone continues its own unreported review after a reload",
+  "/directorate-ship alone continues its own unreported review after an upgrade",
   { timeout: 20_000 },
   () =>
     virtual(async ({ load, sweep }) => {
@@ -3124,6 +3135,8 @@ test(
       const lead = h.S("lead");
       const { seal, shipID } = await shipWithOpenReview(h);
       assert.equal(sealJson(seal).ship, shipID);
+      // Older seals had only the Ship's chain to record ownership.
+      patchSeal(seal, { ship: undefined });
       h.projectOutcome("started", "reviewer");
       h.projectOutcome("succeeded", "reviewer");
 
@@ -3137,6 +3150,7 @@ test(
       );
       assert.equal(shipState(lead).step, `resume:${seal}`);
       assert.equal(sealJson(seal).recovery, undefined);
+      assert.equal(sealJson(seal).ship, shipID);
     })
 );
 
@@ -3454,7 +3468,11 @@ test(
       patchShip(lead, { pid: process.ppid });
 
       const reloaded = await load(dir, "ship-foreign");
-      reloaded.projectOutcome("succeeded");
+      await reloaded.bus.emit({
+        created: reloaded.projectOutcome("succeeded"),
+        data: { sessionID: lead },
+        type: "session.execution.succeeded",
+      });
       await sweep();
       assert.equal(reloaded.synthetics.length, 0);
       assert.equal(shipState(lead).status, "active");
@@ -6805,13 +6823,27 @@ test(
 
       const again = await load(dir, "review-recovery");
       await sweep();
-      assert.equal(again.synthetics.length, 0, "one wake per Liaison");
+      assert.equal(
+        again.synthetics.length,
+        0,
+        "no duplicate while the wake is queued"
+      );
+      await again.projectLatest("lead", false).delivery;
+      again.projectOutcome("started");
+      // The next restart cut off the recovered turn.
+      executing.delete(h.S("lead"));
 
-      await again.call("directorate_diff", { seal });
-      await again.call("directorate_report", { seal });
-      assert.equal(again.synthetics[0]?.sessionID, again.S("caller"));
+      const restarted = await load(dir, "review-recovery");
+      await sweep();
+      assert.equal(restarted.synthetics.length, 1);
+      assert.notEqual(restarted.synthetics[0]?.id, reloaded.synthetics[0]?.id);
+      assert.deepEqual(sealJson(seal).deadline, deadline);
+
+      await restarted.call("directorate_diff", { seal });
+      await restarted.call("directorate_report", { seal });
+      assert.equal(restarted.synthetics.at(-1)?.sessionID, again.S("caller"));
       assert.match(
-        again.synthetics[0]?.text ?? "",
+        restarted.synthetics.at(-1)?.text ?? "",
         /finished the recovered review/u
       );
     })
@@ -6885,6 +6917,15 @@ test(
         resumed.synthetics.map((sent) => sent.sessionID),
         [h.S("seen")]
       );
+
+      await resumed.projectLatest("seen", false).delivery;
+      const stoppedAgain = await load(dir, "review-halted");
+      stoppedAgain.projectOutcome("started", "seen");
+      stoppedAgain.projectOutcome("interrupted", "seen");
+      idled(stoppedAgain, "seen");
+      await sweep();
+      assert.equal(stoppedAgain.synthetics.length, 0);
+      assert.equal(sealJson(seen).halted, true);
     })
 );
 
@@ -6950,6 +6991,7 @@ test(
       await start("finished");
       await start("orphaned");
       await start("working");
+      await start("finishes-on-wait");
 
       const status = (child: string) =>
         sealJson(seal).children.find((run) => run.session === h.S(child))
@@ -6960,11 +7002,72 @@ test(
       const reloaded = await load(dir, "review-children");
       reloaded.projectOutcome("succeeded", "finished");
       executing.delete(h.S("orphaned"));
+      reloaded.completeOnWait("finishes-on-wait");
       await sweep();
       assert.equal(status("finished"), "completed");
       assert.equal(status("orphaned"), "failed");
       assert.equal(status("working"), "running");
+      assert.equal(status("finishes-on-wait"), "completed");
       assert.equal(reloaded.synthetics.length, 0, "the Liaison is running");
+    })
+);
+
+test(
+  "review recovery settles a follow-up whose delivery and completion happened during reload",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-child-follow-up");
+      const seal = await openReview(h);
+      h.projectOutcome("started");
+
+      const returned = await h.launch(
+        "first",
+        "directorate_auditor",
+        "question: first?",
+        "child",
+        "running"
+      );
+
+      await returned();
+      h.projectOutcome("started", "child");
+      await h.bus.emit({
+        created: h.projectOutcome("succeeded", "child"),
+        data: { sessionID: h.S("child") },
+        type: "session.execution.succeeded",
+      });
+
+      const followUp = await h.followUp(
+        "next",
+        "directorate_auditor",
+        "child",
+        "question: next?"
+      );
+
+      await followUp.enqueue();
+      await followUp.returned();
+
+      const run = () =>
+        present(sealJson(seal).children.find((child) => child.call === "next"));
+
+      assert.equal(run().followUp?.delivered, undefined);
+
+      const reloaded = await load(dir, "review-child-follow-up");
+      await sweep();
+      assert.notEqual(
+        run().status,
+        "completed",
+        "the earlier success does not settle queued input"
+      );
+
+      followUp.projectDelivery();
+      idled(reloaded, "child");
+      // A later failure is not the follow-up's outcome.
+      reloaded.projectOutcome("failed", "child");
+      await sweep();
+      assert.equal(run().followUp?.delivered, true);
+      assert.equal(run().status, "completed");
     })
 );
 

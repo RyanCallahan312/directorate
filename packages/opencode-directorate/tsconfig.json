@@ -21,7 +21,7 @@
           "effect/Bytes",
           "effect/FileSystem",
           "effect/Path",
-          "effect/Crypto",
+          "effect/crypto",
           "effect/PlatformError",
           "effect/encoding/Yaml",
           "effect/process",

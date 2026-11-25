@@ -3186,7 +3186,7 @@ test("mutation lock excludes a separate process", async () => {
   const seal = await local(repo());
   const exec = promisify(execFile);
 
-  const probe = (ms: number) =>
+  const probe = (method: "withLock" | "withShipLock", id: string, ms: number) =>
     exec(
       process.execPath,
       [
@@ -3196,12 +3196,12 @@ test("mutation lock excludes a separate process", async () => {
     import { Effect } from "effect"
     import { platformLayer } from "./src/platform.ts"
     import { Store } from "./src/store.ts"
-    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Store), (store) => store.withLock(process.argv[1], Effect.succeed("acquired"))).pipe(
+    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Store), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
       Effect.timeoutOrElse({ duration: ${ms}, orElse: () => Effect.succeed("waiting") }),
       Effect.provide(platformLayer),
     )))
   `,
-        seal.id,
+        id,
       ],
       {
         cwd: new URL("../", import.meta.url),
@@ -3210,20 +3210,25 @@ test("mutation lock excludes a separate process", async () => {
       }
     );
 
-  const result = await run(
-    store.pipe(
-      Effect.flatMap((st) =>
-        st.withLock(
-          seal.id,
-          Effect.tryPromise(() => probe(150))
+  const excludes = async (method: "withLock" | "withShipLock", id: string) => {
+    const result = await run(
+      store.pipe(
+        Effect.flatMap((st) =>
+          st[method](
+            id,
+            Effect.tryPromise(() => probe(method, id, 150))
+          )
         )
       )
-    )
-  );
+    );
 
-  assert.equal(result.stdout.trim(), "waiting");
-  const stdoutResult = await probe(2000);
-  assert.equal(stdoutResult.stdout.trim(), "acquired");
+    assert.equal(result.stdout.trim(), "waiting", method);
+    const released = await probe(method, id, 2000);
+    assert.equal(released.stdout.trim(), "acquired", method);
+  };
+
+  await excludes("withLock", seal.id);
+  await excludes("withShipLock", "ses-shared");
 });
 
 test("PR freshness with a fake gh: unfetched base move is unverified; unfetched head move is stale", async () => {

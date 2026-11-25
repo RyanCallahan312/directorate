@@ -11,6 +11,9 @@ export const locationKey = (ref: {
   readonly workspaceID?: string | undefined;
 }) => JSON.stringify([ref.directory, ref.workspaceID ?? ""]);
 
+const timeOf = (time: DateTime.Utc | undefined) =>
+  time && DateTime.toEpochMillis(time);
+
 /**
  * Whether the session is executing, settled, or was left mid-turn. The host's times are milliseconds, and a shutdown or
  * kill records no end: unless they show a turn that ended after it began, ask whether this process is executing it. A
@@ -18,31 +21,45 @@ export const locationKey = (ref: {
  */
 export const activity = Effect.fnUntraced(function* activity(
   host: Plugin.Context,
-  { id, time }: Pick<Session.Info, "id" | "time">
+  session: Session.Info
 ) {
-  const idle = time.idle ? DateTime.toEpochMillis(time.idle) : undefined;
-  const busy = time.busy ? DateTime.toEpochMillis(time.busy) : undefined;
+  const idle = timeOf(session.time.idle);
+  const busy = timeOf(session.time.busy);
 
   if (idle !== undefined && (busy === undefined || busy < idle)) {
-    return { at: idle, state: "idle" } as const;
+    return { at: idle, session, state: "idle" } as const;
   }
 
   // Returns at once unless an execution is running here.
   const quiet = yield* host.session
-    .wait({ sessionID: id })
+    .wait({ sessionID: session.id })
     .pipe(
       Effect.timeoutOption("250 millis"),
       Effect.orElseSucceed(Option.none)
     );
 
   if (Option.isNone(quiet)) {
-    return { state: "running" } as const;
+    return { session, state: "running" } as const;
   }
 
-  // A successor that began in the millisecond its predecessor settled would still be running.
-  return idle !== undefined && busy === idle
-    ? ({ at: idle, state: "idle" } as const)
-    : ({ state: "orphaned" } as const);
+  // The execution may have settled during the wait. Use its new outcome, not the pre-wait snapshot.
+  const fresh = yield* host.session.get({ sessionID: session.id });
+  const ended = timeOf(fresh.time.idle);
+  const started = timeOf(fresh.time.busy);
+
+  if (
+    ended !== undefined &&
+    (started === undefined ||
+      started < ended ||
+      (started === ended && started === busy))
+  ) {
+    return { at: ended, session: fresh, state: "idle" } as const;
+  }
+
+  return {
+    session: fresh,
+    state: started === busy ? "orphaned" : "running",
+  } as const;
 });
 
 export type Activity = Effect.Success<ReturnType<typeof activity>>;
@@ -67,3 +84,25 @@ export const turns = (messages: readonly SessionMessage.Info[]) =>
 
 export const createdAt = (message: SessionMessage.Info) =>
   DateTime.toEpochMillis(message.time.created);
+
+/** On resume, ignore old interruptions, not later ones. Older manually resumed seals lack the resume time. */
+export const interruptedReview = (
+  seal: {
+    readonly createdAt: DateTime.Utc;
+    readonly halted?: boolean | undefined;
+    readonly resumedAt?: DateTime.Utc | undefined;
+  },
+  messages: readonly SessionMessage.Info[]
+) => {
+  if (seal.halted || (!seal.resumedAt && seal.halted === false)) {
+    return seal.halted === true;
+  }
+
+  const since = DateTime.toEpochMillis(seal.resumedAt ?? seal.createdAt);
+
+  return turns(messages).some(
+    (turn) =>
+      turn.outcome === "interrupted" &&
+      (seal.resumedAt ? createdAt(turn) > since : createdAt(turn) >= since)
+  );
+};

@@ -362,7 +362,7 @@ const SealSchema = Schema.Struct({
   gen: since(Count, 0),
   /**
    * Whether the user interrupted the Liaison: true keeps automatic recovery off until a resume or takeover, which sets
-   * false. Unset, an interruption this plugin did not see is still read from the session's history.
+   * false. A missed interruption is read from the session's history after the last resume.
    */
   halted: opt(Schema.Boolean),
   headSha: Schema.String,
@@ -384,10 +384,11 @@ const SealSchema = Schema.Struct({
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
   recheckOf: opt(Schema.String),
-  /** The one wake sent to an idle Liaison after a reload. Until admitted, the same ID is submitted again. */
+  /** The last recovery wake. Until admitted, the same ID is submitted again. */
   recovery: opt(
     Schema.Struct({
       admitted: opt(Schema.Boolean),
+      admittedAt: opt(Time),
       id: Schema.String,
       ownerSession: Schema.String,
     })
@@ -396,6 +397,8 @@ const SealSchema = Schema.Struct({
   regions: since(list(RegionSchema), []),
   repo: Schema.String,
   reportedAt: opt(Time),
+  /** History before an explicit resume or takeover must not halt the resumed review. */
+  resumedAt: opt(Time),
   /** The ship whose loop this review belongs to. Only that ship continues it, even after the ship is stopped. */
   ship: opt(Schema.String),
   sigs: opt(Schema.Record(Schema.String, Schema.String)),

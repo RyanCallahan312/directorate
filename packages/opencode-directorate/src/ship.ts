@@ -10,7 +10,6 @@ import { SessionMessage } from "@opencode/schema/session-message";
 import {
   Cause,
   Clock,
-  Crypto,
   Effect,
   Function,
   Option,
@@ -19,6 +18,7 @@ import {
   Schema,
   Semaphore,
 } from "effect";
+import { SecureRandom } from "effect/crypto";
 
 import { failure, recover } from "./error.ts";
 import { Git } from "./git.ts";
@@ -31,6 +31,7 @@ import {
   activity,
   createdAt,
   foreign,
+  interruptedReview,
   locationKey,
   turns,
 } from "./recovery.ts";
@@ -54,7 +55,7 @@ const Plan = Schema.Struct({
 });
 
 const ShipStateSchema = Schema.Struct({
-  /** An automatic continuation whose admission was not confirmed; recovery submits it again under the same ID. */
+  /** An automatic continuation whose admission was not confirmed. */
   admitting: Schema.optionalKey(Schema.Boolean),
   /** Background subagents the settled turn left running, and when each was seen: their notices come before the next step. */
   awaiting: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
@@ -366,10 +367,7 @@ const proven = (
 };
 
 /** Why a subagent holds the next step back, if it does. An orphaned one neither runs nor sends a notice. */
-const held = (
-  act: Activity,
-  input: { interrupted: boolean; now: number; unnoticed: boolean }
-) => {
+const held = (act: Activity, input: { now: number; unnoticed: boolean }) => {
   if (act.state === "running") {
     return "busy" as const;
   }
@@ -384,8 +382,6 @@ const held = (
       ? ("busy" as const)
       : ("unnoticed" as const);
   }
-
-  return input.interrupted ? ("interrupted" as const) : undefined;
 };
 
 /** The same for a subagent whose session no longer exists: a Liaison cannot report, and no notice will come. */
@@ -416,10 +412,14 @@ export const registerShip = Effect.fn("Ship.register")(
     const git = yield* Git;
     const store = yield* Store;
     const services = yield* Effect.context<Platform>();
-    const crypto = yield* Crypto.Crypto;
-    const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
+    const random = yield* SecureRandom.SecureRandom;
+    const uuid = random.uuidV4();
     const boot = yield* Effect.cached(uuid);
-    const { pid } = yield* ProcessIdentity;
+    const identity = yield* ProcessIdentity;
+    const { pid } = identity;
+
+    const foreignOwner = (owner: number | undefined) =>
+      foreign(owner).pipe(Effect.provideService(ProcessIdentity, identity));
 
     // What each queued input is, by inbox ID, until it settles. A reload forgets these; the message itself is read then.
     const kinds = new Map<string, InboxKind>();
@@ -472,7 +472,7 @@ export const registerShip = Effect.fn("Ship.register")(
         return command ? state : undefined;
       }
 
-      return state;
+      return !command && (yield* foreignOwner(state.pid)) ? undefined : state;
     });
 
     const checkWorktree = Effect.fnUntraced(function* checkWorktree(
@@ -673,7 +673,7 @@ export const registerShip = Effect.fn("Ship.register")(
 
       if (!input) {
         // A reload must not interrupt automatic admission between enqueue and its checkpoint; a crash there leaves the
-        // intent, not a pause, for recovery to submit again.
+        // intent so recovery can confirm delivery or pause without reissuing it.
         return yield* commit(
           sessionID,
           { ...submitted, admitting: true },
@@ -968,14 +968,31 @@ export const registerShip = Effect.fn("Ship.register")(
             host.session.get({ sessionID }).pipe(Effect.option),
         });
 
-        const blocked = Option.isSome(info)
-          ? held(yield* activity(host, info.value), {
-              interrupted:
-                child === owner && info.value.outcome === "interrupted",
-              now,
-              unnoticed,
-            })
-          : gone(child === owner, unnoticed);
+        if (Option.isNone(info)) {
+          const blocked = gone(child === owner, unnoticed);
+
+          if (blocked) {
+            return blocked;
+          }
+
+          continue;
+        }
+
+        const act = yield* activity(host, info.value);
+        const blocked = held(act, { now, unnoticed });
+
+        if (
+          child === owner &&
+          seal &&
+          act.state !== "running" &&
+          (act.session.outcome === "interrupted" ||
+            interruptedReview(
+              seal,
+              yield* host.session.context({ sessionID: act.session.id })
+            ))
+        ) {
+          return "interrupted" as const;
+        }
 
         if (blocked) {
           return blocked;
@@ -983,8 +1000,8 @@ export const registerShip = Effect.fn("Ship.register")(
       }
     });
 
-    /** An automatic continuation whose admission was cut short. Returns the state to settle, if the host already holds it. */
-    const readmit = Effect.fnUntraced(function* readmit(
+    /** Recover a proven delivery, but never reissue an input that may have been cancelled. */
+    const confirmAdmission = Effect.fnUntraced(function* confirmAdmission(
       sessionID: SessionID,
       state: ShipState,
       messages: readonly SessionMessage.Info[]
@@ -1013,13 +1030,11 @@ export const registerShip = Effect.fn("Ship.register")(
         return;
       }
 
-      // First admission wins for an ID the host already queued, so this never adds a second continuation.
-      yield* commit(
+      yield* pause(
         sessionID,
-        state,
         submitted,
-        marker(sessionID, state, inbox.id)
-      ).pipe(Effect.uninterruptible);
+        "Could not confirm whether the queued Directorate ship prompt was delivered or cancelled. Check the exact inbox ID before resuming."
+      );
     });
 
     /**
@@ -1049,7 +1064,7 @@ export const registerShip = Effect.fn("Ship.register")(
       const messages = yield* host.session.context({ sessionID });
 
       const state = stored.admitting
-        ? yield* readmit(sessionID, stored, messages)
+        ? yield* confirmAdmission(sessionID, stored, messages)
         : stored;
 
       const found = state && proven(state, messages, failed);
@@ -1092,8 +1107,21 @@ export const registerShip = Effect.fn("Ship.register")(
       });
     });
 
+    const recoverOne = (sessionID: SessionID, reason?: string) =>
+      store.withShipLock(
+        sessionID,
+        Effect.gen(function* claim() {
+          const state = yield* read(sessionID);
+
+          if (state && running(state) && state.boot !== (yield* boot)) {
+            yield* reconcile(sessionID, state, reason);
+          }
+        })
+      );
+
     const recoverShips = Effect.gen(function* recoverShips() {
       const current = yield* boot;
+      const owned = new Map<string, string>();
       let after: string | undefined;
 
       do {
@@ -1104,33 +1132,35 @@ export const registerShip = Effect.fn("Ship.register")(
         for (const { key, value } of page.entries) {
           const snapshot = Option.getOrUndefined(decodeSnapshot(value));
 
+          if (!snapshot) {
+            continue;
+          }
+
+          for (const seal of snapshot.chain) {
+            owned.set(seal, snapshot.id);
+          }
+
           // Settled records, other locations', this instance's own, and another live server's need no lock; one that
           // changes is seen by the next sweep.
           if (
-            !snapshot ||
             !running(snapshot) ||
             snapshot.location !== location ||
             snapshot.boot === current ||
-            (yield* foreign(snapshot.pid))
+            (yield* foreignOwner(snapshot.pid))
           ) {
             continue;
           }
 
           const sessionID = Session.ID.make(key.slice(prefix.length));
-          yield* guarded(
-            sessionID,
-            Effect.gen(function* recoverOne() {
-              const state = yield* read(sessionID);
-
-              if (state && running(state) && state.boot !== current) {
-                yield* reconcile(sessionID, state);
-              }
-            })
-          ).pipe(recover(`could not recover ship in ${sessionID}`));
+          yield* guarded(sessionID, recoverOne(sessionID)).pipe(
+            recover(`could not recover ship in ${sessionID}`)
+          );
         }
 
         after = page.next;
       } while (after);
+
+      return owned;
     });
 
     const clear = Effect.fnUntraced(function* clear(
@@ -1180,103 +1210,118 @@ export const registerShip = Effect.fn("Ship.register")(
         })
       ).pipe(recover("ship idle hook failed"));
 
+    const assertWritable = Effect.fnUntraced(function* assertWritable(
+      state: ShipState | undefined
+    ) {
+      if (state && running(state) && (yield* foreignOwner(state.pid))) {
+        return yield* failure(
+          "Another live OpenCode server is driving this ship."
+        );
+      }
+    });
+
     const execute = ({ sessionID, prompt, delivery }: CommandInvocation) =>
       guarded(
         sessionID,
-        Effect.gen(function* runCommand() {
-          const raw = prompt.text;
-          const action = raw.trim().toLowerCase();
-          const forgetting = /^forget(?:\s|$)/u.test(action);
+        store.withShipLock(
+          sessionID,
+          Effect.gen(function* runCommand() {
+            const raw = prompt.text;
+            const action = raw.trim().toLowerCase();
+            const forgetting = /^forget(?:\s|$)/u.test(action);
 
-          if (
-            (["pause", "status", "stop"].includes(action) || forgetting) &&
-            hasAttachments(prompt)
-          ) {
-            return yield* failure(
-              `The ${action} command does not accept attachments. Run it without attachments.`
-            );
-          }
-
-          const state = yield* read(sessionID, true);
-
-          if (action === "status") {
-            return yield* failure(
-              state ? describe(state) : "No Directorate ship in this session."
-            );
-          }
-
-          const pending = state && queued(state);
-          const session = yield* host.session.get({ sessionID });
-
-          if (locationKey(session.location) !== location) {
-            return yield* failure(
-              "Run this command from the session's current OpenCode location."
-            );
-          }
-
-          if (action === "stop" || forgetting) {
-            return yield* clear(sessionID, pending, raw, forgetting);
-          }
-
-          if (pending) {
-            return yield* failure(cancelFirst(pending));
-          }
-
-          if (action === "pause") {
-            if (state?.status !== "active") {
-              return yield* failure("No active Directorate ship to pause.");
+            if (
+              (["pause", "status", "stop"].includes(action) || forgetting) &&
+              hasAttachments(prompt)
+            ) {
+              return yield* failure(
+                `The ${action} command does not accept attachments. Run it without attachments.`
+              );
             }
 
-            yield* pause(sessionID, state, "Paused by the user.");
+            const state = yield* read(sessionID, true);
 
-            return;
-          }
+            if (action === "status") {
+              return yield* failure(
+                state ? describe(state) : "No Directorate ship in this session."
+              );
+            }
 
-          if (state?.status === "active") {
-            return yield* failure(
-              "A Directorate ship is already active in this session."
+            yield* assertWritable(state);
+
+            const pending = state && queued(state);
+            const session = yield* host.session.get({ sessionID });
+
+            if (locationKey(session.location) !== location) {
+              return yield* failure(
+                "Run this command from the session's current OpenCode location."
+              );
+            }
+
+            if (action === "stop" || forgetting) {
+              return yield* clear(sessionID, pending, raw, forgetting);
+            }
+
+            if (pending) {
+              return yield* failure(cancelFirst(pending));
+            }
+
+            if (action === "pause") {
+              if (state?.status !== "active") {
+                return yield* failure("No active Directorate ship to pause.");
+              }
+
+              yield* pause(sessionID, state, "Paused by the user.");
+
+              return;
+            }
+
+            if (state?.status === "active") {
+              return yield* failure(
+                "A Directorate ship is already active in this session."
+              );
+            }
+
+            yield* assertAgent(session.agent);
+            const input = { delivery, prompt, sessionID };
+
+            if (action === "resume") {
+              return yield* resume(input, state);
+            }
+
+            if (/^\s*--recheck(?=\s|=|$)/iu.test(raw)) {
+              return yield* failure(
+                "/directorate-ship starts a new review. Use /directorate-review --recheck to re-check an existing seal."
+              );
+            }
+
+            const id = yield* uuid;
+
+            const kickoff = shipKickoff(
+              yield* reviewRequest(raw, "defaults"),
+              id
             );
-          }
 
-          yield* assertAgent(session.agent);
-          const input = { delivery, prompt, sessionID };
+            const now = yield* Clock.currentTimeMillis;
 
-          if (action === "resume") {
-            return yield* resume(input, state);
-          }
+            const created: ShipState = {
+              boot: yield* boot,
+              chain: [],
+              id,
+              location,
+              pid,
+              reason: "Waiting for the initial Directorate review.",
+              request: raw,
+              reviewsAtResume: 0,
+              rounds: 0,
+              startedAt: now,
+              status: "active",
+              step: "review",
+            };
 
-          if (/^\s*--recheck(?=\s|=|$)/iu.test(raw)) {
-            return yield* failure(
-              "/directorate-ship starts a new review. Use /directorate-review --recheck to re-check an existing seal."
-            );
-          }
-
-          const id = yield* uuid;
-
-          const kickoff = shipKickoff(
-            yield* reviewRequest(raw, "defaults"),
-            id
-          );
-
-          const now = yield* Clock.currentTimeMillis;
-
-          const created: ShipState = {
-            boot: yield* boot,
-            chain: [],
-            id,
-            location,
-            pid,
-            reason: "Waiting for the initial Directorate review.",
-            request: raw,
-            reviewsAtResume: 0,
-            rounds: 0,
-            startedAt: now,
-            status: "active",
-            step: "review",
-          };
-
-          return yield* admit(sessionID, created, kickoff, input);
-        })
+            return yield* admit(sessionID, created, kickoff, input);
+          })
+        )
       );
 
     const inboxEnqueued = (
@@ -1454,7 +1499,7 @@ export const registerShip = Effect.fn("Ship.register")(
 
           // This instance did not see the whole turn: the host's record decides, including how the turn ended.
           if (state.boot !== (yield* boot)) {
-            return yield* reconcile(sessionID, state, reason);
+            return yield* recoverOne(sessionID, reason);
           }
 
           if (state.status === "waiting") {
