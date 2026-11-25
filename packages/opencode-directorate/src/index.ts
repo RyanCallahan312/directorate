@@ -227,6 +227,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
     .root(host.location.directory)
     .pipe(Effect.orElseSucceed(() => null));
 
+  /** Frozen `[directorate settings]` system line per active seal, so mid-review file edits never bust the KV-cache prefix. */
+  const sealSettingsLine = new Map<string, string | undefined>();
+
   /** Reported, without the Liaison: abandoned for a new review, or past the deadline and its grace period. */
   const autoReport = Effect.fn("Directorate.autoReport")(function* autoReport(
     id: string,
@@ -266,6 +269,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
       return;
     }
 
+    sealSettingsLine.delete(saved.seal.id);
     yield* sessions.close(saved.seal);
     yield* sessions.notify(
       saved.seal,
@@ -286,9 +290,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
             delivery,
             sessionID,
             text: [
-              "Handle the user's Directorate export request below. If it names a seal ID, use it directly. Otherwise call directorate_export_list to find retained reviews in the current project. For a blank request, use activeSeal or the first (newest) review. For a range or other selection, use the listing's UTC clock and review metadata, following nextBefore until all applicable pages have been checked. For time ranges use reportedAt when present, otherwise createdAt; interpret 'in the last month' as the rolling last 30 days unless the user specifies a calendar month. Ask if the scope is unclear; never silently broaden it.",
+              "Handle the user's Directorate export request in <user_request> below. If it names a seal ID, use it directly. Otherwise call directorate_export_list to find retained reviews in the current project. For a blank request, use activeSeal or the first (newest) review. For a range or other selection, use the listing's UTC clock and review metadata, following nextBefore until all applicable pages have been checked. For time ranges use reportedAt when present, otherwise createdAt; interpret 'in the last month' as the rolling last 30 days unless the user specifies a calendar month. Ask if the scope is unclear; never silently broaden it. If a non-ID request matches more than 3 reviews, list the matches and ask the user to confirm before calling directorate_export.",
               "Call directorate_export once per matching seal ID. Export existing reviews only; do not start a review. Do not open, attach, or upload the resulting unredacted ZIPs. Report their paths and any missing data or failed exports. If there are no matches, say so; pruned reviews cannot be recovered.",
-              `User's request:\n${prompt.text}`,
+              `<user_request>\n${prompt.text}\n</user_request>`,
             ].join("\n\n"),
           })
           .pipe(Effect.asVoid),
@@ -321,8 +325,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
               delivery,
               sessionID,
               text: [
-                rest,
-                `Re-check ${which} after fixes${rest ? `, with the request above as its focus` : ""}. If you dispatched the directorate_liaison that issued it in this conversation, send that session a follow-up asking for the re-check. Otherwise dispatch directorate_liaison to re-check it: ${seal ? `tell it to pass recheck: "${seal}" to directorate_seal` : "it finds the latest reported seal with directorate_ledger_list and passes it as recheck to directorate_seal"}. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
+                rest ? `<user_request>\n${rest}\n</user_request>` : "",
+                `Re-check ${which} after fixes${rest ? `, with the <user_request> above as its focus` : ""}. If you dispatched the directorate_liaison that issued it in this conversation, send that session a follow-up asking for the re-check. Otherwise dispatch directorate_liaison to re-check it: ${seal ? `tell it to pass recheck: "${seal}" to directorate_seal` : "it finds the latest reported seal with directorate_ledger_list and passes it as recheck to directorate_seal"}. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
               ]
                 .filter(Boolean)
                 .join("\n\n"),
@@ -342,7 +346,12 @@ const register = Effect.fn("Directorate.register")(function* register() {
           );
         }
 
-        const hasRequest = prompt.text.trim().length > 0;
+        const requestText = flag
+          ? prompt.text.slice(flag[0].length).trim()
+          : prompt.text;
+
+        const hasBody = requestText.trim().length > 0;
+        const hasRequest = Boolean(scope) || hasBody;
 
         return host.session
           .prompt({
@@ -350,9 +359,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
             delivery,
             sessionID,
             text: [
-              hasRequest ? prompt.text : "",
+              hasBody ? `<user_request>\n${requestText}\n</user_request>` : "",
               hasRequest
-                ? "Start a Directorate code review using the request above. Interpret it as natural language and carry through the requested target, scope, mode, model preferences, time limit, and any focus or constraints. Use configured defaults for details the user didn't specify. Ask only if a missing or conflicting detail prevents you from honoring the request. Do not silently drop a constraint or widen the target."
+                ? `Start a Directorate code review${hasBody ? " using the <user_request> above" : ""}. Interpret it as natural language and carry through the requested target, scope, mode, model preferences, time limit, and any focus or constraints. Use configured defaults for details the user didn't specify. Ask only if a missing or conflicting detail prevents you from honoring the request. Do not silently drop a constraint or widen the target.`
                 : "Start a Directorate code review. Before dispatching, use the question tool to offer the mode (configured default, default, code-quality, or full) and panel preference (configured default, single model, or Directorate Seats). If the user cancels, do not start a review.",
               "Dispatch directorate_liaison with the user's request and any clarified options. Leave configured defaults unset rather than guessing them. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.",
               "Reviewing everything in named files or directories uses a whole-file target (kind: paths, with repository-relative paths), including unchanged files. A request for changes only is a diff review, not a whole-file review.",
@@ -391,7 +400,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
     tool({
       description:
-        "List retained Directorate reviews in this project and its registered Git worktrees, newest seal IDs first. Continue with nextBefore. Returns review metadata, not transcripts or source.",
+        "List retained Directorate reviews in this project and its registered Git worktrees, newest seal IDs first. Continue with nextBefore. Returns review metadata, not transcripts or source. Use only when the user asks to list or export past Directorate reviews.",
       *execute(input, c) {
         const page = yield* listExportReviews(c.sessionID, input.before);
 
@@ -798,6 +807,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
         );
 
         if (reported) {
+          sealSettingsLine.delete(reported.id);
           yield* sessions.close(reported);
         }
 
@@ -1347,8 +1357,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
     Effect.forkScoped
   );
 
-  // Drain and locked: tell bound Directorate sessions where they stand, and strip tools once locked. Every request kind
-  // gets the same tools, so a compaction or generate request keeps the session's prompt-cache prefix.
+  // Session prefix & lockdown: keep event.system and event.tools invariant across normal and drain so KV-cache prefixes
+  // stay intact (tool results already append [DIRECTORATE // EVACUATION] at the tail); strip tools and push a lockdown
+  // notice only once locked. Every request kind gets the same tools so compaction/generate keep the cache prefix too.
   for (const kind of ["context", "compaction", "generate"] as const) {
     yield* host.session.hook(
       kind,
@@ -1369,18 +1380,29 @@ const register = Effect.fn("Directorate.register")(function* register() {
         const seal = yield* sessions.active(event.sessionID);
 
         if (agent === REVIEWER) {
-          // Emit configured defaults on every Liaison turn so the system prefix stays stable across sealing.
-          const directory =
-            seal?.repo ??
-            (yield* sessions.directory(event.sessionID)) ??
-            host.location.directory;
+          // Emit configured defaults on every Liaison turn and freeze the line once sealed so mid-review edits to
+          // directorate.json do not mutate the system prefix.
+          let line: string | undefined;
 
-          const line = yield* settings.load(directory).pipe(
-            Effect.map((s) => describe(s.effective)),
-            Effect.catch((error) =>
-              Effect.succeed(`unreadable: ${error.message}`)
-            )
-          );
+          if (seal && sealSettingsLine.has(seal.id)) {
+            line = sealSettingsLine.get(seal.id);
+          } else {
+            const directory =
+              seal?.repo ??
+              (yield* sessions.directory(event.sessionID)) ??
+              host.location.directory;
+
+            line = yield* settings.load(directory).pipe(
+              Effect.map((s) => describe(s.effective)),
+              Effect.catch((error) =>
+                Effect.succeed(`unreadable: ${error.message}`)
+              )
+            );
+
+            if (seal) {
+              sealSettingsLine.set(seal.id, line);
+            }
+          }
 
           if (line) {
             event.system.push({
@@ -1397,20 +1419,17 @@ const register = Effect.fn("Directorate.register")(function* register() {
         const now = yield* Clock.currentTimeMillis;
         const b = budget(seal, now);
 
-        if (b.phase === "normal") {
+        if (b.phase !== "locked") {
           return;
         }
 
-        // Static phase notice (no ticking minutesLeft) avoids busting the KV-cache prefix every 6s during drain.
         event.system.push({ text: budgetNotice(b.phase, agent), type: "text" });
 
-        if (b.phase === "locked") {
-          const keep = LOCKED_TOOLS.get(agent);
+        const keep = LOCKED_TOOLS.get(agent);
 
-          for (const name of Object.keys(event.tools ?? {})) {
-            if (!keep?.has(name)) {
-              Reflect.deleteProperty(event.tools, name);
-            }
+        for (const name of Object.keys(event.tools ?? {})) {
+          if (!keep?.has(name)) {
+            Reflect.deleteProperty(event.tools, name);
           }
         }
       })

@@ -32,10 +32,16 @@ import {
   Stream,
 } from "effect";
 import type { Types } from "effect";
+import { Yaml } from "effect/encoding";
 import { TestClock } from "effect/testing";
 
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
-import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, SealJson } from "../src/model.ts";
+import {
+  DEFAULT_BUDGET,
+  LENSES,
+  PANEL_BUDGET_FACTOR,
+  SealJson,
+} from "../src/model.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
 
 const present = <T>(value: T | null | undefined): T => {
@@ -906,6 +912,52 @@ test("the plugin registers bundled review agents and skill without discovery fil
   assert.ok(
     statSync(path.join(skill.path, "../references/triage.md")).isFile()
   );
+
+  // Verify bundled skill conforms to agentskills.io constraints and stays in sync with LENSES.
+  const rawSkill = readFileSync(skill.path, "utf-8");
+  const lines = rawSkill.split(/\r?\n/u);
+  assert.ok(lines.length < 500, `SKILL.md is ${lines.length} lines (<500)`);
+  const fmMatch = /^---\r?\n(?<yaml>[\s\S]*?)\r?\n---\r?\n/u.exec(rawSkill);
+  assert.ok(fmMatch?.groups?.yaml, "SKILL.md has YAML frontmatter");
+
+  const PortableFrontmatter = Schema.Struct({
+    "allowed-tools": Schema.optionalKey(Schema.String),
+    compatibility: Schema.optionalKey(Schema.String),
+    description: Schema.String,
+    license: Schema.optionalKey(Schema.String),
+    metadata: Schema.optionalKey(
+      Schema.Record(
+        Schema.String,
+        Schema.Union([Schema.String, Schema.Boolean])
+      )
+    ),
+    name: Schema.String,
+  });
+
+  const fm = Schema.decodeUnknownSync(PortableFrontmatter)(
+    Yaml.parse(fmMatch.groups.yaml),
+    { onExcessProperty: "error" }
+  );
+
+  assert.equal(fm.name, path.basename(path.dirname(skill.path)));
+  assert.ok(fm.description.length >= 1 && fm.description.length <= 1024);
+  assert.doesNotMatch(fm.description, /[<>]/u);
+
+  const refDir = path.join(path.dirname(skill.path), "references");
+
+  const refFiles = readdirSync(refDir)
+    .filter((f) => f.endsWith(".md"))
+    .toSorted();
+
+  const expectedRefs = [...LENSES, "triage"].map((n) => `${n}.md`).toSorted();
+  assert.deepEqual(refFiles, expectedRefs, "references match LENSES + triage");
+
+  for (const file of refFiles) {
+    assert.ok(
+      skill.content.includes(`references/${file}`),
+      `SKILL.md links references/${file}`
+    );
+  }
 });
 
 test("bundled registration preserves existing agent and skill overrides", async () => {
@@ -1139,7 +1191,10 @@ test("/directorate-export forwards the request and the agent can list review dat
   await invoke(request);
   assert.equal(prompts.length, 1);
   const submitted = present(prompts[0]);
-  assert.ok(submitted.text.endsWith(request));
+  assert.ok(
+    submitted.text.endsWith(`<user_request>\n${request}\n</user_request>`)
+  );
+  assert.match(submitted.text, /more than 3 reviews.*confirm/u);
   assert.match(submitted.text, /directorate_export once per matching seal ID/u);
   assert.match(submitted.text, /Do not open, attach, or upload/u);
 
@@ -1308,7 +1363,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   assert.deepEqual(submitted.files, files);
   assert.ok(
     submitted.text.startsWith(
-      `${text}\n\nStart a Directorate code review using the request above.`
+      `<user_request>\n${text}\n</user_request>\n\nStart a Directorate code review using the <user_request> above.`
     )
   );
   assert.match(
@@ -1346,7 +1401,27 @@ test("/directorate-review forwards free-form requests and only offers setup ques
       sessionID,
     })
   );
-  assert.match(prompts.at(-1)?.text ?? "", /pass scope: "local"/u);
+  const scopedWithFocus = prompts.at(-1)?.text ?? "";
+  assert.ok(
+    scopedWithFocus.startsWith(
+      "<user_request>\nfocus on tests\n</user_request>\n\nStart a Directorate code review using the <user_request> above."
+    )
+  );
+  assert.match(scopedWithFocus, /pass scope: "local"/u);
+
+  await Effect.runPromise(
+    review.execute({
+      delivery: "queue",
+      prompt: { text: "--scope local" },
+      sessionID,
+    })
+  );
+  const scopedBare = prompts.at(-1)?.text ?? "";
+  assert.match(scopedBare, /^Start a Directorate code review\./u);
+  assert.doesNotMatch(scopedBare, /<user_request>/u);
+  assert.doesNotMatch(scopedBare, /use the question tool to offer the mode/u);
+  assert.match(scopedBare, /pass scope: "local"/u);
+
   const count = prompts.length;
   await assert.rejects(
     Effect.runPromise(
@@ -1372,7 +1447,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   const recheck = prompts.at(-1)?.text ?? "";
   assert.ok(
     recheck.startsWith(
-      "focus on the lock\n\nRe-check `directorate-20260101000000-abcdef` after fixes"
+      "<user_request>\nfocus on the lock\n</user_request>\n\nRe-check `directorate-20260101000000-abcdef` after fixes"
     )
   );
   assert.match(recheck, /send that session a follow-up/u);
@@ -2754,7 +2829,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
   const seal = sealOf(out);
   assert.equal(sealJson(seal).mode, "code-quality");
 
-  // The settings system line stays identical after sealing so the Turn-1 KV-cache prefix holds.
+  // The settings system line stays identical after sealing—even if directorate.json changes mid-review—so the KV-cache prefix holds.
   const ctxAfter: SessionHookEvent = {
     agent: "directorate_liaison",
     sessionID: S("lead"),
@@ -2764,6 +2839,29 @@ test("directorate_configure: validated writes per scope; the project overrides g
 
   await present(hooks["session.context"])(ctxAfter);
   assert.equal(ctxAfter.system[0]?.text, ctx.system[0]?.text);
+  await cfg({
+    action: "write",
+    scope: "project",
+    settings: { mode: "full" },
+  });
+
+  const ctxAfterEdit: SessionHookEvent = {
+    agent: "directorate_liaison",
+    sessionID: S("lead"),
+    system: [],
+    tools: {},
+  };
+
+  await present(hooks["session.context"])(ctxAfterEdit);
+  assert.equal(ctxAfterEdit.system[0]?.text, ctx.system[0]?.text);
+  await cfg({
+    action: "write",
+    scope: "project",
+    settings: {
+      lenses: { disabled: ["ux", "docs"] },
+      panel: { enabled: false },
+    },
+  });
   await assert.rejects(
     call(
       "directorate_ledger_add",
@@ -4242,7 +4340,7 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
     /min left.*file surviving candidates now and hand off/u
   );
 
-  // Drain system notices omit ticking minutesLeft so the KV-cache prefix stays stable across turns.
+  // Drain keeps event.system unchanged so the KV-cache prefix holds across normal → drain (tool results carry EVACUATION).
   const drainAt7: SessionHookEvent = {
     agent: "directorate_liaison",
     sessionID: S("lead"),
@@ -4261,15 +4359,14 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   };
 
   await present(hooks["session.context"])(drainAt8);
-  assert.equal(
-    drainAt7.system.at(-1)?.text,
-    drainAt8.system.at(-1)?.text,
-    "drain system prompt does not tick between turns"
+  assert.deepEqual(
+    drainAt7.system,
+    drainAt8.system,
+    "drain system prompt stays unchanged between turns"
   );
-  assert.doesNotMatch(drainAt7.system.at(-1)?.text ?? "", /min left/u);
-  assert.match(
-    drainAt7.system.at(-1)?.text ?? "",
-    /DIRECTORATE \/\/ EVACUATION/u
+  assert.doesNotMatch(
+    drainAt7.system.map((s) => s.text).join("\n"),
+    /DIRECTORATE \/\/ EVACUATION|min left/u
   );
   shiftClock(seal, 11);
 
@@ -4287,6 +4384,7 @@ test("budget: drain denies auditors not compliance; lock strips tools; role-spec
   };
 
   await present(hooks["session.context"])(lockCtx);
+  assert.match(lockCtx.system.at(-1)?.text ?? "", /DIRECTORATE \/\/ LOCKDOWN/u);
   assert.deepEqual(Object.keys(lockCtx.tools).toSorted(), [
     "directorate_note",
     "directorate_report",

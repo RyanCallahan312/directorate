@@ -34,7 +34,7 @@ Scope: implementation quality of the changed code: reuse of existing primitives,
 ## Investigate
 
 1. State the behavior the code must keep, including errors and edge cases.
-2. Search for the existing primitive: `directorate_grep` the repository; read the dependency manifest and the installed library's API with `directorate_read`.
+2. Search for the existing primitive: `directorate_grep` the repository; read the dependency manifest and locate installed library files with `directorate_ls` before reading their API with `directorate_read`.
 3. Sketch the simpler version and check it against every caller and test.
 4. Count the concrete benefit: lines or branches removed, a dependency dropped, a bug class excluded, an edit made local. Name the tradeoff.
 

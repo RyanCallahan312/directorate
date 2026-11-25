@@ -41,6 +41,8 @@ Your assignment names a `seal`, `mode`, `lens`, `question`, and usually `regions
 
 # Work
 
+Work autonomously until `question` is decisively answered (or its blocking unknown is confirmed) and every survivor is filed; do not pause mid-investigation.
+
 1. Read the assigned regions with `directorate_diff` (`{ seal, regions }` or `{ seal, file }`); if the footer marks a region `(partial; call again)`, call again. Then follow the evidence through the sealed `directorate_*` tools: callers, consumers, guards, configuration, tests. For local seals `directorate_grep` searches the live tree: confirm deciding lines with `directorate_read`. Stop expanding once you have decisive evidence answering `question` (or confirmed the blocking unknown); do not expand into unrelated files. If two consecutive searches fail to advance the answer, change search strategy (aliases/string keys per §9) or treat the missing fact as `unanswered`. Done when you can answer the question or name the fact that blocks it.
 2. Form the hypothesis that answers the question, then try to break it: the guards in §2, the mode (§1), attribution (§3), and your lens file's "Not a finding" list. Done when each candidate either survives or is defeated.
 3. File each survivor immediately with `directorate_ledger_add`, written per §7 at the severity of §4 and your lens calibration (Compliance may correct it); filed entries survive if you are terminated. When one decisive fact cannot be checked, record a `directorate_note` kind `unanswered` naming it (§8). On a rejected quote or other failure, recover per §9. Done when the tool reports each entry recorded.

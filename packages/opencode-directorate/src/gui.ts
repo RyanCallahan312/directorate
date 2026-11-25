@@ -54,7 +54,7 @@ export default Plugin.define({
   setup(ctx) {
     ctx.add(Command, () => ({
       description:
-        "Default review mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+        "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
       group: "The Directorate",
       id: "configure",
       keywords: "directorate review panel seats lenses budget settings",

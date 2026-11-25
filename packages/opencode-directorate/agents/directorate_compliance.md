@@ -47,6 +47,8 @@ Your assignment names a `seal`, `mode`, and `entries` (dossier ids).
 
 # For each assigned entry, highest severity first
 
+Work autonomously through every assigned entry in one run; do not pause between entries.
+
 1. Read the anchored code and the evidence yourself through the sealed `directorate_*` tools (batch independent `directorate_read`/ `directorate_grep` calls in parallel); do not rely on the entry's description of the code. For local seals `directorate_grep` searches the live tree: confirm what it finds with `directorate_read`. If two consecutive searches fail to locate a guard or consumer, try alternative forms (aliases/string keys per §9) or leave the entry open naming the missing fact.
 2. Try to defeat it. Each of these refutes it:
    - the trigger cannot occur: a caller, type, schema, middleware, config, or invariant prevents it (cite it);

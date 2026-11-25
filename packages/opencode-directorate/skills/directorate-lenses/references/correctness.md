@@ -23,7 +23,7 @@ Judge language, runtime, and store semantics against the installed version or it
 3. Walk each exit path (return, throw, failure channel, interruption) and check what each leaves behind: writes, locks, open resources, messages.
 4. For shared state, name the two actors that can interleave and the exact window between their reads and writes.
 5. Look for the guard before you record: the decoder or schema, a database constraint (`directorate_grep` the migrations), the transaction wrapper, the caller's check, and the test that covers the case.
-6. For library behavior (sort order, concurrency primitives, driver semantics), read the installed source or the documentation for the version in use.
+6. For library behavior (sort order, concurrency primitives, driver semantics), locate installed files with `directorate_ls` and read them with `directorate_read`, or check the documentation for the version in use.
 
 ## Calibration
 

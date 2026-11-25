@@ -44,7 +44,7 @@ const plugin: Plugin.Definition = {
       commands: [
         {
           description:
-            "Default review mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+            "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
           group: "The Directorate",
           id: "directorate.configure",
           palette: true,
