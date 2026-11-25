@@ -162,7 +162,9 @@ const outsideContainment = (
     nr.push(`- Directorate Seat ${seatName(s.model)}: ${explanation}`);
   }
 
-  for (const n of ledger.notes.filter((note) => note.kind !== "assumption")) {
+  for (const n of ledger.notes.filter(
+    (note) => note.kind === "unanswered" || note.kind === "limit"
+  )) {
     nr.push(
       `- ${n.kind === "unanswered" ? "Unanswered question" : "Limit"}: ${n.text}`
     );

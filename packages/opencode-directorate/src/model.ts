@@ -163,7 +163,13 @@ export const EntryStatus = Schema.Literals([
   "resolved",
 ]);
 
-export const NoteKind = Schema.Literals(["unanswered", "limit", "assumption"]);
+/** `answered`: the Liaison answered a failed Auditor's question itself; its text is that question. */
+export const NoteKind = Schema.Literals([
+  "unanswered",
+  "limit",
+  "assumption",
+  "answered",
+]);
 
 const ChildStatus = Schema.Literals([
   "launching",

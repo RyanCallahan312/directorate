@@ -5,6 +5,7 @@ import { Effect, FileSystem, Option, Path } from "effect";
 import {
   inDependencyDir,
   installed,
+  isWithheld,
   outsideWorktreeScope,
   readable,
   sealedFile,
@@ -399,7 +400,7 @@ export const grepSealed = Effect.fn("Directorate.grepSealed")(
         const [name = "", line = "", ...text] = l.split("\0");
         const file = commit ? name.slice(seal.headSha.length + 1) : name;
 
-        return isSecret(file)
+        return isWithheld(seal, file)
           ? []
           : [clip(`${file}:${line}:${text.join("\0")}`, 300)];
       });
@@ -532,7 +533,10 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
     return yield* listInstalled(seal, dir);
   }
 
-  const marked = names.map((p) => (isSecret(p) ? `${p}  (withheld)` : p));
+  const marked = names.map((p) =>
+    isWithheld(seal, p) ? `${p}  (withheld)` : p
+  );
+
   const shown = marked.slice(0, fitting(marked));
 
   return `${names.length} files${scope.length ? ` under ${scope.join(", ")}` : ""} at the seal\n${shown.join("\n")}${marked.length > shown.length ? `\n… ${marked.length - shown.length} more; pass a directory` : ""}`;
@@ -608,6 +612,13 @@ export const history = Effect.fn("Directorate.history")(function* history(
 
   if (path && isSecret(path)) {
     return yield* failure(`${path} is a secret-like path; withheld.`);
+  }
+
+  // Blame and show would print the content it was renamed or copied from.
+  if (path && input.kind !== "log" && isWithheld(seal, path)) {
+    return yield* failure(
+      `${path} was renamed or copied from a secret-like path; withheld.`
+    );
   }
 
   if (input.rev && !REV.test(input.rev)) {

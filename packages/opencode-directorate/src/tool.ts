@@ -96,9 +96,23 @@ export const LOCKED_TOOLS = new Map([
 ]);
 
 /**
- * A change to an open seal, under its lock. Once the budget locks, only the caller's locked tools run: a model step that
- * began before the deadline still sees the tools stripped at lockdown, and the lock may have been held past it.
+ * Once an open seal's budget locks, only the caller's locked tools run: a model step that began before the deadline still
+ * sees the tools stripped at lockdown, and the lock may have been held past it. Check under the seal's lock.
  */
+export const unlocked = (seal: Seal, c: Tool.Context, name: string) =>
+  Clock.currentTimeMillis.pipe(
+    Effect.flatMap((now) =>
+      !seal.reportedAt &&
+      budget(seal, now).phase === "locked" &&
+      !LOCKED_TOOLS.get(c.agent)?.has(name)
+        ? failure(
+            `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
+          )
+        : Effect.void
+    )
+  );
+
+/** A change to an open seal, under its lock; once the budget locks, only the caller's locked tools run. */
 export const mutate = <A>(
   c: Tool.Context,
   sealId: string,
@@ -108,15 +122,7 @@ export const mutate = <A>(
 ) =>
   locked(c, sealId, function* mutateSeal(seal) {
     yield* writable(seal, c, name, ownerOnly);
-
-    if (
-      budget(seal, yield* Clock.currentTimeMillis).phase === "locked" &&
-      !LOCKED_TOOLS.get(c.agent)?.has(name)
-    ) {
-      return yield* failure(
-        `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
-      );
-    }
+    yield* unlocked(seal, c, name);
 
     return yield* body(seal);
   });

@@ -136,19 +136,30 @@ const make = Effect.gen(function* make() {
       Effect.map((here) => (here ? "withheld" : "deleted"))
     );
 
-  /** Signature of every changed path in the post-image; a secret-like one by name and status only. */
+  /**
+   * Signature of every changed path in the post-image; a secret-like one by name and status only, and one gone from the
+   * post-image as deleted whatever working copy remains.
+   */
   const sigs = Effect.fn("Worktree.sigs")(function* sigs(
     repo: string,
     base: string,
     scope?: readonly string[]
   ) {
+    const { gone, names } = yield* git.changes(repo, base, scope);
+
+    const signature = (f: string) => {
+      if (gone.has(f)) {
+        return Effect.succeed("deleted");
+      }
+
+      return isSecret(f)
+        ? signWithheld(repo, f)
+        : entry(repo, f).pipe(Effect.flatMap(sign));
+    };
+
     const signed = yield* Effect.forEach(
-      yield* git.changedNames(repo, base, scope),
-      (f) =>
-        (isSecret(f)
-          ? signWithheld(repo, f)
-          : entry(repo, f).pipe(Effect.flatMap(sign))
-        ).pipe(Effect.map((signature) => [f, signature] as const)),
+      names,
+      (f) => signature(f).pipe(Effect.map((s) => [f, s] as const)),
       { concurrency: IO_CONCURRENCY }
     );
 

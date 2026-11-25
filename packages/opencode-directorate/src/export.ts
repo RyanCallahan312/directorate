@@ -12,7 +12,7 @@ const SESSION_ID = /^ses[\w-]+$/u;
 const DIFF = /^diff(?:\.g\d+)?\.patch$/u;
 const SNAPSHOT = /^snapshot(?:\.g\d+)?$/u;
 
-const PAGE_SIZE = 50;
+export const PAGE_SIZE = 50;
 
 export const listExportReviews = Effect.fn("Directorate.listExportReviews")(
   function* listExportReviews(sessionID: string, before: string | undefined) {
@@ -169,7 +169,10 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
           seal.ownerSession,
           ...(seal.previousOwnerSessions ?? []),
           ...seal.children.map((child) => child.session),
-          ...seal.regions.flatMap((region) => region.readBy),
+          // Owners' reads are recorded as "owner" (read-tools.ts); the owner sessions are already listed above.
+          ...seal.regions.flatMap((region) =>
+            region.readBy.filter((reader) => reader !== "owner")
+          ),
         ].filter((value): value is string => Boolean(value))
       ),
     ],

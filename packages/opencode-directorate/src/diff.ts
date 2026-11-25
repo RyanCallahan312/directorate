@@ -289,7 +289,15 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
 
       for (const h of f.hunks) {
         const hunkHeader = lines[h.patchStart - 1] ?? "";
-        const header = headerOf(h.sectionStart, h.patchStart);
+
+        // The section's prologue only, up to its first hunk: editing an earlier hunk leaves later hunks' keys alone.
+        const first = f.hunks.find((x) => x.sectionStart === h.sectionStart);
+
+        const header = headerOf(
+          h.sectionStart,
+          first?.patchStart ?? h.patchStart
+        );
+
         let oldLine = Number(/^@@ -(?<old>\d+)/u.exec(hunkHeader)?.[1] ?? 0);
         let next = h.newStart;
 

@@ -13,6 +13,14 @@ const IO_CONCURRENCY = 16;
 export const outsideWorktreeScope = (seal: Seal, path: string) =>
   seal.postImage === "worktree" && !inScope(path, scopeOf(seal.target.paths));
 
+/** Content withheld from every tool: a secret-like path, or on the sealed side a file renamed or copied from one. */
+export const isWithheld = (seal: Seal, p: string, side: Side = "new") =>
+  isSecret(p) ||
+  (side === "new" &&
+    seal.files.some(
+      (f) => f.path === p && f.oldPath !== undefined && isSecret(f.oldPath)
+    ));
+
 /** A path's bytes on one side of the seal. Paths arrive in repository form, checked by RepoPath at the tool boundary. */
 const sealedBytes = Effect.fnUntraced(function* sealedBytes(
   seal: Seal,
@@ -23,6 +31,10 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
 
   if (side === "old") {
     return yield* git.blob(seal.repo, seal.baseSha, p);
+  }
+
+  if (isWithheld(seal, p)) {
+    return;
   }
 
   if (seal.postImage === "commit") {
@@ -106,8 +118,12 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
 > {
   const fs = yield* FileSystem.FileSystem;
 
-  if (isSecret(p)) {
-    return yield* failure(`${p} is a secret-like path; content withheld`);
+  if (isWithheld(seal, p, side)) {
+    return yield* failure(
+      isSecret(p)
+        ? `${p} is a secret-like path; content withheld`
+        : `${p} was renamed or copied from a secret-like path; content withheld`
+    );
   }
 
   const sealed = yield* sealedFile(seal, p, side);

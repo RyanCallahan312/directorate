@@ -13,6 +13,7 @@ import {
   Deferred,
   Effect,
   Fiber,
+  FileSystem,
   Layer,
   Option,
   Result,
@@ -456,6 +457,53 @@ test("a recreated staged deletion is present in the sealed diff, listing and new
   });
 });
 
+test("a diff seal covers an assume-unchanged edit git's diff hides with a region of its change", async () => {
+  const dir = repo({ "src/a.ts": "committed\n", "src/b.ts": "same\n" });
+  write(dir, "src/a.ts", "local edit\n");
+  g(dir, "update-index", "--assume-unchanged", "src/a.ts");
+  assert.equal(g(dir, "diff", "--name-only", "HEAD"), "", "git hides it");
+  const seal = await local(dir);
+  const patch = readFileSync(await run(diffFile(seal)), "utf-8").split("\n");
+
+  assert.deepEqual(
+    seal.files.map(({ path, status }) => [path, status]),
+    [["src/a.ts", "modified"]]
+  );
+
+  const region = present(seal.regions.find((r) => r.file === "src/a.ts"));
+  const covered = patch.slice(region.patchStart - 1, region.patchEnd);
+  assert.ok(covered.includes("-committed"), covered.join("\n"));
+  assert.ok(covered.includes("+local edit"), covered.join("\n"));
+  assert.ok(
+    patch.includes("--- a/src/a.ts") && patch.includes("+++ b/src/a.ts")
+  );
+  const current = await run(currentFingerprint(seal));
+  assert.equal(current.fingerprint, seal.fingerprint);
+});
+
+test("a staged deletion whose only working copy is ignored has no new side", async () => {
+  const dir = repo({ "src/a.ts": "original\n", "src/b.ts": "same\n" });
+  write(dir, ".gitignore", "src/a.ts\n");
+  g(dir, "add", ".gitignore");
+  g(dir, "commit", "-qm", "ignore");
+  g(dir, "rm", "--cached", "-q", "src/a.ts");
+  const seal = await local(dir);
+  const patch = readFileSync(await run(diffFile(seal)), "utf-8");
+  assert.match(patch, /^-original$/mu);
+
+  assert.deepEqual(
+    seal.files.map(({ path, status }) => [path, status]),
+    [["src/a.ts", "deleted"]]
+  );
+  assert.deepEqual(seal.deleted, ["src/a.ts"]);
+  assert.equal(await run(sealedFile(seal, "src/a.ts")), undefined);
+  await assert.rejects(run(readable(seal, "src/a.ts")), /does not exist/u);
+  assert.doesNotMatch(await run(listFiles(seal, "src")), /src\/a\.ts/u);
+  assert.match(await run(listFiles(seal, "src")), /^src\/b\.ts$/mu);
+  const current = await run(currentFingerprint(seal));
+  assert.equal(current.fingerprint, seal.fingerprint);
+});
+
 test("history clips long patch lines even when all clipped lines fit on one page", async () => {
   const dir = repo({ "long.ts": `${"x".repeat(60_000)}\n` });
   const seal = await local(dir);
@@ -509,6 +557,104 @@ test("only a subsequent successful retry clears a failed question", async () => 
     ).status,
     "complete"
   );
+});
+
+test("the Liaison's answer settles a twice-failed Auditor question", async () => {
+  const seal = await local(repo());
+
+  const failed = {
+    agent: scout.agent,
+    call: "failed",
+    prompt: "seal: x\nquestion: same\ncheck the guard",
+    startedAt: T0,
+    status: "failed",
+  } as const;
+
+  const reviewed = { ...seal, children: [failed], regions: [] };
+
+  const answered = (text: string) => ({
+    entries: [],
+    notes: [{ at: T0, by: lead, kind: "answered" as const, text }],
+  });
+
+  assert.deepEqual(childFailures(reviewed, answered("other")), [failed]);
+
+  const a = assess(reviewed, answered("question: same"), {}, "normal");
+  assert.equal(a.status, "complete");
+  assert.ok(a.reasons.every((r) => !/unanswered/u.test(r)));
+  assert.doesNotMatch(
+    renderReport({
+      ledger: answered("same"),
+      reasons: a.reasons,
+      seal: reviewed,
+      status: a.status,
+    }),
+    /did not complete|Unanswered|Outside Containment/u
+  );
+});
+
+test("re-check: carries an Auditor question the earlier review never answered", async () => {
+  const sealed = await local(repo());
+
+  const run1 = {
+    agent: scout.agent,
+    call: "a1",
+    prompt: "seal: x\nquestion: is div ever called with 0?",
+    startedAt: T0,
+    status: "failed",
+  } as const;
+
+  const prior: Seal = {
+    ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
+    children: [
+      run1,
+      { ...run1, call: "a2" },
+      {
+        ...run1,
+        call: "s1",
+        prompt: "seal: x\nquestion: still running",
+        status: "running",
+      },
+      {
+        ...run1,
+        agent: "directorate_compliance",
+        call: "c1",
+        prompt: "seal: x\nentries: [F9]",
+      },
+    ],
+    reportedAt: T0,
+  };
+
+  const r = await run(
+    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+  );
+
+  assert.deepEqual(r.files, []);
+  assert.deepEqual(coverageSummary(r.seal).unread, []);
+  assert.deepEqual(r.unanswered, [
+    "still running",
+    "is div ever called with 0?",
+  ]);
+
+  const settled = await run(
+    recheckSeal({
+      ledger: {
+        entries: [],
+        notes: [
+          {
+            at: T0,
+            by: lead,
+            kind: "answered",
+            text: "is div ever called with 0?",
+          },
+        ],
+      },
+      owner: lead,
+      prior,
+    })
+  );
+
+  assert.deepEqual(settled.unanswered, ["still running"]);
 });
 
 const at = (path: string, line: number, side: "new" | "old" = "new") => ({
@@ -2223,6 +2369,43 @@ test("a file renamed from a secret path stays withheld: no diff content, no snap
   );
   assert.equal(await run(sealedFile(seal, "config.txt")), undefined);
   assert.ok(!fs.existsSync(join(state, seal.id, "snapshot", "config.txt")));
+  assert.doesNotMatch(
+    await run(grepSealed(seal, "renamed-secret")),
+    /config\.txt/u
+  );
+});
+
+test("a committed rename from a secret path stays withheld from read, grep, ls, and history", async () => {
+  const dir = repo({ ".env": "TOKEN=renamed-secret\n", "src/math.ts": MATH });
+  g(dir, "mv", ".env", "config.txt");
+  g(dir, "commit", "-qm", "rename");
+
+  const c = await run(
+    createSeal({
+      mode: "default",
+      owner: lead,
+      repo: dir,
+      target: { commit: "HEAD", kind: "commit" },
+    })
+  );
+
+  await assert.rejects(run(readable(c, "config.txt")), /withheld/u);
+  assert.equal(await run(sealedFile(c, "config.txt")), undefined);
+  assert.doesNotMatch(
+    await run(grepSealed(c, "renamed-secret")),
+    /config\.txt/u
+  );
+  assert.match(await run(listFiles(c)), /config\.txt {2}\(withheld\)/u);
+  await assert.rejects(
+    run(history(c, { kind: "blame", path: "config.txt" })),
+    /withheld/u
+  );
+  await assert.rejects(
+    run(history(c, { kind: "show", path: "config.txt", rev: "HEAD" })),
+    /withheld/u
+  );
+  const other = await run(readable(c, "src/math.ts"));
+  assert.match(other.content, /export/u, "other files stay readable");
 });
 
 test("range refresh deltas withhold secrets", async () => {
@@ -2699,6 +2882,34 @@ test("worktree refresh rebuilds the full diff: removed lines anchor on the base;
   );
 });
 
+test("refresh: changing the first hunk keeps receipts for unchanged later hunks in the same file", async () => {
+  const base = Array.from(
+    { length: 30 },
+    (_, i) => `const l${i + 1} = ${i + 1}`
+  );
+
+  // Lines 2 and 25 change: two hunks far enough apart not to merge.
+  const edited = (early: string) =>
+    `${base.with(1, early).with(24, "const late = 25").join("\n")}\n`;
+
+  const dir = repo({ "a.ts": `${base.join("\n")}\n` });
+
+  write(dir, "a.ts", edited("const early = 2"));
+  const seal = regions(await local(dir), () => ({ ownerRead: true }));
+  assert.equal(seal.regions.length, 2, "two separated hunks");
+  write(dir, "a.ts", edited("const earlier = 2"));
+  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+  assert.deepEqual(
+    r.newRegions.map((x) => x.newStart),
+    [present(seal.regions[0]).newStart],
+    "only the changed first hunk is unread"
+  );
+  assert.ok(
+    present(r.seal.regions[1]).ownerRead,
+    "the later hunk keeps its receipt"
+  );
+});
+
 test("lead cannot launder severity through duplicates; refuting a target reopens its duplicates", () => {
   const F1 = entry("F1", {
     status: "confirmed",
@@ -2827,6 +3038,74 @@ test("an orphaned mutation lock is taken over", async () => {
   );
   await run(takeOver);
   assert.equal(fs.existsSync(lock), false);
+});
+
+test("concurrent takeovers of an orphaned mutation lock admit one writer at a time", async () => {
+  const seal = await local(repo());
+  const lock = join(state, seal.id, "mutation.lock");
+
+  mkdirSync(lock);
+  writeFileSync(
+    join(lock, "holder"),
+    JSON.stringify({ at: Date.now(), pid: 2 ** 22 + 1, token: "x" })
+  );
+
+  let active = 0;
+  let most = 0;
+  let asides = 0;
+
+  const writer = Effect.gen(function* writer() {
+    active += 1;
+    most = Math.max(most, active);
+    yield* Effect.sleep("200 millis");
+    active -= 1;
+  });
+
+  // Late reclaimers: each later move of the lock aside, and any move back, lands after other writers have retried.
+  const delay = (from: string, to: string) => {
+    if (to.includes(".stale-")) {
+      asides += 1;
+
+      return (asides - 1) * 40;
+    }
+
+    return from.includes(".stale-") ? 100 : 0;
+  };
+
+  const slowRenames = Effect.gen(function* slowRenames() {
+    const real = yield* FileSystem.FileSystem;
+
+    return FileSystem.FileSystem.of({
+      ...real,
+      rename: (from, to) =>
+        Effect.sleep(delay(from, to)).pipe(
+          Effect.andThen(real.rename(from, to))
+        ),
+    });
+  });
+
+  await run(
+    Effect.gen(function* takeOvers() {
+      const st = yield* Store.pipe(
+        Effect.provide(Layer.fresh(Store.layer)),
+        Effect.provideService(FileSystem.FileSystem, yield* slowRenames)
+      );
+
+      yield* Effect.forEach(
+        Array.from({ length: 4 }),
+        () => st.withLock(seal.id, writer),
+        { concurrency: "unbounded", discard: true }
+      );
+    }).pipe(Effect.timeout("10 seconds"))
+  );
+
+  assert.equal(most, 1);
+  assert.deepEqual(
+    fs
+      .readdirSync(join(state, seal.id))
+      .filter((name) => name.includes("mutation.lock")),
+    []
+  );
 });
 
 test("mutation lock excludes a separate process", async () => {

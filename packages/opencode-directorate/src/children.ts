@@ -3,7 +3,7 @@
 // changed, so callers write only changes.
 import { DateTime } from "effect";
 
-import { PANELIST, REFUTER } from "./model.ts";
+import { PANELIST, REFUTER, SCOUT } from "./model.ts";
 import type { Actor, Child, Ledger, Seal } from "./model.ts";
 
 export const childOutstanding = (seal: Seal) =>
@@ -110,7 +110,21 @@ const decided = (c: Child, ledger: Ledger) => {
   );
 };
 
-/** Failed children whose question no later run of the same agent (and model) completed, or whose entries stay open. */
+/** An Auditor question as an `answered` note names it: the `question:` line, with or without its label. */
+export const questionText = (text: string) =>
+  text.trim().replace(/^question:\s*/iu, "");
+
+/** An Auditor run whose question the Liaison recorded as answered itself. */
+const answered = (c: Child, ledger: Ledger) =>
+  c.agent === SCOUT &&
+  ledger.notes.some(
+    (n) => n.kind === "answered" && questionText(n.text) === childQuestion(c)
+  );
+
+/**
+ * Failed children whose question no later run of the same agent (and model) completed or the Liaison answered, or whose
+ * entries stay open.
+ */
 export const childFailures = (seal: Seal, ledger: Ledger) => {
   const done = new Set<string>();
 
@@ -122,11 +136,23 @@ export const childFailures = (seal: Seal, ledger: Ledger) => {
       }
 
       return (
-        c.status === "failed" && !done.has(childKey(c)) && !decided(c, ledger)
+        c.status === "failed" &&
+        !done.has(childKey(c)) &&
+        !decided(c, ledger) &&
+        !answered(c, ledger)
       );
     })
     .toReversed();
 };
+
+/** Auditor questions a review left unanswered: still running when it closed, or failed and never answered. */
+export const unansweredQuestions = (seal: Seal, ledger: Ledger) => [
+  ...new Set(
+    [...childOutstanding(seal), ...childFailures(seal, ledger)].flatMap((c) =>
+      c.agent === SCOUT ? [childQuestion(c)] : []
+    )
+  ),
+];
 
 const update = (seal: Seal, step: (c: Child) => Child): Seal | undefined => {
   const children = seal.children.map(step);

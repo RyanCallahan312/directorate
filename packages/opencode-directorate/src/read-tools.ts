@@ -27,6 +27,7 @@ import {
   positiveInt,
   str,
   strArr,
+  unlocked,
 } from "./tool.ts";
 import type { DefineTool } from "./tool.ts";
 
@@ -36,6 +37,8 @@ export const readTools = (tool: DefineTool) => {
       "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
     *execute(input, c) {
       return yield* locked(c, input.seal, function* execute(seal) {
+        // A step that began before lockdown must not record reads after it; a reported seal stays readable.
+        yield* unlocked(seal, c, "directorate_diff");
         const a = actor(c);
         const owner = a.session === seal.ownerSession;
         const reader = owner ? "owner" : a.session;

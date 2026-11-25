@@ -34,6 +34,7 @@ import {
 import type { Types } from "effect";
 import { TestClock } from "effect/testing";
 
+import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
 import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, SealJson } from "../src/model.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
 
@@ -1168,6 +1169,116 @@ test("/directorate-export forwards the request and the agent can list review dat
     earlier.reviews.map((review: { seal: string }) => review.seal),
     [recent]
   );
+});
+
+test("directorate_export lists the owner's reads under its session, not as a missing session", async (t) => {
+  const dir = repo();
+  const { call, S } = await harness(dir);
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const id = sealOf(content);
+  await call("directorate_diff", { seal: id });
+  assert.ok(sealJson(id).regions.some((r) => r.readBy.includes("owner")));
+
+  const bin = path.join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(
+    path.join(bin, "opencode"),
+    `#!/bin/sh
+case "$1:$2:$3" in
+  session:export:ses*) printf '{"info":{"id":"%s"},"messages":[]}\\n' "$3" ;;
+  api:get:/api/experimental/session/*/log\\?follow=false) printf 'data: {"type":"session.created"}\\n\\n' ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o700 }
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = [bin, originalPath].join(path.delimiter);
+  t.after(() => {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  const exported = await call(
+    "directorate_export",
+    { seal: id },
+    "build",
+    "requester"
+  );
+
+  const output = path.join(state, "exports");
+
+  const archive = path.join(
+    output,
+    present(readdirSync(output).find((name) => name.startsWith(`${id}-`)))
+  );
+
+  const manifest = JSON.parse(
+    execFileSync("unzip", ["-p", archive, "manifest.json"], {
+      encoding: "utf-8",
+    })
+  );
+
+  assert.deepEqual(manifest.sessions, [
+    {
+      id: S("lead"),
+      log: `sessions/${S("lead")}.sse`,
+      transcript: `sessions/${S("lead")}.json`,
+    },
+  ]);
+  assert.doesNotMatch(exported.content, /unavailable/u);
+});
+
+test("directorate_export_list pages by nextBefore through every review once, newest first", async () => {
+  const dir = repo();
+  const { call } = await harness(dir);
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const first = sealOf(content);
+  const template = sealJson(first);
+
+  const seeded = Array.from({ length: EXPORT_PAGE_SIZE + 2 }, (_, n) => {
+    const id = `directorate-20261026000000-e${n.toString(16).padStart(5, "0")}`;
+    mkdirSync(path.join(state, id));
+    writeFileSync(
+      path.join(state, id, "seal.json"),
+      Schema.encodeSync(SealJson)({ ...template, id, ownerSession: "" })
+    );
+
+    return id;
+  });
+
+  // Each page needs the previous page's cursor, so walk them one at a time.
+  const walk = async (before?: string): Promise<string[][]> => {
+    const result = await call(
+      "directorate_export_list",
+      before ? { before } : {},
+      "build",
+      "requester"
+    );
+
+    const page = JSON.parse(result.content);
+    const ids = page.reviews.map((review: { seal: string }) => review.seal);
+
+    return page.nextBefore === undefined
+      ? [ids]
+      : [ids, ...(await walk(page.nextBefore))];
+  };
+
+  const pages = await walk();
+
+  assert.equal(pages.length, 2);
+  assert.deepEqual(pages.flat(), [first, ...seeded].toSorted().toReversed());
 });
 
 test("/directorate-review forwards free-form requests and only offers setup questions for a bare command", async () => {
@@ -2829,6 +2940,58 @@ test("child events: early completion is reconciled; failure overrides idle", asy
   );
 });
 
+test("directorate_note answered: only the Liaison settles a failed Auditor's exact question", async () => {
+  const { S, call, launch, bus } = await harness(repo());
+
+  const contentResult = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult.content);
+
+  await call("directorate_diff", { seal });
+
+  const fin = await launch(
+    "c1",
+    "directorate_auditor",
+    "seal: x\nquestion: q2",
+    "b",
+    "running"
+  );
+
+  await fin();
+  await bus.emit({
+    data: { sessionID: S("b") },
+    type: "session.execution.failed",
+  });
+  await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
+
+  await assert.rejects(
+    call(
+      "directorate_note",
+      { kind: "answered", seal, text: "q2" },
+      "directorate_auditor",
+      "scout"
+    ),
+    /Only directorate_liaison/u
+  );
+  await assert.rejects(
+    call("directorate_note", { kind: "answered", seal, text: "q3" }),
+    /verbatim: "q2"/u
+  );
+  await call("directorate_note", {
+    kind: "answered",
+    seal,
+    text: "question: q2",
+  });
+
+  const reported = await call("directorate_report", { seal });
+  const md = reported.content;
+  assert.match(md, /status: \*\*complete\*\*/u);
+  assert.doesNotMatch(md, /did not complete|unanswered/iu);
+});
+
 test("directorate_wait: the Liaison waits in its turn until a run finishes, and hears what it recorded", async () => {
   const { S, call, launch, bus } = await harness(repo());
 
@@ -3519,6 +3682,68 @@ test("a launch the Directive was filed before it linked is stopped when its chil
   assert.deepEqual(interrupted, [S("late")]);
 });
 
+test("a launch the Directive was filed before it linked is stopped, not adopted, after the Liaison seals a new review", async () => {
+  const { S, bus, call, hooks, interrupted } = await harness(repo());
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+
+  const launch = (id: string): ToolBeforeEvent => ({
+    agent: "directorate_liaison",
+    id,
+    input: { agent: "directorate_auditor", description: id, prompt: "q" },
+    sessionID: S("lead"),
+    tool: "subagent",
+  });
+
+  const late = launch("late");
+  await present(hooks["tool.execute.before"])(late);
+  await present(hooks["tool.execute.before"])(launch("missed"));
+
+  // Each gate pushes back once; the Directive is filed with both launches still unlinked.
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Coverage\)/u
+  );
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Active Personnel\)/u
+  );
+  await call("directorate_report", { seal });
+
+  const replacement = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const next = sealOf(replacement.content);
+
+  await bus.emit({
+    data: {
+      agent: "directorate_auditor",
+      parentID: S("lead"),
+      sessionID: S("late"),
+      title: late.input?.description,
+    },
+    type: "session.created",
+  });
+  // A child whose session.created was missed: only the subagent tool's result names it.
+  await present(hooks["tool.execute.after"])({
+    id: "missed",
+    result: {
+      content: `<subagent sessionID="${S("missed")}" state="running">`,
+      metadata: { metadata: { sessionID: S("missed"), status: "running" } },
+    },
+    sessionID: S("lead"),
+    status: "completed",
+    tool: "subagent",
+  });
+  assert.deepEqual(interrupted, [S("late"), S("missed")]);
+  assert.deepEqual(sealJson(next).children, []);
+});
+
 test("a subagent launch rejected before it runs (a drain denial) leaves no failed child", async () => {
   const { S, call, hooks } = await harness(repo());
 
@@ -3548,6 +3773,99 @@ test("a subagent launch rejected before it runs (a drain denial) leaves no faile
   });
   assert.deepEqual(sealJson(seal).children, []);
 });
+
+test(
+  "the watchdog reads a reported seal once and still files an overdue one",
+  { timeout: 10_000 },
+  async () => {
+    const dir = repo();
+    const start = Date.now();
+
+    /** Moves a seal's deadline back to the start; `reopen` drops its report too, as no reported seal could. */
+    const overdue = (id: string, reopen = false) => {
+      const file = path.join(state, id, "seal.json");
+      const s = JSON.parse(readFileSync(file, "utf-8"));
+
+      if (reopen) {
+        Reflect.deleteProperty(s, "reportedAt");
+      }
+
+      writeFileSync(
+        file,
+        JSON.stringify({ ...s, deadline: new Date(start).toISOString() })
+      );
+    };
+
+    await Effect.runPromise(
+      Effect.gen(function* watchdogTest() {
+        yield* TestClock.setTime(start);
+        const run = Effect.runPromiseWith(yield* Effect.context());
+        const h = yield* Effect.tryPromise(() => harness(dir, "reread", run));
+
+        // A second apart, so the newest-first sweep meets them in reverse.
+        const sealIn = (session: string, minutes: number) =>
+          Effect.tryPromise(() =>
+            h.call(
+              "directorate_seal",
+              { budget_minutes: minutes, target: { kind: "local" } },
+              "directorate_liaison",
+              session
+            )
+          ).pipe(
+            Effect.map((r) => h.sealOf(r.content)),
+            Effect.tap(() => TestClock.adjust("1 second"))
+          );
+
+        const first = yield* sealIn("first", 2);
+        const second = yield* sealIn("second", 60);
+        const done = yield* sealIn("lead", 60);
+
+        // Each gate pushes back once.
+        for (let i = 0; i < 3; i += 1) {
+          yield* Effect.tryPromise(() =>
+            h.call("directorate_report", { seal: done })
+          ).pipe(Effect.ignore);
+        }
+
+        assert.ok(sealJson(done).reportedAt);
+        yield* Scope.close(h.scope, Exit.void);
+        yield* TestClock.adjust("5 minutes");
+
+        const reloaded = yield* Effect.tryPromise(() =>
+          harness(dir, "reread", run)
+        );
+
+        // The sweep's file IO runs in real time, which the TestClock does not advance.
+        const until = (count: number, tries = 500): Promise<string[]> =>
+          reloaded.notices.length >= count || tries === 0
+            ? Promise.resolve(reloaded.notices)
+            : delay(10).then(() => until(count, tries - 1));
+
+        const notices = (count: number) => Effect.promise(() => until(count));
+
+        yield* TestClock.adjust("30 seconds");
+        assert.match(
+          (yield* notices(1)).join("\n"),
+          new RegExp(`the directive for ${first}`, "u")
+        );
+
+        // A sweep that read the reported seal again would now file it, before the second.
+        overdue(done, true);
+        overdue(second);
+        yield* TestClock.adjust("30 seconds");
+
+        const seen = yield* notices(2);
+        assert.equal(seen.length, 2);
+        assert.match(
+          present(seen[1]),
+          new RegExp(`the directive for ${second}`, "u")
+        );
+        assert.equal(sealJson(done).reportedAt, undefined);
+        yield* Scope.close(reloaded.scope, Exit.void);
+      }).pipe(Effect.provide(TestClock.layer()))
+    );
+  }
+);
 
 test("hooks write the seal only for changes: unrelated subagents and running auditors' tool calls leave it alone", async () => {
   const { S, call, launch, hooks, bus } = await harness(repo());
@@ -4025,6 +4343,50 @@ test("a refresh from a model step that began before lockdown does not run after 
   );
   assert.equal(sealJson(seal).gen, 0);
   assert.equal(sealJson(seal).refreshes, 0);
+});
+
+test("a diff read from a model step that began before lockdown records no coverage after it", async () => {
+  const { S, call, hooks } = await harness(repo());
+
+  const { content } = await call("directorate_seal", {
+    budget_minutes: 10,
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(content);
+  shiftClock(seal, 7);
+
+  const drain: SessionHookEvent = {
+    agent: "directorate_liaison",
+    sessionID: S("lead"),
+    system: [],
+    tools: { directorate_diff: {}, directorate_report: {} },
+  };
+
+  await present(hooks["session.context"])(drain);
+  assert.ok("directorate_diff" in drain.tools, "offered during drain");
+
+  // The steps' calls run against those requests' tools, after the budget locked.
+  shiftClock(seal, 11);
+  await assert.rejects(
+    call("directorate_diff", { seal }),
+    /Directorate lockdown: .* directorate_diff no longer runs\. Call directorate_report now/u
+  );
+  await assert.rejects(
+    call("directorate_diff", { seal }, "directorate_auditor", "scout"),
+    /Directorate lockdown: .* directorate_diff no longer runs\. Hand off what you hold now/u
+  );
+  assert.ok(
+    sealJson(seal).regions.every((r) => !r.ownerRead && !r.readBy.length),
+    "no read receipts after lockdown"
+  );
+
+  const report = await call("directorate_report", { seal });
+  assert.match(report.content, /status: \*\*partial\*\*/u);
+
+  // A reported seal stays readable.
+  const reread = await call("directorate_diff", { seal });
+  assert.match(reread.content, /\[coverage 0\//u);
 });
 
 test("the report gate does not ask for Seat dispatches during drain", async () => {

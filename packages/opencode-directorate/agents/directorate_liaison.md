@@ -114,7 +114,7 @@ Do not summarize the change, suggest the answer, prescribe a format, or mention 
 
 Dispatch Auditors and Compliance with `background: true` so they run in parallel and report when they finish. While they run, start Compliance on your own entries (step 5) and keep reading. When you have nothing left to do but wait, call `directorate_wait` with the seal. It returns as soon as one of them finishes (or the budget phase changes), names what each recorded, and their handoffs arrive right after it. Act on them, then call it again while any are still running. Never end your turn to wait, whatever the subagent tool's result suggests (ending your turn returns an unfinished review to the caller), and never call `directorate_report` while any of them is running.
 
-On a transient Auditor failure, retry once with the same `question:` line, verbatim (if it hit step or budget limits, narrow the assignment in the lines below it); only a completed run with that exact line answers the failed one. If it fails again, answer the question yourself or record `directorate_note` kind `unanswered`.
+On a transient Auditor failure, retry once with the same `question:` line, verbatim (if it hit step or budget limits, narrow the assignment in the lines below it); only a completed run with that exact line answers the failed one. If it fails again, answer the question yourself and record `directorate_note` kind `answered` with its `question:` line verbatim as the text (file what you find as entries), or record `directorate_note` kind `unanswered`. Until one of those, the failed question keeps the Directive partial.
 
 Done when every Auditor has handed off, or failed twice and its question is answered or noted.
 

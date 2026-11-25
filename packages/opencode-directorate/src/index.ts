@@ -1102,7 +1102,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
       yield* sessions.launchSettled(ev.id);
       const seal = yield* sessions.active(ev.sessionID);
 
-      if (!seal) {
+      // Launched for a review that is no longer this session's, even if the Liaison has sealed another since.
+      if (!seal || (launchedFor && launchedFor !== seal.id)) {
         return yield* stopUnowned(ev.id, launchedFor, meta.sessionID);
       }
 
@@ -1170,36 +1171,44 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
     const seal = yield* sessions.active(parentID);
 
-    if (!seal) {
-      // Reported between launch and link: stop the child, which no review owns now.
-      for (const id of yield* sessions.launchesBy(parentID)) {
-        const reported = yield* store
-          .load(id)
-          .pipe(Effect.orElseSucceed(() => null));
-
-        if (
-          reported?.reportedAt &&
-          claimed(reported, sessionID, agent, title)
-        ) {
-          yield* sessions.interrupt(sessionID);
-
-          return;
-        }
+    // Reported between launch and link, even if the Liaison has sealed another review since: stop the child, which no
+    // review owns now.
+    for (const id of yield* sessions.launchesBy(parentID)) {
+      if (id === seal?.id) {
+        continue;
       }
 
+      const reported = yield* store
+        .load(id)
+        .pipe(Effect.orElseSucceed(() => null));
+
+      if (reported?.reportedAt && claimed(reported, sessionID, agent, title)) {
+        yield* sessions.interrupt(sessionID);
+
+        return;
+      }
+    }
+
+    if (!seal || seal.ownerSession !== parentID) {
       return;
     }
 
-    if (seal.ownerSession !== parentID) {
-      return;
-    }
-
+    let linked = false;
     yield* sessions
-      .update(seal.id, (s) => claimed(s, sessionID, agent, title))
+      .update(seal.id, (s) => {
+        const next = claimed(s, sessionID, agent, title);
+        linked =
+          next !== undefined || s.children.some((c) => c.session === sessionID);
+
+        return next;
+      })
       .pipe(
         ignore(`could not link ${agent} ${sessionID} to ${seal.id}`, "Warn")
       );
-    yield* sessions.bind(sessionID, seal.id);
+
+    if (linked) {
+      yield* sessions.bind(sessionID, seal.id);
+    }
   });
 
   const childEvent = Effect.fn("Directorate.childEvent")(function* childEvent(
@@ -1296,37 +1305,38 @@ const register = Effect.fn("Directorate.register")(function* register() {
   // ---------- the budget ----------
   // Past the deadline and its grace period, the watchdog reports for the Liaison. One scoped sweep at a time; reload
   // interrupts both the sweep and the event consumer.
+  /** Seals a sweep found reported, never read again: a reported seal never reopens. */
+  const reported = new Set<string>();
+
   const sweep = Effect.gen(function* sweep() {
-    const ids = yield* sessions.boundSeals;
+    const bound = yield* sessions.boundSeals;
     const now = yield* Clock.currentTimeMillis;
 
-    const overdue = (seal: Seal) =>
-      !seal.reportedAt &&
-      now >= DateTime.toEpochMillis(seal.deadline) + GRACE_MS;
-
-    // After a reload no session is bound yet: recover this instance's reviews, wherever their repository is, and any
-    // review of this repository.
-    for (const seal of yield* store.list()) {
-      if (
-        overdue(seal) &&
-        (seal.host === host.location.directory ||
-          (myRepo !== null && seal.repo === myRepo))
-      ) {
-        ids.add(seal.id);
+    for (const seal of yield* store.listWithout(reported)) {
+      if (seal.reportedAt) {
+        reported.add(seal.id);
+        continue;
       }
-    }
 
-    for (const id of ids) {
-      const seal = yield* store.load(id).pipe(Effect.orElseSucceed(() => null));
-
-      if (!seal || !overdue(seal)) {
+      // After a reload no session is bound yet: recover this instance's reviews, wherever their repository is, and any
+      // review of this repository.
+      if (
+        now < DateTime.toEpochMillis(seal.deadline) + GRACE_MS ||
+        !(
+          bound.has(seal.id) ||
+          seal.host === host.location.directory ||
+          (myRepo !== null && seal.repo === myRepo)
+        )
+      ) {
         continue;
       }
 
       yield* autoReport(
-        id,
+        seal.id,
         "the Liaison did not report before lockdown; filed automatically"
-      ).pipe(ignore(`could not save the deadline report for ${id}`, "Warn"));
+      ).pipe(
+        ignore(`could not save the deadline report for ${seal.id}`, "Warn")
+      );
     }
   });
 

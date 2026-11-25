@@ -321,8 +321,12 @@ const make = Effect.gen(function* make() {
     return changed.map((f) => f.path);
   });
 
-  /** Tracked and untracked paths that differ from `base` in the working tree. */
-  const changedNames = Effect.fn("Git.changedNames")(function* changedNames(
+  /**
+   * How the working tree differs from `base`, as the post-image the diff describes: every changed path; those `gone` from it,
+   * which git's diff deletes even where an ignored working copy remains (a path removed from the index is part of the
+   * post-image only while it is untracked and not ignored); and those `hidden` from git's diff (see unwatched).
+   */
+  const changes = Effect.fn("Git.changes")(function* changes(
     repo: string,
     base: string,
     paths?: readonly string[]
@@ -331,7 +335,7 @@ const make = Effect.gen(function* make() {
       [
         run(repo, [
           "diff",
-          "--name-only",
+          "--name-status",
           "-z",
           "--no-renames",
           base,
@@ -344,10 +348,36 @@ const make = Effect.gen(function* make() {
       { concurrency: 3 }
     );
 
-    return [
-      ...new Set([...tracked.split("\0").filter(Boolean), ...extra, ...hidden]),
-    ].toSorted();
+    // Without renames, each record is a status and one path.
+    const fields = tracked.split("\0");
+    const diffed: string[] = [];
+    const deleted: string[] = [];
+
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      diffed.push(fields[i + 1] ?? "");
+
+      if (fields[i] === "D") {
+        deleted.push(fields[i + 1] ?? "");
+      }
+    }
+
+    const listed = new Set(extra);
+
+    return {
+      gone: new Set(deleted.filter((p) => !listed.has(p))),
+      hidden,
+      names: [...new Set([...diffed, ...extra, ...hidden])]
+        .filter(Boolean)
+        .toSorted(),
+    };
   });
+
+  /** Tracked and untracked paths that differ from `base` in the working tree. */
+  const changedNames = (
+    repo: string,
+    base: string,
+    paths?: readonly string[]
+  ) => changes(repo, base, paths).pipe(Effect.map((c) => c.names));
 
   const diffNames = (repo: string, a: string, b: string) =>
     a === b
@@ -397,6 +427,7 @@ const make = Effect.gen(function* make() {
   return {
     blob,
     changedNames,
+    changes,
     defaultBranch,
     diffNames,
     hasCommit,

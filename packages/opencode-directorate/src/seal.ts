@@ -13,6 +13,7 @@ import {
 } from "effect";
 import { Hex } from "effect/encoding";
 
+import { unansweredQuestions } from "./children.ts";
 import { depsOf, inDependencyDir, readable } from "./content.ts";
 import { isRead } from "./coverage.ts";
 import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
@@ -89,78 +90,105 @@ const gitFileMode = Match.type<
   Match.orElse(() => "100644")
 );
 
-const rewriteDiffHeader = (line: string, from: string, b: string): string => {
+const rewriteDiffHeader = (line: string, from: string, to: string): string => {
   if (line.startsWith("--- ")) {
     return `--- ${from}`;
   }
 
   if (line.startsWith("+++ ")) {
-    return `+++ ${b}`;
+    return `+++ ${to}`;
   }
 
   if (line.startsWith("Binary files ")) {
-    return `Binary files ${from} and ${b} differ`;
+    return `Binary files ${from} and ${to} differ`;
   }
 
   return line;
 };
 
 const diffModeLines = (
-  hasOld: boolean,
   oldMode: string | undefined,
-  newMode: string
+  newMode: string | undefined
 ): string[] => {
-  if (!hasOld) {
+  if (newMode === undefined) {
+    return oldMode === undefined ? [] : [`deleted file mode ${oldMode}`];
+  }
+
+  if (oldMode === undefined) {
     return [`new file mode ${newMode}`];
   }
 
-  if (oldMode === newMode) {
-    return [];
-  }
-
-  return [`old mode ${oldMode}`, `new mode ${newMode}`];
+  return oldMode === newMode
+    ? []
+    : [`old mode ${oldMode}`, `new mode ${newMode}`];
 };
 
-/** An untracked file as an addition or a net diff when it replaces a staged deletion. */
-const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
-  function* untrackedPiece(
+/** A path's bytes and git mode on one side of a change. */
+interface Version {
+  readonly buf: Buffer;
+  readonly mode: string;
+}
+
+/** Whether two versions match; a base symlink's blob is its bare link text. */
+const sameVersion = (old: Version | undefined, now: Version | undefined) =>
+  old === undefined || now === undefined
+    ? old === now
+    : old.mode === now.mode &&
+      old.buf.equals(
+        old.mode === "120000"
+          ? now.buf.subarray("symlink -> ".length, -1)
+          : now.buf
+      );
+
+/** A path's git mode at the base, without reading it, or undefined when the base has no such entry. */
+const baseMode = Effect.fnUntraced(function* baseMode(
+  repo: string,
+  base: string,
+  path: string
+) {
+  const out = yield* (yield* Git).run(repo, [
+    "ls-tree",
+    "-z",
+    base,
+    "--",
+    path,
+  ]);
+
+  return out.split(" ", 1)[0] || undefined;
+});
+
+/** A path's version at the base, or undefined when the base has no such blob (a submodule has none). */
+const baseVersion = Effect.fnUntraced(function* baseVersion(
+  repo: string,
+  base: string,
+  path: string
+) {
+  const mode = yield* baseMode(repo, base, path);
+
+  const buf =
+    mode === undefined ? undefined : yield* (yield* Git).blob(repo, base, path);
+
+  return mode === undefined || buf === undefined
+    ? undefined
+    : ({ buf, mode } satisfies Version);
+});
+
+/**
+ * One path's patch from `old` to `now`, either of which may be absent, or undefined when they match. It diffs the captured
+ * bytes, not the live path, so a symlink stays its link text.
+ */
+const versionPatch = Effect.fn("Directorate.versionPatch")(
+  function* versionPatch(
     repo: string,
     path: string,
-    base: string,
-    deleted?: Piece
+    old: Version | undefined,
+    now: Version | undefined
   ) {
-    const code = deleted ? "M" : "A";
-
-    if (exclusionReason(path)) {
-      return { code, lines: [], path } satisfies Piece;
-    }
-
-    const { buf, mode } = yield* (yield* Worktree).entry(repo, path);
-
-    if (buf === undefined) {
-      return deleted;
-    }
-
-    const git = yield* Git;
-    const old = deleted ? yield* git.blob(repo, base, path) : undefined;
-
-    const oldMode = deleted?.lines
-      .find((line) => line.startsWith("deleted file mode "))
-      ?.slice("deleted file mode ".length);
-
-    const newMode = gitFileMode(mode);
-
-    const sameBytes = old?.equals(
-      oldMode === "120000" && mode === "link"
-        ? buf.subarray("symlink -> ".length, -1)
-        : buf
-    );
-
-    if (sameBytes && oldMode === newMode) {
+    if (sameVersion(old, now)) {
       return;
     }
 
-    // Diff the captured bytes, not the live path, so a symlink stays its link text.
+    const git = yield* Git;
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* Path.Path;
 
@@ -168,13 +196,22 @@ const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
       prefix: "directorate-delta-",
     });
 
-    const file = paths.join(scratch, "b");
-    const original = old ? paths.join(scratch, "a") : "/dev/null";
-    yield* fs.writeFile(file, buf);
+    const scratchFile = Effect.fnUntraced(function* scratchFile(
+      name: string,
+      version: Version | undefined
+    ) {
+      if (version === undefined) {
+        return "/dev/null";
+      }
 
-    if (old) {
-      yield* fs.writeFile(original, old);
-    }
+      const file = paths.join(scratch, name);
+      yield* fs.writeFile(file, version.buf);
+
+      return file;
+    });
+
+    const original = yield* scratchFile("a", old);
+    const file = yield* scratchFile("b", now);
 
     const body = (yield* git.run(
       repo,
@@ -200,7 +237,6 @@ const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
 
     const a = shown(`a/${path}`);
     const b = shown(`b/${path}`);
-    const from = old ? a : "/dev/null";
     const endOfHeader = body.findIndex((l) => l.startsWith("@@"));
 
     const headers =
@@ -208,21 +244,106 @@ const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
         ? []
         : body
             .slice(start, endOfHeader === -1 ? undefined : endOfHeader)
-            .map((l) => rewriteDiffHeader(l, from, b));
+            .map((l) =>
+              rewriteDiffHeader(l, old ? a : "/dev/null", now ? b : "/dev/null")
+            );
 
-    return {
-      code,
-      lines: [
-        ...(deleted && !old ? deleted.lines : []),
-        `diff --git ${a} ${b}`,
-        ...diffModeLines(Boolean(old), oldMode, newMode),
-        ...headers,
-        ...(endOfHeader === -1 ? [] : body.slice(endOfHeader)),
-      ],
-      path,
-    } satisfies Piece;
+    return [
+      `diff --git ${a} ${b}`,
+      ...diffModeLines(old?.mode, now?.mode),
+      ...headers,
+      ...(endOfHeader === -1 ? [] : body.slice(endOfHeader)),
+    ];
   },
   Effect.scoped
+);
+
+/** A captured worktree entry as a version, or undefined when absent. */
+const liveVersion = (e: {
+  readonly buf?: Buffer;
+  readonly mode: Parameters<typeof gitFileMode>[0];
+}) =>
+  e.buf === undefined
+    ? undefined
+    : ({ buf: e.buf, mode: gitFileMode(e.mode) } satisfies Version);
+
+/** An untracked file as an addition or a net diff when it replaces a staged deletion. */
+const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
+  function* untrackedPiece(
+    repo: string,
+    path: string,
+    base: string,
+    deleted?: Piece
+  ) {
+    const code = deleted ? "M" : "A";
+
+    if (exclusionReason(path)) {
+      return { code, lines: [], path } satisfies Piece;
+    }
+
+    const now = liveVersion(yield* (yield* Worktree).entry(repo, path));
+
+    if (now === undefined) {
+      return deleted;
+    }
+
+    const old = deleted ? yield* baseVersion(repo, base, path) : undefined;
+    const lines = yield* versionPatch(repo, path, old, now);
+
+    return (
+      lines && {
+        code,
+        lines: [...(deleted && !old ? deleted.lines : []), ...lines],
+        path,
+      }
+    );
+  }
+);
+
+const changeCode = (old: boolean, now: boolean) => {
+  if (!old) {
+    return "A";
+  }
+
+  return now ? "M" : "D";
+};
+
+/**
+ * A tracked file git is told not to check (see Git.unwatched), from its base version to its captured one: git's diff shows
+ * its index entry instead. `removed` diffs the source of a rename into such a file, which is deleted.
+ */
+const unwatchedPiece = Effect.fn("Directorate.unwatchedPiece")(
+  function* unwatchedPiece(
+    repo: string,
+    path: string,
+    base: string,
+    removed = false
+  ) {
+    const wt = yield* Worktree;
+
+    if (exclusionReason(path)) {
+      const here = !removed && (yield* wt.present(repo, path));
+      const mode = yield* baseMode(repo, base, path);
+
+      return {
+        code: changeCode(mode !== undefined, here),
+        lines: [],
+        path,
+      } satisfies Piece;
+    }
+
+    const old = yield* baseVersion(repo, base, path);
+    const now = removed ? undefined : liveVersion(yield* wt.entry(repo, path));
+    const lines = yield* versionPatch(repo, path, old, now);
+
+    return (
+      lines && {
+        code: changeCode(old !== undefined, now !== undefined),
+        lines,
+        path,
+      }
+    );
+  }
 );
 
 /** Paths targets: every file in scope as whole-file regions, numbered in file order. Withheld files are never read. */
@@ -336,10 +457,14 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
   }
 );
 
-/** Diff targets: the base→post-image diff (untracked files as additions), with withheld files reduced to stubs. */
+/**
+ * Diff targets: the base→post-image diff (untracked files as additions, and `unwatched` files git's diff cannot see from
+ * their captured bytes), with withheld files reduced to stubs.
+ */
 const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   seal: Seal,
-  scope: readonly string[] | undefined
+  scope: readonly string[] | undefined,
+  unwatched: readonly string[]
 ) {
   const git = yield* Git;
   const worktree = seal.postImage === "worktree";
@@ -377,9 +502,30 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
     { concurrency: IO_CONCURRENCY }
   );
 
+  // git diffs an unwatched file as its index entry, so its piece, and the deletion of a rename's source, come from the bytes.
+  const unwatchedNames = new Set(unwatched);
+  const misread = tracked.filter((p) => unwatchedNames.has(p.path));
+
+  const rediffed = yield* Effect.forEach(
+    [
+      ...unwatched.map((path) => ({ path, removed: false })),
+      ...misread.flatMap((p) =>
+        p.code === "R" && p.oldPath !== undefined
+          ? [{ path: p.oldPath, removed: true }]
+          : []
+      ),
+    ],
+    ({ path, removed }) =>
+      unwatchedPiece(seal.repo, path, seal.baseSha, removed),
+    { concurrency: IO_CONCURRENCY }
+  );
+
   const { text, files } = assemble([
-    ...tracked.filter((p) => replacements.get(p.path) !== p),
+    ...tracked.filter(
+      (p) => replacements.get(p.path) !== p && !unwatchedNames.has(p.path)
+    ),
     ...extra.filter(Predicate.isNotUndefined),
+    ...rediffed.filter(Predicate.isNotUndefined),
   ]);
 
   const regions = yield* buildRegions(files, text);
@@ -414,14 +560,23 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
   const worktree = seal.postImage === "worktree";
   yield* store.resetSnapshot(seal);
 
-  const changed = worktree
-    ? yield* (yield* Git).changedNames(top, seal.baseSha, scope)
-    : [];
+  const {
+    gone,
+    hidden,
+    names: changed,
+  } = worktree
+    ? yield* (yield* Git).changes(top, seal.baseSha, scope)
+    : { gone: new Set<string>(), hidden: [], names: [] };
 
   // Sign every changed path, snapshotting those not withheld by name; a secret-like path is signed by presence, never read.
+  // A path gone from the post-image is deleted, as the diff has it, whatever working copy remains.
   const signed = yield* Effect.forEach(
     changed,
     Effect.fnUntraced(function* signed(f) {
+      if (gone.has(f)) {
+        return [f, "deleted"] as const;
+      }
+
       if (isSecret(f)) {
         return [f, yield* wt.signWithheld(top, f)] as const;
       }
@@ -444,7 +599,7 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
   const { text, files, regions }: Captured =
     seal.target.kind === "paths"
       ? yield* capturePaths(top, scope, new Set(changed))
-      : yield* captureDiff(seal, scope);
+      : yield* captureDiff(seal, scope, hidden);
 
   // A file renamed from a withheld path is withheld too: its content came from there.
   yield* Effect.forEach(
@@ -980,9 +1135,15 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           ledger,
           reopened,
           seal,
-          unanswered: input.ledger.notes
-            .filter((n) => n.kind === "unanswered")
-            .map((n) => n.text),
+          // Explicit notes, and Auditor questions the earlier review left without an answer.
+          unanswered: [
+            ...new Set([
+              ...input.ledger.notes
+                .filter((n) => n.kind === "unanswered")
+                .map((n) => n.text),
+              ...unansweredQuestions(prior, input.ledger),
+            ]),
+          ],
         };
       }).pipe(
         settled(

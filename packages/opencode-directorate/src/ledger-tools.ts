@@ -1,7 +1,12 @@
 // Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
 import { DateTime, Effect, Function, Schema } from "effect";
 
-import { actorName } from "./children.ts";
+import {
+  actorName,
+  childFailures,
+  childQuestion,
+  questionText,
+} from "./children.ts";
 import { checkEvidence, checkQuote } from "./content.ts";
 import { coverageSummary } from "./coverage.ts";
 import { failure, ReviewError } from "./error.ts";
@@ -20,6 +25,8 @@ import {
   NoteKind,
   PANELIST,
   RepoPath,
+  REVIEWER,
+  SCOUT,
   SeveritySchema,
   SideSchema,
   VerdictKind,
@@ -390,7 +397,7 @@ export const ledgerTools = (tool: DefineTool) => {
 
   tool({
     description:
-      "Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial.",
+      "Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial. directorate_liaison only: kind answered, with text = a failed Auditor's question: line verbatim, records that you answered it yourself, so it no longer counts as unanswered.",
     *execute(input, c) {
       return yield* mutate(
         c,
@@ -399,6 +406,30 @@ export const ledgerTools = (tool: DefineTool) => {
         function* execute(seal) {
           const store = yield* Store;
           const ledger = yield* store.loadLedger(seal.id);
+          let { text } = input;
+
+          if (input.kind === "answered") {
+            if (c.agent !== REVIEWER) {
+              return yield* failure(
+                `Only ${REVIEWER} records an answered question.`
+              );
+            }
+
+            text = questionText(input.text);
+
+            const failed = childFailures(seal, ledger)
+              .filter((x) => x.agent === SCOUT)
+              .map(childQuestion);
+
+            if (!failed.includes(text)) {
+              return yield* failure(
+                failed.length
+                  ? `No failed Auditor asked "${text}". Pass one of these question lines verbatim: ${failed.map((q) => `"${q}"`).join("; ")}.`
+                  : "No failed Auditor question is unanswered."
+              );
+            }
+          }
+
           yield* store.saveLedger(seal.id, {
             ...ledger,
             notes: [
@@ -407,7 +438,7 @@ export const ledgerTools = (tool: DefineTool) => {
                 at: yield* DateTime.now,
                 by: actor(c),
                 kind: input.kind,
-                text: input.text,
+                text,
               },
             ],
           });

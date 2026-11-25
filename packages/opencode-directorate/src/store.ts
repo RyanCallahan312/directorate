@@ -91,6 +91,9 @@ const make = Effect.gen(function* make() {
     yield* fs.rename(tmp, path);
   }, Effect.scoped);
 
+  const removeDir = (dir: string) =>
+    fs.remove(dir, { force: true, recursive: true });
+
   /** Runs body under the seal's cross-process lock. */
   const withLock = Effect.fn("Store.withLock")(function* withLock<A, E, R>(
     id: string,
@@ -103,16 +106,24 @@ const make = Effect.gen(function* make() {
     }
 
     const path = file(id, "mutation.lock");
-    const holderFile = paths.join(path, "holder");
 
-    const readHolder = (dir = path) =>
+    const readHolder = () =>
       fs
-        .readFileString(paths.join(dir, "holder"))
+        .readFileString(paths.join(path, "holder"))
         .pipe(Effect.orElseSucceed(Function.constUndefined));
+
+    /** Removes the lock, moving it aside first: a removal in place would race a reclaimer's gate made inside it. */
+    const drop = Effect.fnUntraced(function* drop(reason: string) {
+      const aside = `${path}.${reason}-${yield* Random.nextIntBetween(0, 0xff_ff_ff)}`;
+
+      yield* fs.rename(path, aside);
+      yield* removeDir(aside);
+    });
 
     /**
      * Moves an orphaned lock aside: its holder process is gone or it is older than LOCK_STALE_MS (by mtime, for a lock
-     * without a holder record). A lock taken anew between the check and the rename is put back.
+     * without a holder record). One reclaimer per orphan: the gate lives inside the lock and leaves with it, and the
+     * holder record, unique to each lock, shows whether the orphan is still the lock that was judged.
      */
     const reclaim = Effect.fnUntraced(function* reclaim() {
       const now = yield* Clock.currentTimeMillis;
@@ -132,10 +143,10 @@ const make = Effect.gen(function* make() {
         return;
       }
 
-      const aside = `${path}.stale-${yield* Random.nextIntBetween(0, 0xff_ff_ff)}`;
+      const gate = paths.join(path, "reclaim");
 
       if (
-        !(yield* fs.rename(path, aside).pipe(
+        !(yield* fs.makeDirectory(gate).pipe(
           Effect.as(true),
           Effect.orElseSucceed(() => false)
         ))
@@ -143,32 +154,51 @@ const make = Effect.gen(function* make() {
         return;
       }
 
-      yield* (
-        (yield* readHolder(aside)) === text
-          ? fs.remove(aside, { force: true, recursive: true })
-          : fs.rename(aside, path)
-      ).pipe(Effect.ignore);
+      // The orphan was reclaimed and a new lock taken between the check and the gate: leave the new lock alone.
+      if ((yield* readHolder()) !== text) {
+        return yield* removeDir(gate).pipe(Effect.ignore);
+      }
+
+      yield* drop("stale").pipe(
+        Effect.catch(() => removeDir(gate)),
+        Effect.ignore
+      );
     });
 
     const acquire = Effect.acquireRelease(
       Effect.gen(function* lock() {
-        yield* fs.makeDirectory(path).pipe(
-          Effect.catchReason(
-            "PlatformError",
-            "AlreadyExists",
-            () => reclaim().pipe(Effect.andThen(Effect.fail(new LockBusy()))),
-            (_, e) => failure(`${id}: ${e.message}`)
-          )
-        );
-
         const holder = encodeHolder({
           at: yield* Clock.currentTimeMillis,
           pid: process.pid,
           token: String(yield* Random.nextInt),
         });
 
-        // Without a holder record the lock is judged by its age alone.
-        yield* fs.writeFileString(holderFile, holder).pipe(Effect.ignore);
+        // The lock appears with its holder record, so a lock's record identifies it from the moment it exists.
+        const tmp = yield* fs
+          .makeTempDirectory({ directory: file(id), prefix: ".mutation.lock-" })
+          .pipe(Effect.catch((error) => failure(`${id}: ${error.message}`)));
+
+        const discard = removeDir(tmp).pipe(Effect.ignore);
+
+        yield* fs
+          .writeFileString(paths.join(tmp, "holder"), holder)
+          .pipe(
+            Effect.catch((error) =>
+              discard.pipe(Effect.andThen(failure(`${id}: ${error.message}`)))
+            )
+          );
+
+        // Renaming onto a held lock fails because the lock directory is never empty.
+        yield* fs
+          .rename(tmp, path)
+          .pipe(
+            Effect.catch(() =>
+              discard.pipe(
+                Effect.andThen(reclaim()),
+                Effect.andThen(Effect.fail(new LockBusy()))
+              )
+            )
+          );
 
         return holder;
       }),
@@ -176,15 +206,14 @@ const make = Effect.gen(function* make() {
       (holder) =>
         readHolder().pipe(
           Effect.flatMap((text) =>
-            text === undefined || text === holder
-              ? fs.remove(path, { force: true, recursive: true })
-              : Effect.void
+            text === holder ? drop("released") : Effect.void
           ),
+          Effect.catchReason("PlatformError", "NotFound", () => Effect.void),
           Effect.orDie
         )
     );
 
-    // Retry outside acquisition: a waiting fiber can stop, but mkdir and release registration are atomic.
+    // Retry outside acquisition: a waiting fiber can stop, but placing the lock and release registration are atomic.
     return yield* Effect.scoped(
       Effect.andThen(
         acquire.pipe(
@@ -320,6 +349,19 @@ const make = Effect.gen(function* make() {
     return opts.limit ? out.slice(0, opts.limit) : out;
   });
 
+  /** Seals in the store except the `skip` ids, newest first, without reading the skipped ones. */
+  const listWithout = Effect.fn("Store.listWithout")(function* listWithout(
+    skip: ReadonlySet<string>
+  ) {
+    const seals = yield* Effect.forEach(
+      (yield* ids).filter((id) => !skip.has(id)),
+      (id) => load(id).pipe(Effect.orElseSucceed(Function.constUndefined)),
+      { concurrency: IO_CONCURRENCY }
+    );
+
+    return seals.filter((s): s is Seal => s !== undefined);
+  });
+
   /** Removes seals not written for KEEP_DAYS. */
   const gc = Effect.fn("Store.gc")(function* gc() {
     const now = yield* Clock.currentTimeMillis;
@@ -415,6 +457,7 @@ const make = Effect.gen(function* make() {
     dropSnapshot,
     gc,
     list,
+    listWithout,
     load,
     loadLedger,
     publish,
