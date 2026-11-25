@@ -253,7 +253,8 @@ const make = Effect.gen(function* make() {
     );
 
   const loadLedger = Effect.fn("Store.loadLedger")(function* loadLedger(
-    id: string
+    id: string,
+    options?: { required: boolean }
   ) {
     const raw = yield* fs
       .readFileString(file(id, "ledger.json"))
@@ -262,7 +263,9 @@ const make = Effect.gen(function* make() {
       );
 
     if (raw === undefined) {
-      return emptyLedger;
+      return options?.required
+        ? yield* failure(`The ledger for ${id} is missing.`)
+        : emptyLedger;
     }
 
     return yield* decodeLedger(raw).pipe(

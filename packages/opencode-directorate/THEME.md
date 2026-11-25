@@ -15,7 +15,7 @@ Target **Dial 2.4** (balanced weird, leaning slightly toward full surreal bureau
 
 - **Brand:** **The Directorate** (never `The Board`, `Quorum`, or `pf2`).
 - **Prefix:** `directorate*` (never `dir*`).
-- **Slash commands:** `/directorate-review`, `/directorate-configure`.
+- **Slash commands:** `/directorate-review`, `/directorate-ship`, `/directorate-configure`, `/directorate-export`.
 - **Skill:** `directorate-lenses` (kebab-case per Agent Skills spec).
 - **Config & state:** `directorate.json` (`$DIRECTORATE_SETTINGS`), `~/.local/state/opencode-directorate` (`$DIRECTORATE_STATE_DIR`), seal IDs `directorate-YYYYMMDDHHMMSS-<hex6>`.
 

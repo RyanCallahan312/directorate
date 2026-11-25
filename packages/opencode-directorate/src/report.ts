@@ -18,7 +18,14 @@ import { failure } from "./error.ts";
 import type { ReviewError } from "./error.ts";
 import { isSecret } from "./exclusions.ts";
 import { currentSeverity, RANK, resolvedTarget, unresolved } from "./ledger.ts";
-import type { Entry, Ledger, Region, Seal, Severity } from "./model.ts";
+import type {
+  DirectiveStatus,
+  Entry,
+  Ledger,
+  Region,
+  Seal,
+  Severity,
+} from "./model.ts";
 import { changedSinceSeal } from "./seal.ts";
 import { Store } from "./store.ts";
 import { currentFingerprint } from "./target.ts";
@@ -30,7 +37,7 @@ const SEV_LABEL: Record<Severity, string> = {
   minor: "Minor",
 };
 
-export type Status = "complete" | "partial" | "stale";
+export type Status = DirectiveStatus;
 
 /** For each confirmed entry, the panel seats that raised it or a duplicate of it. */
 const seatsRaising = (seal: Seal, ledger: Ledger) => {
@@ -609,11 +616,12 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
   );
 
   const status = opts.auto && a.status === "complete" ? "partial" : a.status;
+  const reasons = [...a.reasons, ...(opts.extraReasons ?? [])];
 
   const md = renderReport({
     approach: opts.approach,
     ledger,
-    reasons: [...a.reasons, ...(opts.extraReasons ?? [])],
+    reasons,
     seal: assessed,
     status,
     synthesis: opts.synthesis,
@@ -622,6 +630,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
   const reported: Seal = {
     ...assessed,
     autoReported: opts.auto || undefined,
+    directive: { reasons, status },
     reportedAt: yield* DateTime.now,
   };
 

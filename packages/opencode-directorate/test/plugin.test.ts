@@ -17,8 +17,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { runInThisContext } from "node:vm";
 
 import { Agent, Skill } from "@opencode/plugin/effect";
+import type {
+  SessionContext,
+  SessionIdle as IdleEvent,
+} from "@opencode/plugin/effect/session";
 import type { Plugin as TuiPlugin } from "@opencode/plugin/tui";
 import { Session } from "@opencode/schema/session";
+import type { SessionInbox } from "@opencode/schema/session-inbox";
+import { SessionMessage } from "@opencode/schema/session-message";
 import {
   Cause,
   ConfigProvider,
@@ -89,6 +95,10 @@ type CommandDefinition = Parameters<CommandEditor["add"]>[0];
 
 type SubmittedPrompt = Parameters<HostContext["session"]["prompt"]>[0];
 
+type SyntheticPrompt = Parameters<HostContext["session"]["synthetic"]>[0];
+
+type CommandInvocation = Parameters<CommandDefinition["execute"]>[0];
+
 const { default: tuiPlugin } = await import("../src/tui.ts");
 const { DirectorateRpc } = await import("../src/rpc.ts");
 
@@ -158,6 +168,10 @@ const eventBus = () => {
 
   let current: Deferred.Deferred<true> | undefined;
 
+  let gate:
+    | { entered: Deferred.Deferred<true>; release: Deferred.Deferred<true> }
+    | undefined;
+
   return {
     /** Resolves once the plugin has handled the event. */
     emit: (event: BusEvent) =>
@@ -171,7 +185,23 @@ const eventBus = () => {
           yield* Deferred.await(handled);
         })
       ),
-    subscribe: () =>
+    holdNext: () => {
+      const entered = Deferred.makeUnsafe<true>();
+      const release = Deferred.makeUnsafe<true>();
+      gate = { entered, release };
+
+      return {
+        entered: Effect.runPromise(Deferred.await(entered)),
+        release: () => Effect.runSync(Deferred.succeed(release, true)),
+      };
+    },
+    post: (event: BusEvent) => {
+      Queue.offerUnsafe(queue, {
+        event: { created: Date.now(), ...event },
+        handled: Deferred.makeUnsafe<true>(),
+      });
+    },
+    subscribe: ({ types }: { types?: readonly string[] } = {}) =>
       Stream.fromEffectRepeat(
         Effect.gen(function* subscribe() {
           if (current) {
@@ -181,9 +211,16 @@ const eventBus = () => {
           const next = yield* Queue.take(queue);
           current = next.handled;
 
+          if (gate) {
+            const { entered, release } = gate;
+            gate = undefined;
+            yield* Deferred.succeed(entered, true);
+            yield* Deferred.await(release);
+          }
+
           return next.event;
         })
-      ),
+      ).pipe(Stream.filter((event) => !types || types.includes(event.type))),
   };
 };
 
@@ -192,12 +229,31 @@ let uid = 0;
 /** A permission rule's denial, as the host reports it. */
 class Denied extends Data.TaggedError("Denied")<{ message: string }> {}
 
+const SessionNotFound = Schema.TaggedStruct("Session.NotFoundError", {
+  sessionID: Schema.String,
+});
+
+const inboxEntry = (
+  sessionID: Session.ID,
+  id = SessionMessage.ID.create()
+) => ({
+  id,
+  sessionID,
+  time: { created: DateTime.nowUnsafe() },
+});
+
 /** Host state that outlives a plugin reload: instruction entries per session, and each child session's parent. */
 const entries = new Map<string, Map<string, string>>();
 const parents = new Map<string, string>();
 
 /** Each session's agent, which the host records when the session is created. */
 const sessionAgents = new Map<string, string>();
+const movedSessions = new Map<string, string>();
+
+/** OpenCode persists plugin storage across reloads and shares it across locations. */
+const storage = new Map<string, Schema.Json>();
+
+afterEach(() => storage.clear());
 
 type JsonPrimitive = string | number | boolean | null | undefined;
 
@@ -226,6 +282,7 @@ interface RegisteredTool {
 
 interface SessionHookEvent {
   agent?: string;
+  messages?: SessionContext["messages"];
   sessionID: string;
   system: { text: string }[];
   tools: Record<string, Record<string, never>>;
@@ -274,6 +331,7 @@ interface Hooks {
   "permission.evaluate"?: (event: PermissionHookEvent) => Promise<void>;
   "session.compaction"?: (event: SessionHookEvent) => Promise<void>;
   "session.context"?: (event: SessionHookEvent) => Promise<void>;
+  "session.experimental.idle"?: (event: IdleEvent) => Promise<void>;
   "session.generate"?: (event: SessionHookEvent) => Promise<void>;
   "tool.execute.after"?: (event: ToolAfterEvent) => Promise<void>;
   "tool.execute.before"?: (event: ToolBeforeEvent) => Promise<void>;
@@ -362,7 +420,23 @@ const harness = async (
   }
 
   const prompts: SubmittedPrompt[] = [];
+  const synthetics: SyntheticPrompt[] = [];
+  const inbox: (SessionInbox.User | SessionInbox.Synthetic)[] = [];
+  const delivered = new Set<SessionMessage.ID>();
+  const checkpoints = new Map<string, SessionMessage.CompactionCompleted>();
+  const deleted = new Set<string>();
   const bus = eventBus();
+  let promptFailure: Error | undefined;
+
+  const enqueue = (item: SessionInbox.User | SessionInbox.Synthetic) => {
+    inbox.push(item);
+    bus.post({
+      data: { inboxID: item.id, item, sessionID: item.sessionID },
+      type: "session.inbox.enqueued",
+    });
+
+    return item;
+  };
 
   const ctx = {
     agent: {
@@ -462,19 +536,53 @@ const harness = async (
         }),
     },
     session: {
-      get: ({ sessionID }: { sessionID: string }) =>
-        Effect.succeed({
-          agent: sessionAgents.get(sessionID),
-          location: { directory: dir },
-          parentID: parents.get(sessionID),
+      context: ({ sessionID }: { sessionID: string }) =>
+        Effect.sync(() => {
+          const checkpoint = checkpoints.get(sessionID);
+
+          const messages = [...delivered]
+            .flatMap(
+              (id) =>
+                inbox.find(
+                  (item) => item.id === id && item.sessionID === sessionID
+                ) ?? []
+            )
+            .map(({ id, payload, time, type }) => ({
+              ...payload,
+              id,
+              time,
+              type,
+            }));
+
+          return checkpoint ? [checkpoint, ...messages] : messages;
         }),
+      get: ({ sessionID }: { sessionID: string }) =>
+        Effect.suspend(() =>
+          deleted.has(sessionID)
+            ? Effect.fail(SessionNotFound.make({ sessionID }))
+            : Effect.succeed({
+                agent: sessionAgents.get(sessionID),
+                location: { directory: movedSessions.get(sessionID) ?? dir },
+                parentID: parents.get(sessionID),
+              })
+        ),
       hook: (
-        name: "compaction" | "context" | "generate",
-        handler: (event: SessionHookEvent) => Effect.Effect<void>
+        name: "compaction" | "context" | "generate" | "experimental.idle",
+        handler: (event: SessionHookEvent | IdleEvent) => Effect.Effect<void>
       ) =>
         Effect.sync(() => {
-          hooks[`session.${name}`] = (event: SessionHookEvent) =>
-            run(handler(event));
+          const earlier =
+            name === "experimental.idle" ? undefined : hooks[`session.${name}`];
+
+          hooks[`session.${name}`] = async (
+            event: SessionHookEvent | IdleEvent
+          ) => {
+            if ("system" in event) {
+              await earlier?.(event);
+            }
+
+            await run(handler(event));
+          };
         }),
       instructions: {
         entry: {
@@ -510,16 +618,69 @@ const harness = async (
           interrupted.push(sessionID);
         }),
       prompt: (input: SubmittedPrompt) =>
-        Effect.sync(() => {
-          prompts.push(input);
+        Effect.suspend(() => {
+          const error = promptFailure;
+          promptFailure = undefined;
+
+          return error
+            ? Effect.fail(error)
+            : Effect.sync(() => {
+                const {
+                  delivery = "queue",
+                  files,
+                  id,
+                  metadata,
+                  sessionID,
+                  text,
+                } = input;
+
+                const item: SessionInbox.User = {
+                  ...inboxEntry(sessionID, id),
+                  delivery,
+                  payload: {
+                    files: files?.map((file) =>
+                      "uri" in file
+                        ? {
+                            data: "",
+                            mime: "text/plain",
+                            source: { type: "uri", uri: file.uri },
+                          }
+                        : file
+                    ),
+                    metadata,
+                    text,
+                  },
+                  type: "user",
+                };
+
+                prompts.push(input);
+
+                return enqueue(item);
+              });
         }),
-      synthetic: ({ text }: { text: string }) =>
+      synthetic: (input: SyntheticPrompt) =>
         Effect.sync(() => {
+          const {
+            text,
+            description,
+            delivery = "steer",
+            id,
+            metadata,
+            sessionID,
+          } = input;
+
+          const item: SessionInbox.Synthetic = {
+            ...inboxEntry(sessionID, id),
+            delivery,
+            payload: { description, metadata, text },
+            type: "synthetic",
+          };
+
+          synthetics.push(input);
           notices.push(text);
-        }).pipe(
-          Effect.andThen(Deferred.succeed(notified, text)),
-          Effect.asVoid
-        ),
+
+          return enqueue(item);
+        }).pipe(Effect.tap(() => Deferred.succeed(notified, input.text))),
     },
     skill: {
       transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
@@ -534,6 +695,18 @@ const harness = async (
             update: () => {},
           })
         ),
+    },
+    storage: {
+      get: (key: string) =>
+        Effect.sync(() => structuredClone(storage.get(key))),
+      remove: (key: string) =>
+        Effect.sync(() => {
+          storage.delete(key);
+        }),
+      set: (key: string, value: Schema.Json) =>
+        Effect.sync(() => {
+          storage.set(key, structuredClone(value));
+        }),
     },
     tool: {
       hook: (
@@ -599,6 +772,27 @@ const harness = async (
     );
   };
 
+  const createSession = async (
+    session: string,
+    agent: string,
+    parent?: string,
+    title?: string
+  ) => {
+    const sessionID = S(session);
+    const parentID = parent === undefined ? undefined : S(parent);
+
+    sessionAgents.set(sessionID, agent);
+
+    if (parentID !== undefined) {
+      parents.set(sessionID, parentID);
+    }
+
+    await bus.emit({
+      data: { agent, parentID, sessionID, title },
+      type: "session.created",
+    });
+  };
+
   /** As the subagent tool does: the before-hook, then the child session's creation (titled by the description); returns the after-hook. */
   const launch = async (
     callId: string,
@@ -617,17 +811,7 @@ const harness = async (
     };
 
     await present(hooks["tool.execute.before"])(event);
-    parents.set(S(child), S("lead"));
-    sessionAgents.set(S(child), agent);
-    await bus.emit({
-      data: {
-        agent,
-        parentID: S("lead"),
-        sessionID: S(child),
-        title: event.input?.description,
-      },
-      type: "session.created",
-    });
+    await createSession(child, agent, "lead", event.input?.description);
 
     return () =>
       present(hooks["tool.execute.after"])({
@@ -719,6 +903,71 @@ const harness = async (
       ),
   };
 
+  const idle = (session = "lead", background: IdleEvent["background"] = []) =>
+    present(hooks["session.experimental.idle"])({
+      background,
+      sessionID: Session.ID.make(S(session)),
+    });
+
+  const execution = (outcome: "started" | "succeeded", session = "lead") =>
+    bus.emit({
+      data: { sessionID: S(session) },
+      type: `session.execution.${outcome}`,
+    });
+
+  const modelContext = async (
+    sessionID: string,
+    hook: "context" | "compaction" = "context"
+  ) => {
+    const history = await run(ctx.session.context({ sessionID }));
+
+    const messages: SessionContext["messages"] = history.flatMap((item) => {
+      const text =
+        item.type === "compaction"
+          ? `<conversation-checkpoint>\n<summary>${item.summary}</summary>\n</conversation-checkpoint>`
+          : item.text;
+
+      return text
+        ? [
+            {
+              content: [{ text, type: "text" }],
+              id: item.id,
+              metadata: item.metadata,
+              role: "user",
+            },
+          ]
+        : [];
+    });
+
+    await present(hooks[`session.${hook}`])({
+      agent: "build",
+      messages,
+      sessionID,
+      system: [],
+      tools: {},
+    });
+
+    return messages;
+  };
+
+  const projectLatest = (session = "lead") => {
+    const sessionID = S(session);
+
+    const item = present(
+      inbox.findLast((entry) => entry.sessionID === sessionID)
+    );
+
+    delivered.add(item.id);
+
+    return {
+      delivery: bus.emit({
+        data: { inboxID: item.id, sessionID },
+        type: "session.inbox.delivered",
+      }),
+      id: item.id,
+    };
+  };
+
   return {
     S,
     agents,
@@ -727,18 +976,110 @@ const harness = async (
     call,
     client,
     commands,
+    compactHistory: (sessionID: string, summary: string) => {
+      for (const item of inbox) {
+        if (item.sessionID === sessionID) {
+          delivered.delete(item.id);
+        }
+      }
+
+      checkpoints.set(
+        sessionID,
+        SessionMessage.CompactionCompleted.make({
+          id: SessionMessage.ID.create(),
+          reason: "auto",
+          status: "completed",
+          summary,
+          time: { created: DateTime.nowUnsafe() },
+          type: "compaction",
+        })
+      );
+    },
+    createSession,
+    deleteSession: (session: string) => {
+      const sessionID = S(session);
+      deleted.add(sessionID);
+
+      return bus.emit({ data: { sessionID }, type: "session.deleted" });
+    },
+    deliver: async (session = "lead") => {
+      const sessionID = S(session);
+      const { delivery, id } = projectLatest(session);
+      await delivery;
+
+      const messages = await modelContext(sessionID);
+
+      return messages
+        .find((message) => message.id === id)
+        ?.content.flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join("\n");
+    },
+    execution,
+    finish: async (
+      session = "lead",
+      background: IdleEvent["background"] = []
+    ) => {
+      await idle(session, background);
+      await execution("succeeded", session);
+    },
     followUp,
     hooks,
+    idle,
     interrupted,
     launch,
+    modelContext,
+    move: (directory: string) => {
+      const sessionID = S("lead");
+      movedSessions.set(sessionID, directory);
+
+      return bus.emit({
+        data: { location: { directory }, sessionID },
+        type: "session.moved",
+      });
+    },
     notices,
     notified,
+    projectLatest,
+    projectOrdinary: (text: string) => {
+      const sessionID = Session.ID.make(S("lead"));
+
+      const item = enqueue({
+        ...inboxEntry(sessionID),
+        delivery: "steer",
+        payload: { text },
+        type: "user",
+      });
+
+      delivered.add(item.id);
+
+      return bus.emit({
+        data: { inboxID: item.id, sessionID },
+        type: "session.inbox.delivered",
+      });
+    },
     prompts,
+    rejectNextPrompt: (error: Error) => {
+      promptFailure = error;
+    },
     requests,
     rpcs,
     scope,
     sealOf,
+    ship: (
+      text: string,
+      session = "lead",
+      delivery: CommandInvocation["delivery"] = "queue",
+      files?: CommandInvocation["prompt"]["files"]
+    ) =>
+      run(
+        present(commands.get("directorate-ship")).execute({
+          delivery,
+          prompt: { files, text },
+          sessionID: Session.ID.make(S(session)),
+        })
+      ),
     skills,
+    synthetics,
     tools,
   };
 };
@@ -748,19 +1089,29 @@ const decodeSeal = Schema.decodeUnknownSync(SealJson);
 const sealJson = (id: string) =>
   decodeSeal(readFileSync(path.join(state, id, "seal.json"), "utf-8"));
 
-const shiftClock = (id: string, minutesAgo: number, minutes = 10) => {
-  const file = path.join(state, id, "seal.json");
-  const s = JSON.parse(readFileSync(file, "utf-8"));
-  const start = Date.now() - minutesAgo * 60_000;
-  writeFileSync(
-    file,
-    JSON.stringify({
-      ...s,
-      budgetMinutes: minutes,
-      createdAt: new Date(start).toISOString(),
-      deadline: new Date(start + minutes * 60_000).toISOString(),
-    })
-  );
+const shipKey = (sessionID: string) => `ship:${sessionID}`;
+
+const shipState = (sessionID: string) =>
+  Schema.decodeUnknownSync(Schema.JsonObject)(storage.get(shipKey(sessionID)));
+
+const enqueueOrdinary = async (
+  h: Awaited<ReturnType<typeof harness>>,
+  delivery: "queue" | "steer"
+) => {
+  const data = { inboxID: SessionMessage.ID.create(), sessionID: h.S("lead") };
+  await h.bus.emit({
+    data: {
+      ...data,
+      item: {
+        delivery,
+        payload: { text: "Work on something else" },
+        type: "user",
+      },
+    },
+    type: "session.inbox.enqueued",
+  });
+
+  return () => h.bus.emit({ data, type: "session.inbox.delivered" });
 };
 
 interface AddFindingOverrides {
@@ -791,6 +1142,77 @@ const add = (seal: string, o: AddFindingOverrides = {}) => ({
   trigger: "y=0",
   ...o,
 });
+
+const fileShipFinding = async (h: Awaited<ReturnType<typeof harness>>) => {
+  const shipID = Schema.decodeUnknownSync(Schema.String)(
+    shipState(h.S("lead")).id
+  );
+
+  const review = (tool: string, input: ToolInput, session = "reviewer") =>
+    h.call(tool, input, "directorate_liaison", session);
+
+  assert.ok(h.prompts[0]?.text.includes(shipID));
+
+  const { content } = await review("directorate_seal", {
+    scope: "local",
+    ship: shipID,
+  });
+
+  const seal = sealOf(content);
+  assert.deepEqual(
+    shipState(h.S("lead")).chain,
+    [seal],
+    "the initial seal links at creation"
+  );
+  await review("directorate_diff", { seal });
+  await h.call(
+    "directorate_ledger_add",
+    add(seal),
+    "directorate_auditor",
+    "scout"
+  );
+
+  const verdict = (
+    id: string,
+    decision: "confirmed" | "resolved",
+    rationale: string,
+    anchor?: { quote: string }
+  ) =>
+    h.call(
+      "directorate_ledger_verdict",
+      {
+        evidence: ["src/a.ts:2"],
+        id: "F1",
+        ...anchor,
+        rationale,
+        seal: id,
+        verdict: decision,
+      },
+      "directorate_compliance",
+      "compliance"
+    );
+
+  await verdict(seal, "confirmed", "division is unguarded");
+  const directive = await review("directorate_report", { seal });
+  assert.match(directive.content, /\[Important\] Division by zero/u);
+
+  return { review, seal, shipID, verdict };
+};
+
+const shiftClock = (id: string, minutesAgo: number, minutes = 10) => {
+  const file = path.join(state, id, "seal.json");
+  const s = JSON.parse(readFileSync(file, "utf-8"));
+  const start = Date.now() - minutesAgo * 60_000;
+  writeFileSync(
+    file,
+    JSON.stringify({
+      ...s,
+      budgetMinutes: minutes,
+      createdAt: new Date(start).toISOString(),
+      deadline: new Date(start + minutes * 60_000).toISOString(),
+    })
+  );
+};
 
 test("registers review, export, and settings tools, four hooks, and the settings RPC; tools assert permission; auto target", async () => {
   const { tools, hooks, call, asserted, rpcs } = await harness(repo());
@@ -1482,6 +1904,786 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   );
 });
 
+test("/directorate-ship starts with defaults, forwards scoped requests and attachments, and rejects invalid starts", async () => {
+  const h = await harness(repo());
+  await h.createSession("lead", "build");
+  await h.createSession("scoped", "build");
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+
+  await assert.rejects(h.ship("--recheck", "scoped"), /--recheck/u);
+  await assert.rejects(
+    h.ship("--scope nonsense", "scoped"),
+    /Use --scope branch/u
+  );
+  await assert.rejects(h.ship("", "reviewer"), /agent|role|liaison/u);
+  assert.equal(h.prompts.length, 0);
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(storage.size, 0);
+
+  await h.ship(" \n\t");
+  const [bare] = h.prompts;
+  assert.ok(bare);
+  assert.match(
+    bare.text,
+    /configured defaults.*Do not ask about mode or panel/u
+  );
+  assert.match(bare.text, /dispatch directorate_liaison/iu);
+  assert.doesNotMatch(bare.text, /<user_request>|use the question tool/u);
+  assert.equal(bare.delivery, "queue");
+  assert.equal(bare.sessionID, h.S("lead"));
+  assert.equal(bare.metadata?.source, "directorate-ship");
+  const started = shipState(h.S("lead"));
+  assert.equal(started.status, "waiting");
+  assert.equal(bare.metadata?.shipID, started.id);
+  assert.ok(started.boot);
+  await h.deliver();
+  await assert.rejects(h.ship("another request"), /already|active/u);
+  assert.equal(h.prompts.length, 1);
+  assert.equal(h.synthetics.length, 0);
+
+  const files = [{ uri: "file:///tmp/context.md" }];
+  const request = "focus on tests for --recheck\nkeep public APIs unchanged";
+  await h.ship(`--scope local ${request}`, "scoped", "steer", files);
+  const [, scoped] = h.prompts;
+  assert.ok(scoped);
+  assert.equal(scoped.sessionID, h.S("scoped"));
+  assert.equal(scoped.delivery, "steer");
+  assert.equal(scoped.metadata?.source, "directorate-ship");
+  assert.deepEqual(scoped.files, files);
+  assert.ok(
+    scoped.text.includes(`<user_request>\n${request}\n</user_request>`)
+  );
+  assert.match(scoped.text, /pass scope: "local"/u);
+  assert.equal(shipState(h.S("scoped")).status, "waiting");
+});
+
+test("/directorate-ship ignores old and unrelated reviews and waits only for its own background Liaison", async () => {
+  const dir = repo();
+  const h = await harness(dir);
+  const liaison = "directorate_liaison";
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.createSession("earlier", liaison, "lead");
+  await h.createSession("foreign", liaison, "lead");
+  await h.createSession("manual", liaison, "lead");
+  await h.createSession("grandchild", liaison, "foreign");
+  await h.createSession("other-lead", "build");
+  await h.createSession("other-reviewer", liaison, "other-lead");
+
+  const cleanReview = async (session: string, directory = dir) => {
+    const { content } = await h.call(
+      "directorate_seal",
+      { repo: directory, scope: "local" },
+      liaison,
+      session
+    );
+
+    const seal = sealOf(content);
+    await h.call("directorate_diff", { seal }, liaison, session);
+
+    const directive = await h.call(
+      "directorate_report",
+      { seal },
+      liaison,
+      session
+    );
+
+    assert.match(directive.content, /status: \*\*complete\*\*/u);
+
+    return seal;
+  };
+
+  const earlier = await cleanReview("earlier");
+  shiftClock(earlier, 1);
+  await h.ship("--scope local");
+  await h.deliver();
+  await cleanReview("foreign", repo());
+  await cleanReview("manual");
+  await cleanReview("grandchild");
+  await cleanReview("other-reviewer");
+  await h.finish("other-lead");
+  assert.equal(storage.has(shipKey(h.S("other-lead"))), false);
+  assert.equal(h.synthetics.length, 0);
+
+  await h.createSession("reviewer", liaison, "lead");
+  await h.finish("lead", [
+    {
+      agent: liaison,
+      childSessionID: Session.ID.make(h.S("reviewer")),
+      description: "Directory review",
+      kind: "subagent",
+      sessionID: Session.ID.make(lead),
+    },
+  ]);
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(shipState(lead).status, "active");
+  assert.equal(shipState(lead).rounds, 0);
+  assert.deepEqual(shipState(lead).chain, []);
+
+  const inboxID = SessionMessage.ID.create();
+  await h.bus.emit({
+    data: {
+      inboxID,
+      item: {
+        delivery: "queue",
+        payload: {
+          metadata: { childID: h.S("reviewer"), source: "subagent" },
+          text: "The Liaison finished without creating a seal.",
+        },
+        type: "synthetic",
+      },
+      sessionID: lead,
+    },
+    type: "session.inbox.enqueued",
+  });
+  await h.bus.emit({
+    data: { inboxID, sessionID: lead },
+    type: "session.inbox.delivered",
+  });
+
+  await h.finish("lead", [
+    {
+      agent: liaison,
+      childSessionID: Session.ID.make(h.S("grandchild")),
+      description: "Unrelated review",
+      kind: "subagent",
+      sessionID: Session.ID.make(h.S("foreign")),
+    },
+  ]);
+  const paused = shipState(lead);
+  assert.equal(paused.status, "paused");
+  assert.deepEqual(paused.chain, []);
+  assert.match(String(paused.reason), /no review seal was created/u);
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(h.prompts.length, 1);
+});
+
+test("/directorate-ship fixes, pauses on no progress, and re-checks the exact seal to completion", async () => {
+  const dir = repo();
+  const h = await harness(dir);
+  const liaison = "directorate_liaison";
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.createSession("reviewer", liaison, "lead");
+  await h.execution("started");
+
+  const gate = h.bus.holdNext();
+  const delivery = h.deliver();
+  await gate.entered;
+
+  const { review, seal, shipID, verdict } = await fileShipFinding(h)
+    .then(async (finding) => {
+      await h.idle();
+      assert.equal(h.synthetics.length, 0, "idle alone cannot send a fix");
+
+      return finding;
+    })
+    .finally(gate.release);
+
+  await delivery;
+  await h.execution("succeeded");
+  await h.execution("succeeded");
+  assert.equal(
+    h.synthetics.length,
+    1,
+    "ordered delivery and success send one fix"
+  );
+  const fix = h.synthetics.at(-1);
+  assert.ok(fix);
+  assert.equal(fix.sessionID, lead);
+  assert.ok(fix.description);
+  assert.equal(fix.metadata?.source, "directorate-ship");
+  assert.equal(fix.metadata?.shipID, shipID);
+  assert.notEqual(fix.resume, false);
+  assert.doesNotMatch(fix.text, /Fix all confirmed findings/u);
+  const fixing = shipState(lead);
+  assert.equal(fixing.status, "waiting");
+  assert.deepEqual(fixing.chain, [seal]);
+  assert.equal(fixing.rounds, 1);
+  assert.equal(fixing.step, `fix:${seal}`);
+
+  assert.match(
+    (await h.deliver()) ?? "",
+    /Fix all confirmed findings[\s\S]*Division by zero/u
+  );
+  const countBeforePause = h.synthetics.length;
+  await h.finish();
+  assert.equal(shipState(lead).status, "paused");
+  await assert.rejects(h.ship("status"), {
+    message: new RegExp(`paused[\\s\\S]*${seal}[\\s\\S]*progress`, "iu"),
+  });
+  await h.finish();
+  assert.equal(h.synthetics.length, countBeforePause);
+  assert.equal(h.prompts.length, 1);
+
+  await h.ship("resume");
+  assert.equal(h.prompts.length, 2);
+  assert.match(h.prompts[1]?.text ?? "", /Fix all confirmed findings/u);
+  await h.deliver();
+  assert.equal(shipState(lead).status, "active");
+
+  const stillUnguarded =
+    "export const div = (x: number, y: number) => x / y + 1";
+
+  writeFileSync(
+    path.join(dir, "src/a.ts"),
+    `export const a = 2\n${stillUnguarded}\n`
+  );
+  await h.finish();
+  const recheck = h.synthetics.at(-1);
+  assert.ok(recheck);
+  assert.equal(recheck.metadata?.shipID, fix.metadata?.shipID);
+  assert.ok(String(shipState(lead).step).startsWith(`recheck:${seal}`));
+
+  const renderedRecheck = await h.deliver();
+  assert.ok(renderedRecheck);
+  assert.ok(renderedRecheck?.includes(`directorate_seal(recheck: "${seal}")`));
+  assert.ok(renderedRecheck.includes(h.S("reviewer")));
+  const checked = await review("directorate_seal", { recheck: seal });
+  const second = sealOf(checked.content);
+  assert.equal(sealJson(second).recheckOf, seal);
+  await review("directorate_diff", { seal: second });
+  await verdict(second, "confirmed", "adding one does not guard the division", {
+    quote: stillUnguarded,
+  });
+  await review("directorate_report", { seal: second });
+  await h.finish();
+  assert.equal(shipState(lead).step, `fix:${second}`);
+  assert.deepEqual(shipState(lead).chain, [seal, second]);
+  assert.match(
+    (await h.deliver()) ?? "",
+    /Fix all confirmed findings[\s\S]*Division by zero/u
+  );
+  writeFileSync(
+    path.join(dir, "src/a.ts"),
+    "export const a = 2\nexport const div = (x: number, y: number) => (y ? x / y + 1 : 0)\n"
+  );
+  await h.deleteSession("reviewer");
+  await h.finish();
+
+  const checkAgain = await h.deliver();
+  assert.ok(checkAgain?.includes(`directorate_seal(recheck: "${second}")`));
+  assert.ok(!checkAgain?.includes(`recheck: "${seal}"`));
+  await h.createSession("replacement", liaison, "lead");
+
+  const checkedAgain = await review(
+    "directorate_seal",
+    { recheck: second },
+    "replacement"
+  );
+
+  const third = sealOf(checkedAgain.content);
+  assert.equal(sealJson(third).recheckOf, second);
+  await review("directorate_diff", { seal: third }, "replacement");
+  await verdict(third, "resolved", "y is checked before dividing");
+
+  const final = await review(
+    "directorate_report",
+    { seal: third },
+    "replacement"
+  );
+
+  assert.match(final.content, /Prior Findings Resolved/u);
+
+  const countBeforeCompletion = h.synthetics.length;
+  await h.finish();
+  const saved = shipState(lead);
+  assert.equal(saved.status, "complete");
+  assert.deepEqual(saved.chain, [seal, second, third]);
+  assert.match(String(saved.reason), /complete and current/u);
+  await h.finish();
+  assert.equal(h.synthetics.length, countBeforeCompletion);
+  assert.equal(h.prompts.length, 2);
+});
+
+test("/directorate-ship controls and execution events affect only the owning session", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.createSession("other", "build");
+  await h.ship("");
+  await h.ship("", "other");
+  await h.deliver();
+  await h.ship("pause");
+  const paused = shipState(lead);
+  assert.equal(paused.status, "paused");
+  assert.match(String(paused.reason), /paused by the user/iu);
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(shipState(h.S("other")).status, "waiting");
+  assert.deepEqual(h.interrupted, []);
+
+  await h.ship("resume");
+  const resumed = shipState(lead);
+  assert.equal(resumed.status, "waiting");
+  assert.equal(resumed.id, paused.id);
+
+  await h.bus.emit({
+    data: { inboxID: SessionMessage.ID.make("msg_unrelated"), sessionID: lead },
+    type: "session.inbox.delivered",
+  });
+  await h.bus.emit({
+    data: { error: { message: "an earlier turn failed" }, sessionID: lead },
+    type: "session.execution.failed",
+  });
+  await h.idle();
+  const waiting = shipState(lead);
+  assert.equal(waiting.status, "waiting");
+  assert.deepEqual(waiting.inbox, resumed.inbox);
+  assert.match(String(waiting.lastHostFailure), /an earlier turn failed/u);
+
+  await h.deliver();
+  await h.bus.emit({
+    created: 0,
+    data: { reason: "shutdown", sessionID: lead },
+    type: "session.execution.interrupted",
+  });
+  assert.equal(
+    shipState(lead).status,
+    "active",
+    "ignores stale execution results"
+  );
+
+  await h.bus.emit({
+    data: { reason: "shutdown", sessionID: lead },
+    type: "session.execution.interrupted",
+  });
+  assert.equal(shipState(lead).status, "paused");
+  assert.match(String(shipState(lead).reason), /interrupted|shutdown/iu);
+
+  await h.ship("resume");
+  await h.deliver();
+  await h.bus.emit({
+    data: { error: { message: "provider failed" }, sessionID: lead },
+    type: "session.execution.failed",
+  });
+  assert.equal(shipState(lead).status, "paused");
+  assert.match(String(shipState(lead).reason), /provider failed/u);
+  assert.equal(h.synthetics.length, 0);
+  await h.ship("stop");
+  assert.equal(storage.has(shipKey(lead)), false);
+  await h.idle();
+  assert.equal(h.synthetics.length, 0);
+
+  assert.equal(shipState(h.S("other")).status, "waiting");
+  await h.deleteSession("other");
+  assert.equal(storage.has(shipKey(h.S("other"))), false);
+});
+
+test("/directorate-ship reports host errors before promotion without attributing them to Ship", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  const older = await enqueueOrdinary(h, "queue");
+  await h.ship("");
+  const promptID = present(h.prompts.at(-1)?.id);
+
+  const fail = (message: string) =>
+    h.bus.emit({
+      data: { error: { message }, sessionID: lead },
+      type: "session.execution.failed",
+    });
+
+  await fail("fresh execution failed before promotion");
+  await assert.rejects(h.ship("status"), {
+    message: new RegExp(
+      `waiting[\\s\\S]*fresh execution failed[\\s\\S]*${promptID}`,
+      "u"
+    ),
+  });
+  await older();
+  await fail("older FIFO input failed");
+  assert.equal(shipState(lead).status, "waiting");
+  assert.match(
+    String(shipState(lead).lastHostFailure),
+    /older FIFO input failed/u
+  );
+  assert.equal(h.synthetics.length, 0);
+  await h.deliver();
+  assert.equal(shipState(lead).status, "active");
+  assert.equal(shipState(lead).lastHostFailure, undefined);
+  await h.finish();
+  assert.match(String(shipState(lead).reason), /no review seal was created/u);
+});
+
+test("/directorate-ship yields to ordinary user prompts delivered in the same busy period", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+
+  const user = await enqueueOrdinary(h, "queue");
+  await h.idle();
+  await user();
+  const paused = shipState(lead);
+  assert.equal(paused.status, "paused");
+  assert.match(String(paused.reason), /ordinary user prompt.*yielded control/u);
+
+  await h.bus.emit({
+    data: { error: { message: "unrelated user work failed" }, sessionID: lead },
+    type: "session.execution.failed",
+  });
+  await h.finish();
+  assert.deepEqual(shipState(lead), paused);
+  assert.equal(h.synthetics.length, 0);
+  await h.ship("resume");
+  assert.match(h.prompts.at(-1)?.text ?? "", /Fix all confirmed findings/u);
+});
+
+test("/directorate-ship does not dispatch a fix if user input is projected during fingerprinting", async (t) => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+
+  const entered = Deferred.makeUnsafe<true>();
+  const release = Deferred.makeUnsafe<true>();
+  const use = Worktree.use.bind(Worktree);
+
+  const gated: typeof Worktree.use = (body) =>
+    use((worktree) =>
+      body({
+        ...worktree,
+        fingerprint: (...args) =>
+          Deferred.succeed(entered, true).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(worktree.fingerprint(...args))
+          ),
+      })
+    );
+
+  t.mock.method(Worktree, "use", gated);
+
+  const success = h.execution("succeeded");
+  await Effect.runPromise(Deferred.await(entered));
+
+  const delivered = h.projectOrdinary(
+    "Stop editing; I will take it from here."
+  );
+
+  await Effect.runPromise(Deferred.succeed(release, true));
+  await Promise.all([success, delivered]);
+
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(shipState(lead).status, "paused");
+  assert.match(
+    String(shipState(lead).reason),
+    /ordinary user prompt.*yielded control/u
+  );
+});
+
+test("/directorate-ship ignores speculative compaction while a promoted marker is still visible", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+  await h.finish();
+
+  const marker = present(h.synthetics.at(-1));
+  const gate = h.bus.holdNext();
+  const { delivery, id } = h.projectLatest();
+  await gate.entered;
+
+  try {
+    const compacting = await h.modelContext(lead, "compaction");
+    assert.deepEqual(compacting.find((message) => message.id === id)?.content, [
+      { text: marker.text, type: "text" },
+    ]);
+    assert.equal(shipState(lead).status, "waiting");
+    const primary = await h.modelContext(lead);
+    assert.match(JSON.stringify(primary), /Fix all confirmed findings/u);
+  } finally {
+    gate.release();
+    await delivery;
+  }
+});
+
+test("/directorate-ship recognizes an installed text checkpoint without a compaction hook and can resume", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+  await h.finish();
+
+  const marker = present(h.synthetics.at(-1));
+  const beforePromotion = await h.modelContext(lead);
+  assert.doesNotMatch(
+    JSON.stringify(beforePromotion),
+    /Fix all confirmed findings/u
+  );
+  assert.equal(shipState(lead).status, "waiting");
+
+  const { delivery, id } = h.projectLatest();
+  assert.equal(marker.id, id);
+  await delivery;
+  assert.equal(shipState(lead).status, "active");
+
+  h.compactHistory(lead, `Text-only recent history:\n${marker.text}`);
+  const primary = await h.modelContext(lead);
+  assert.match(JSON.stringify(primary), /conversation-checkpoint/u);
+  assert.ok(primary.every((message) => message.id !== id));
+  assert.doesNotMatch(JSON.stringify(primary), /Fix all confirmed findings/u);
+  assert.equal(shipState(lead).status, "paused");
+  assert.equal(shipState(lead).inbox, undefined);
+  await assert.rejects(
+    h.ship("status"),
+    /installed a checkpoint[\s\S]*directorate-ship resume/u
+  );
+
+  await h.ship("resume");
+  assert.match(present(h.prompts.at(-1)).text, /Fix all confirmed findings/u);
+});
+
+test("/directorate-ship pauses on a late marker delivery after the primary request sees a checkpoint", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+  await h.finish();
+
+  const marker = present(h.synthetics.at(-1));
+  const gate = h.bus.holdNext();
+  const { delivery, id } = h.projectLatest();
+  await gate.entered;
+
+  try {
+    assert.equal(id, marker.id);
+    h.compactHistory(lead, `Text-only recent history:\n${marker.text}`);
+
+    const primary = await h.modelContext(lead);
+    assert.match(JSON.stringify(primary), /conversation-checkpoint/u);
+    assert.ok(primary.every((message) => message.id !== id));
+    assert.doesNotMatch(JSON.stringify(primary), /Fix all confirmed findings/u);
+    assert.equal(shipState(lead).status, "waiting");
+    assert.deepEqual(shipState(lead).inbox, { continuation: true, id });
+  } finally {
+    gate.release();
+    await delivery;
+  }
+
+  const paused = shipState(lead);
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.inbox, undefined);
+  assert.match(String(paused.reason), /installed a checkpoint/u);
+  assert.equal(h.synthetics.length, 1);
+
+  await h.ship("resume");
+  assert.match(present(h.prompts.at(-1)).text, /Fix all confirmed findings/u);
+});
+
+test("/directorate-ship leaves the admitted marker inert if the primary request already contains ordinary user input", async () => {
+  const h = await harness(repo());
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+  await h.finish();
+
+  const marker = present(h.synthetics.at(-1));
+  const gate = h.bus.holdNext();
+  const { delivery, id } = h.projectLatest();
+  await gate.entered;
+
+  const userDelivery = h.projectOrdinary(
+    "Please stop editing; I will take over."
+  );
+
+  try {
+    assert.equal(shipState(lead).status, "waiting");
+    const primary = await h.modelContext(lead);
+    assert.match(JSON.stringify(primary), /Please stop editing/u);
+    assert.deepEqual(primary.find((message) => message.id === id)?.content, [
+      { text: marker.text, type: "text" },
+    ]);
+    assert.doesNotMatch(JSON.stringify(primary), /Fix all confirmed findings/u);
+    assert.equal(shipState(lead).status, "paused");
+    assert.match(
+      String(shipState(lead).reason),
+      /ordinary user prompt.*yielded control/u
+    );
+  } finally {
+    gate.release();
+    await Promise.all([delivery, userDelivery]);
+  }
+});
+
+test("/directorate-ship ignores successor idle after failure and requires cancellation of a queued fix", async () => {
+  const dir = repo();
+  const h = await harness(dir, "ship-failed-fix");
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.execution("started");
+  await h.deliver();
+  await h.createSession("reviewer", "directorate_liaison", "lead");
+  await fileShipFinding(h);
+
+  const gate = h.bus.holdNext();
+
+  const failure = h.bus.emit({
+    data: { error: { message: "review turn failed" }, sessionID: lead },
+    type: "session.execution.failed",
+  });
+
+  await gate.entered;
+  h.bus.post({ data: { sessionID: lead }, type: "session.execution.started" });
+  await h.idle().finally(gate.release);
+  await failure;
+  assert.equal(h.synthetics.length, 0);
+  assert.equal(shipState(lead).status, "paused");
+  assert.match(String(shipState(lead).reason), /review turn failed/u);
+
+  // Resume queues a real fix behind existing work; stopping cannot retract the host's inbox item.
+  await h.ship("resume");
+  const queuedFix = h.prompts.at(-1);
+  assert.ok(queuedFix?.id);
+  assert.match(queuedFix.text, /Fix all confirmed findings/u);
+  assert.equal(queuedFix.delivery, "queue");
+
+  const cancelRequired = {
+    message: new RegExp(`cancel[\\s\\S]*${queuedFix.id}`, "iu"),
+  };
+
+  await assert.rejects(h.ship("pause"), cancelRequired);
+  await assert.rejects(h.ship("stop"), cancelRequired);
+
+  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+  const reloaded = await harness(dir, "ship-failed-fix");
+  await assert.rejects(reloaded.ship("stop"), cancelRequired);
+  await reloaded.bus.emit({
+    data: { inboxID: SessionMessage.ID.make("msg_unrelated"), sessionID: lead },
+    type: "session.inbox.cancelled",
+  });
+  await assert.rejects(reloaded.ship("stop"), cancelRequired);
+  await reloaded.bus.emit({
+    data: { inboxID: queuedFix.id, sessionID: lead },
+    type: "session.inbox.cancelled",
+  });
+  await reloaded.ship("stop");
+  assert.equal(storage.has(shipKey(lead)), false);
+  await reloaded.finish();
+  assert.equal(reloaded.prompts.length, 0);
+  assert.equal(reloaded.synthetics.length, 0);
+});
+
+test("/directorate-ship reload pauses old active state until an explicit resume", async () => {
+  const dir = repo();
+  const h = await harness(dir, "ship-reload");
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("");
+  await h.deliver();
+  const active = shipState(lead);
+  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+
+  const reloaded = await harness(dir, "ship-reload");
+  await reloaded.idle();
+  assert.equal(shipState(lead).status, "paused");
+  assert.match(String(shipState(lead).reason), /reload|restart/iu);
+  assert.equal(reloaded.prompts.length, 0);
+  assert.equal(reloaded.synthetics.length, 0);
+
+  await reloaded.ship("resume");
+  const resumed = shipState(lead);
+  assert.equal(resumed.status, "waiting");
+  assert.equal(resumed.id, active.id);
+  assert.notEqual(resumed.boot, active.boot);
+  assert.equal(reloaded.prompts.length, 1);
+});
+
+test("/directorate-ship can forget only the exact pending ID after a missed cancellation", async () => {
+  const dir = repo();
+  const h = await harness(dir, "ship-forget");
+  const lead = h.S("lead");
+  await h.createSession("lead", "build");
+  await h.ship("");
+  const id = present(h.prompts.at(-1)?.id);
+  await assert.rejects(h.ship("stop"), /cancel.*queued ship input/iu);
+  await assert.rejects(h.ship("forget msg_wrong"), new RegExp(id, "u"));
+  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+
+  // OpenCode cancelled the input while the plugin was unavailable, so no cancellation event is seen here.
+  const restarted = await harness(dir, "ship-forget");
+  await assert.rejects(restarted.ship("stop"), /does not cancel input/u);
+  await restarted.ship(`forget ${id}`);
+  assert.equal(storage.has(shipKey(lead)), false);
+  assert.deepEqual(restarted.interrupted, []);
+  await restarted.ship("");
+  assert.equal(shipState(lead).status, "waiting");
+});
+
+test("/directorate-ship can replace or stop a terminal ship after the session moves", async () => {
+  const origin = repo();
+  const original = await harness(origin, "ship-moved");
+  const destination = repo();
+  const lead = original.S("lead");
+  await original.createSession("lead", "build");
+  await original.ship("");
+  await original.deliver();
+  await original.move(destination);
+  assert.equal(shipState(lead).status, "paused");
+  await original.finish();
+  assert.equal(original.synthetics.length, 0);
+  await assert.rejects(original.ship("stop"), /current OpenCode location/u);
+
+  const moved = await harness(destination, "ship-moved");
+  await assert.rejects(moved.ship("resume"), /original OpenCode location/u);
+  await moved.ship("new request");
+  await moved.deliver();
+  await moved.ship("pause");
+  await moved.move(origin);
+  await original.ship("stop");
+  assert.equal(storage.has(shipKey(lead)), false);
+});
+
+test("/directorate-ship serializes duplicate starts and requires explicit attachment retry", async () => {
+  const h = await harness(repo());
+  await h.createSession("lead", "build");
+  await h.createSession("failed", "build");
+
+  const starts = await Promise.allSettled([h.ship(""), h.ship("")]);
+  assert.equal(starts.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(starts.filter(({ status }) => status === "rejected").length, 1);
+  assert.equal(h.prompts.length, 1);
+
+  const files = [{ uri: "file:///tmp/context.md" }];
+  h.rejectNextPrompt(new Error("host did not admit the prompt"));
+  await assert.rejects(
+    h.ship("--scope local", "failed", "steer", files),
+    /host did not admit the prompt/u
+  );
+  await assert.rejects(
+    h.ship("resume", "failed"),
+    /attach|new ship|no paused/iu
+  );
+  assert.equal(h.prompts.length, 1);
+  assert.equal(h.synthetics.length, 0);
+
+  await h.ship("--scope local", "failed", "steer", files);
+  assert.equal(shipState(h.S("failed")).status, "waiting");
+  const retried = h.prompts.at(-1);
+  assert.equal(retried?.sessionID, h.S("failed"));
+  assert.deepEqual(retried?.files, files);
+  assert.match(retried?.text ?? "", /pass scope: "local"/u);
+});
+
 test("a whole-file directory target includes unchanged files but excludes files outside it", async () => {
   const dir = repo();
   mkdirSync(path.join(dir, "packages/nested"), { recursive: true });
@@ -1964,7 +3166,7 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
   );
 
   await bus.emit({
-    data: { sessionID: S("pc") },
+    data: { error: { message: "execution failed" }, sessionID: S("pc") },
     type: "session.execution.failed",
   });
   await assert.rejects(
@@ -1975,7 +3177,7 @@ test("panel: seats assigned at launch, separate reads, credit across seats, a ga
   const modelResult = await launch("p4", "pd");
   assert.equal(modelResult.model, "other/gamma#xhigh");
   await bus.emit({
-    data: { sessionID: S("pd") },
+    data: { error: { message: "execution failed" }, sessionID: S("pd") },
     type: "session.execution.failed",
   });
   await assert.rejects(
@@ -3059,7 +4261,7 @@ test("child events: early completion is reconciled; failure overrides idle", asy
 
   await fin2();
   await bus.emit({
-    data: { sessionID: S("b") },
+    data: { error: { message: "execution failed" }, sessionID: S("b") },
     type: "session.execution.failed",
   });
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
@@ -3093,7 +4295,7 @@ test("directorate_note answered: only the Liaison settles a failed Auditor's exa
 
   await fin();
   await bus.emit({
-    data: { sessionID: S("b") },
+    data: { error: { message: "execution failed" }, sessionID: S("b") },
     type: "session.execution.failed",
   });
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
@@ -3359,7 +4561,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   await f3.enqueue();
   await f3.deliver();
   await bus.emit({
-    data: { sessionID: S("b") },
+    data: { error: { message: "execution failed" }, sessionID: S("b") },
     type: "session.execution.failed",
   });
   assert.deepEqual(
@@ -3727,7 +4929,7 @@ test("after a plugin reload, a child's events reach its review through the paren
   await h1.launch("c1", "directorate_auditor", "question: q1", "a", "running");
   const h2 = await harness(dir, "kids");
   await h2.bus.emit({
-    data: { sessionID: h2.S("a") },
+    data: { error: { message: "execution failed" }, sessionID: h2.S("a") },
     type: "session.execution.failed",
   });
   assert.equal(present(sealJson(seal).children[0]).status, "failed");

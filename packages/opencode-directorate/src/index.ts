@@ -61,9 +61,11 @@ import { platformLayer } from "./platform.ts";
 import { readTools } from "./read-tools.ts";
 import { RepoScope } from "./repo-path.ts";
 import { finalize } from "./report.ts";
+import { reviewRequest } from "./request.ts";
 import { createSeal, recheckable, recheckSeal, refreshSeal } from "./seal.ts";
 import { Host, Sessions } from "./session.ts";
 import { describe, resolve, SettingsStore } from "./settings.ts";
+import { registerShip } from "./ship.ts";
 import { Store } from "./store.ts";
 import { currentFingerprint } from "./target.ts";
 import {
@@ -113,6 +115,7 @@ const decodeChildMeta = Schema.decodeUnknownOption(
 /** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
 const RECHECK_FIXED = [
   "resume",
+  "ship",
   "scope",
   "target",
   "mode",
@@ -279,6 +282,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
   yield* registerBundled();
   yield* configureRpc();
+  const ship = yield* registerShip();
   yield* host.command.transform((editor) => {
     editor.add({
       description:
@@ -334,47 +338,18 @@ const register = Effect.fn("Directorate.register")(function* register() {
             .pipe(Effect.asVoid);
         }
 
-        const flag = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u.exec(
-          prompt.text
-        );
-
-        const scope = flag?.groups?.value;
-
-        if (flag && !Schema.is(ReviewScopeSchema)(scope)) {
-          return failure(
-            "Use --scope branch, --scope local, or --scope repository."
-          );
-        }
-
-        const requestText = flag
-          ? prompt.text.slice(flag[0].length).trim()
-          : prompt.text;
-
-        const hasBody = requestText.trim().length > 0;
-        const hasRequest = Boolean(scope) || hasBody;
-
-        return host.session
-          .prompt({
-            ...prompt,
-            delivery,
-            sessionID,
-            text: [
-              hasBody ? `<user_request>\n${requestText}\n</user_request>` : "",
-              hasRequest
-                ? `Start a Directorate code review${hasBody ? " using the <user_request> above" : ""}. Interpret it as natural language and carry through the requested target, scope, mode, model preferences, time limit, and any focus or constraints. Use configured defaults for details the user didn't specify. Ask only if a missing or conflicting detail prevents you from honoring the request. Do not silently drop a constraint or widen the target.`
-                : "Start a Directorate code review. Before dispatching, use the question tool to offer the mode (configured default, default, code-quality, or full) and panel preference (configured default, single model, or Directorate Seats). If the user cancels, do not start a review.",
-              "Dispatch directorate_liaison with the user's request and any clarified options. Leave configured defaults unset rather than guessing them. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.",
-              "Reviewing everything in named files or directories uses a whole-file target (kind: paths, with repository-relative paths), including unchanged files. A request for changes only is a diff review, not a whole-file review.",
-              scope
-                ? `The --scope flag selects ${scope}. Tell the Liaison to pass scope: "${scope}" to directorate_seal, without a target. If the request also names a conflicting target, ask which to use.`
-                : "If no target or scope was requested, do not ask what to review: omit both target and scope so directorate_seal uses the configured default.",
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-          })
-          .pipe(Effect.asVoid);
+        return Effect.gen(function* submitReview() {
+          const text = yield* reviewRequest(prompt.text, "ask");
+          yield* host.session.prompt({ ...prompt, delivery, sessionID, text });
+        });
       },
       name: "directorate-review",
+    });
+    editor.add({
+      description:
+        "Review, fix, and re-check until the Directive is clean [request, --scope branch|local|repository] | status | pause | resume | stop | forget <pending-id>",
+      execute: ship.execute,
+      name: "directorate-ship",
     });
   });
 
@@ -487,6 +462,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
               yield* abandonPrior;
               yield* sessions.bind(a.session, r.seal.id);
               yield* sessions.record(a.session, r.seal);
+              yield* ship.sealed(r.seal);
 
               return yield* done(r.seal, recheckSummary(earlier, r));
             }
@@ -599,6 +575,10 @@ const register = Effect.fn("Directorate.register")(function* register() {
             yield* sessions.bind(a.session, seal.id);
             yield* sessions.record(a.session, seal);
 
+            if (input.ship) {
+              yield* ship.sealed(seal, input.ship, input.scope);
+            }
+
             return yield* done(seal, sealSummary(seal));
           })
         );
@@ -658,6 +638,12 @@ const register = Effect.fn("Directorate.register")(function* register() {
           })
         ),
         scope: optional(ReviewScopeSchema),
+        ship: optional(
+          str.annotate({
+            description:
+              "Only for an initial /directorate-ship review: copy the ship ID from the calling session. Omit on other reviews and re-checks.",
+          })
+        ),
         target: optional(
           Schema.Struct({
             base: optional(str),
@@ -1243,10 +1229,12 @@ const register = Effect.fn("Directorate.register")(function* register() {
     host.event.subscribe({
       types: [
         "session.created",
+        "session.deleted",
         "session.inbox.enqueued",
         "session.inbox.delivered",
         "session.inbox.cancelled",
         "session.idle",
+        "session.moved",
         "session.execution.succeeded",
         "session.execution.failed",
         "session.execution.interrupted",
@@ -1267,15 +1255,29 @@ const register = Effect.fn("Directorate.register")(function* register() {
           : Effect.void;
       }
 
+      if (event.type === "session.deleted") {
+        return ship.remove(sessionID);
+      }
+
+      if (event.type === "session.moved") {
+        return ship.moved(sessionID, event.data.location);
+      }
+
       if (event.type === "session.inbox.enqueued") {
         const { inboxID, item } = event.data;
 
-        return item.type === "user" &&
-          item.payload.text.includes("\n\n[Directorate follow-up: ")
-          ? childEvent(sessionID, (s) =>
-              enqueued(s, sessionID, inboxID, item.payload.text)
+        return ship
+          .inboxEnqueued(sessionID, inboxID, item)
+          .pipe(
+            Effect.andThen(
+              item.type === "user" &&
+                item.payload.text.includes("\n\n[Directorate follow-up: ")
+                ? childEvent(sessionID, (s) =>
+                    enqueued(s, sessionID, inboxID, item.payload.text)
+                  )
+                : Effect.void
             )
-          : Effect.void;
+          );
       }
 
       const at = DateTime.makeUnsafe(event.created);
@@ -1285,25 +1287,46 @@ const register = Effect.fn("Directorate.register")(function* register() {
         event.type === "session.inbox.cancelled"
       ) {
         const { inboxID } = event.data;
+        const delivered = event.type === "session.inbox.delivered";
 
-        return childEvent(sessionID, (s) =>
-          inboxSettled(
-            s,
-            sessionID,
-            inboxID,
-            event.type === "session.inbox.delivered",
-            at
-          )
-        );
+        return ship
+          .inboxSettled(sessionID, inboxID, delivered, event.created)
+          .pipe(
+            Effect.andThen(
+              childEvent(sessionID, (s) =>
+                inboxSettled(s, sessionID, inboxID, delivered, at)
+              )
+            )
+          );
       }
 
-      return childEvent(sessionID, (s) =>
-        finished(
-          s,
-          sessionID,
-          /failed|interrupted/u.test(event.type) ? "failed" : "completed",
-          at,
-          event.type !== "session.idle"
+      let shipReason: string | undefined;
+
+      if (event.type === "session.execution.failed") {
+        shipReason = `The session failed: ${event.data.error.message}`;
+      } else if (event.type === "session.execution.interrupted") {
+        shipReason =
+          event.data.reason === "user"
+            ? "Interrupted by the user."
+            : `The session was interrupted (${event.data.reason}).`;
+      }
+
+      const shipOutcome =
+        event.type === "session.idle"
+          ? Effect.void
+          : ship.executionSettled(sessionID, event.created, shipReason);
+
+      return shipOutcome.pipe(
+        Effect.andThen(
+          childEvent(sessionID, (s) =>
+            finished(
+              s,
+              sessionID,
+              /failed|interrupted/u.test(event.type) ? "failed" : "completed",
+              at,
+              event.type !== "session.idle"
+            )
+          )
         )
       );
     }),

@@ -78,6 +78,30 @@ A re-check (`directorate_seal recheck: <id>`) is a new seal linked to the report
 
 The budget is half the mode's default, at least 10 minutes, unless `budget_minutes` is passed.
 
+## Ship: review, fix, and re-check
+
+Run `/directorate-ship` from the session that should edit the code. For example, `/directorate-ship --scope local focus on migration safety` reviews uncommitted changes. A bare command starts with your configured review defaults.
+
+The Liaison reviews; your editing agent addresses every verified finding, including minor ones. The Liaison then re-checks the **specific seal** against the changed code. New or surviving findings go through the same fix and re-check cycle. After OpenCode delivers Ship's input and the session execution succeeds without a user handoff, the plugin checks the saved Directive, ledger and target fingerprint. It finishes only on a current, complete Directive with no findings or unverified leads. Ship does not commit, push, open a PR, approve, or merge.
+
+| Command | What it does |
+| --- | --- |
+| `/directorate-ship status` | Show this session's progress, latest seal, and reason for stopping. |
+| `/directorate-ship pause` | Suspend automatic continuations. Use OpenCode's interrupt to stop work already running. |
+| `/directorate-ship resume` | Reassess the paused ship and give it a fresh allowance. |
+| `/directorate-ship stop` | Remove the loop. Existing edits and filed reviews remain. |
+| `/directorate-ship forget <exact-pending-id>` | Discard Ship's record if it missed a delivery or cancellation event. Confirm the exact item is no longer queued in OpenCode first. This does not cancel any input. |
+
+While Ship is **waiting**, `status` shows the exact inbox ID and the latest OpenCode failure or interruption seen before delivery. That outcome could belong to an older input; Ship can still continue if OpenCode delivers its prompt. Cancel the exact item in OpenCode before pausing, stopping, resuming, or replacing a ship with undelivered input.
+
+When OpenCode delivers a new ordinary user prompt after Ship's input, Ship pauses and hands control back to you. Background notices do not count as user input. Once your work is done, use `resume` to reassess and continue. The loop also pauses if a step makes no progress, an execution carrying Ship's input fails or is interrupted, the session moves, or the plugin reloads. After a move, stop or replace the old ship from the session's new location rather than resuming the old review there.
+
+If OpenCode installs a checkpoint that hides an automatic continuation or its origin after promotion, Ship pauses rather than sending fix instructions from a summary. Precomputing a summary alone does not pause Ship. Use `/directorate-ship resume` to reassess from the saved Directive; the old continuation is not needed.
+
+Between starts or resumes, Ship allows up to six reviews before requesting another and up to 30 automatic continuations. If a requested panel did not finish, start a new panel review: a single-model re-check cannot supply the missing Seat's review.
+
+Prefer branch or local scope for fixes: a fixed commit cannot reflect edits, and a PR re-check reads its fetched head rather than the working tree.
+
 ## The review, as a state chart
 
 One Liaison session owns one review at a time. The seal (`seal.json`) is the state; tools move it along.
@@ -323,6 +347,7 @@ flowchart TB
 
     subgraph workflow["Workflow"]
         index["index.ts<br/>seal · refresh · protocol gates<br/>budget hooks · watchdog · child events"]
+        ship["ship.ts · ship-step.ts<br/>turn outcome → fix, re-check, pause or finish"]
     end
 
     subgraph adapters["OpenCode adapters"]
@@ -371,7 +396,7 @@ flowchart TB
     classDef svcC fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
 
     class tuiPart,host,node hostC
-    class index flowC
+    class index,ship flowC
     class tool,readTools,ledgerTools,configure adaptC
     class seal,report,browse,content,target,diff domainC
     class pure pureC
@@ -393,7 +418,7 @@ Seals live under `$DIRECTORATE_STATE_DIR`. If that is unset, they live in `$XDG_
 
 ```text
 directorate-20261124071813-5eecd7/
-├── seal.json          the state: target, SHAs, regions, children, gates, budget
+├── seal.json          the state: target, SHAs, regions, children, gates, budget, filed Directive status and reasons
 ├── ledger.json        entries and notes
 ├── diff.patch         the sealed diff (diff.g1.patch after a refresh)
 ├── snapshot/          changed working-tree files as sealed (snapshot.g1/ after a refresh)

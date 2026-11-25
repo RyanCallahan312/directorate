@@ -1477,6 +1477,11 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
     run(loadLedger(seal.id)),
     /damaged; refusing to treat it as empty/u
   );
+  unlinkSync(join(state, seal.id, "ledger.json"));
+  await assert.rejects(
+    run(Store.use((st) => st.loadLedger(seal.id, { required: true }))),
+    /ledger .* missing/u
+  );
 });
 
 test("worktree read errors fail the capture; withheld files are never read and secrets stay secrets", async () => {
@@ -2399,6 +2404,12 @@ test("range: base moved to head is stale; refresh rebuilds the empty target diff
   const s0 = await run(loadSeal(seal.id));
   const { md } = await run(finalize(s0, ledger, {}));
   assert.match(md, /status: \*\*stale\*\*/u);
+  const reported = await run(loadSeal(seal.id));
+  const directive = present(reported.directive);
+  assert.equal(directive.status, "stale");
+  assert.ok(
+    directive.reasons.some((reason) => reason.includes("code changed"))
+  );
   const r = await run(refreshSeal(seal, ledger));
   assert.equal(r.seal.regions.length, 0);
   assert.deepEqual(r.reopened, ["F1"]);

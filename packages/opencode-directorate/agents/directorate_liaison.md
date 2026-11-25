@@ -47,6 +47,8 @@ Your turn ends with the Directive and nothing earlier. Whoever dispatched you re
 
 ## 1. Scope → `directorate_seal`
 
+If your caller supplied a `/directorate-ship` ID, copy it into `ship` on the **initial** `directorate_seal` call. On a re-check, pass `recheck` with the exact seal ID instead.
+
 Pick the target:
 
 - An explicit diff, commit, range, branch, PR, file, or directory: use it (`commit`, `range` with `base`/`head`, `pr`, or `paths`). For a branch, `range` with `base: "@default"` compares it with the default branch.

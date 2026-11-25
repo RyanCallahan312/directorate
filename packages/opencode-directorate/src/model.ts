@@ -328,6 +328,15 @@ const GatesSchema = Schema.Struct({
 
 export type Gates = typeof GatesSchema.Type;
 
+/** A Directive's status: complete, partial (something went unreviewed or undecided), or stale (the code moved). */
+export const DirectiveStatusSchema = Schema.Literals([
+  "complete",
+  "partial",
+  "stale",
+]);
+
+export type DirectiveStatus = typeof DirectiveStatusSchema.Type;
+
 const SealSchema = Schema.Struct({
   abandoned: opt(Schema.Boolean),
   autoReported: opt(Schema.Boolean),
@@ -339,6 +348,13 @@ const SealSchema = Schema.Struct({
   deadline: Time,
   deleted: since(list(Schema.String), []),
   description: Schema.String,
+  /** What the reported Directive stated, so a ship reads it from the seal; seals reported by older versions omit it. */
+  directive: opt(
+    Schema.Struct({
+      reasons: list(Schema.String),
+      status: DirectiveStatusSchema,
+    })
+  ),
   files: since(list(FileEntrySchema), []),
   fingerprint: Schema.String,
   freshnessUnverified: opt(Schema.String),
