@@ -360,6 +360,11 @@ const SealSchema = Schema.Struct({
   freshnessUnverified: opt(Schema.String),
   gates: since(GatesSchema, {}),
   gen: since(Count, 0),
+  /**
+   * Whether the user interrupted the Liaison: true keeps automatic recovery off until a resume or takeover, which sets
+   * false. Unset, an interruption this plugin did not see is still read from the session's history.
+   */
+  halted: opt(Schema.Boolean),
   headSha: Schema.String,
   /** The directory of the OpenCode instance that sealed it, whose watchdog reports it if the Liaison does not. */
   host: opt(Schema.String),
@@ -371,16 +376,28 @@ const SealSchema = Schema.Struct({
   ownerSession: Schema.String,
   /** A panel review's Directorate Seats: one model per SeatSchema. */
   panel: opt(list(Schema.String)),
+  /** The server process that sealed, took over, or recovered the review: while it lives, no other process recovers it. */
+  pid: opt(Schema.Finite),
   postImage: Schema.Literals(["worktree", "commit"]),
   /** Liaison sessions that owned this seal before a takeover, for full exports. */
   previousOwnerSessions: opt(list(Schema.String)),
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
   recheckOf: opt(Schema.String),
+  /** The one wake sent to an idle Liaison after a reload. Until admitted, the same ID is submitted again. */
+  recovery: opt(
+    Schema.Struct({
+      admitted: opt(Schema.Boolean),
+      id: Schema.String,
+      ownerSession: Schema.String,
+    })
+  ),
   refreshes: since(Count, 0),
   regions: since(list(RegionSchema), []),
   repo: Schema.String,
   reportedAt: opt(Time),
+  /** The ship whose loop this review belongs to. Only that ship continues it, even after the ship is stopped. */
+  ship: opt(Schema.String),
   sigs: opt(Schema.Record(Schema.String, Schema.String)),
   staleFiles: opt(list(Schema.String)),
   target: TargetSchema,

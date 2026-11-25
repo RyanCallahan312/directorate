@@ -36,6 +36,7 @@ import type {
   Seal,
   Target,
 } from "./model.ts";
+import { ProcessIdentity } from "./process-identity.ts";
 import { emptyLedger, Store } from "./store.ts";
 import { currentFingerprint, endsFingerprint, resolveEnds } from "./target.ts";
 import type { Current } from "./target.ts";
@@ -682,6 +683,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     const store = yield* Store;
     const top = yield* (yield* Git).root(input.repo);
     const host = yield* hostDirectory;
+    const { pid } = yield* ProcessIdentity;
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
     const panel = input.panel?.length ? [...new Set(input.panel)] : undefined;
@@ -718,6 +720,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
             owner: input.owner?.agent ?? REVIEWER,
             ownerSession: input.owner?.session ?? "",
             panel,
+            pid,
             postImage: ends.postImage,
             question: input.question,
             refreshes: 0,
@@ -994,6 +997,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     yield* recheckable(prior);
     const store = yield* Store;
     const host = yield* hostDirectory;
+    const { pid } = yield* ProcessIdentity;
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
 
@@ -1049,6 +1053,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             mode: prior.mode,
             owner: input.owner?.agent ?? REVIEWER,
             ownerSession: input.owner?.session ?? "",
+            pid,
             postImage: prior.postImage,
             question: input.question ?? prior.question,
             recheckOf: prior.id,

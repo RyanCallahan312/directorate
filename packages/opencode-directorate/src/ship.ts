@@ -12,6 +12,8 @@ import {
   Clock,
   Crypto,
   Effect,
+  Function,
+  Option,
   Predicate,
   Result,
   Schema,
@@ -24,6 +26,15 @@ import { Host } from "./host.ts";
 import { REVIEWER, ROLE_SET } from "./model.ts";
 import type { ReviewScope, Seal } from "./model.ts";
 import type { Platform } from "./platform.ts";
+import { ProcessIdentity } from "./process-identity.ts";
+import {
+  activity,
+  createdAt,
+  foreign,
+  locationKey,
+  turns,
+} from "./recovery.ts";
+import type { Activity } from "./recovery.ts";
 import { parseRequest, reviewRequest } from "./request.ts";
 import { decideShip, shipKickoff } from "./ship-step.ts";
 import { Store } from "./store.ts";
@@ -31,7 +42,22 @@ import { currentFingerprint } from "./target.ts";
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
+/** How long a finished subagent's completion notice may stay undelivered before recovery stops waiting for it. */
+const NOTICE_GRACE_MS = 30_000;
+
+const Plan = Schema.Struct({
+  checkpoint: Schema.optionalKey(Schema.String),
+  id: Schema.String,
+  origin: Schema.String,
+  rendered: Schema.Boolean,
+  text: Schema.String,
+});
+
 const ShipStateSchema = Schema.Struct({
+  /** An automatic continuation whose admission was not confirmed; recovery submits it again under the same ID. */
+  admitting: Schema.optionalKey(Schema.Boolean),
+  /** Background subagents the settled turn left running, and when each was seen: their notices come before the next step. */
+  awaiting: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
   boot: Schema.String,
   chain: Schema.Array(Schema.String),
   id: Schema.String,
@@ -45,7 +71,12 @@ const ShipStateSchema = Schema.Struct({
   lastHostFailure: Schema.optionalKey(Schema.String),
   location: Schema.optionalKey(Schema.String),
   needsAttachments: Schema.optionalKey(Schema.Boolean),
+  /** Queued completion notices by inbox ID, and the subagent each is from. */
+  notices: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   origin: Schema.optionalKey(Schema.String),
+  /** The server process driving the loop: while it lives, no other process recovers this ship. */
+  pid: Schema.optionalKey(Schema.Finite),
+  plan: Schema.optionalKey(Plan),
   reason: Schema.String,
   recovery: Schema.optionalKey(Schema.String),
   request: Schema.String,
@@ -54,6 +85,8 @@ const ShipStateSchema = Schema.Struct({
   startedAt: Schema.Finite,
   status: Schema.Literals(["waiting", "active", "paused", "complete"]),
   step: Schema.optional(Schema.String),
+  /** When an awaited subagent's notice was delivered: the turn it woke settles next. */
+  wokeAt: Schema.optionalKey(Schema.Finite),
 });
 
 type ShipState = typeof ShipStateSchema.Type;
@@ -62,32 +95,39 @@ type SessionID = Session.ID;
 
 type InboxKind = "user" | "other" | { readonly child: string };
 
-const inboxKind = (item: SessionInbox.Item): InboxKind => {
-  if (
-    item.type === "user" &&
-    item.payload.metadata?.source !== "directorate-ship"
-  ) {
+/** What an input is to Ship, by its type and metadata, whether still queued or already a message. */
+const kindOf = (
+  type: string,
+  metadata: SessionMessage.Info["metadata"]
+): InboxKind => {
+  if (type === "user" && metadata?.source !== "directorate-ship") {
     return "user";
   }
 
   if (
-    item.type === "synthetic" &&
-    item.payload.metadata?.source === "subagent" &&
-    Predicate.isString(item.payload.metadata.childID)
+    type === "synthetic" &&
+    metadata?.source === "subagent" &&
+    Predicate.isString(metadata.childID)
   ) {
-    return { child: item.payload.metadata.childID };
+    return { child: metadata.childID };
   }
 
   return "other";
 };
 
-const locationKey = (ref: {
-  readonly directory: string;
-  readonly workspaceID?: string | undefined;
-}) => JSON.stringify([ref.directory, ref.workspaceID ?? ""]);
+const inboxKind = (item: SessionInbox.Item): InboxKind =>
+  item.type === "user" || item.type === "synthetic"
+    ? kindOf(item.type, item.payload.metadata)
+    : "other";
 
+const asSessionID = Schema.decodeUnknownOption(Session.ID);
 const decode = Schema.decodeUnknownEffect(ShipStateSchema);
-const storageKey = (id: string) => `ship:${id}`;
+const decodeSnapshot = Schema.decodeUnknownOption(ShipStateSchema);
+const prefix = "ship:";
+const storageKey = (id: string) => `${prefix}${id}`;
+
+const running = (state: ShipState) =>
+  state.status === "active" || state.status === "waiting";
 
 const restartAttached =
   "Start a new /directorate-ship with the request and attachments; their delivery could not be confirmed.";
@@ -157,14 +197,6 @@ const checkpointID = (messages: readonly SessionMessage.Info[]) =>
     (message) => message.type === "compaction" && message.status === "completed"
   )?.id;
 
-interface Plan {
-  checkpoint?: string | undefined;
-  id: string;
-  origin: string;
-  rendered: boolean;
-  text: string;
-}
-
 const superseded = (
   messages: readonly SessionMessage.Info[],
   ship: string,
@@ -204,7 +236,7 @@ const superseded = (
 
 const checkpointHidesPlan = (
   messages: readonly SessionMessage.Info[],
-  plan: Plan
+  plan: typeof Plan.Type
 ) => {
   const checkpoint = checkpointID(messages);
 
@@ -246,6 +278,138 @@ const assertAgent = (agent: string | undefined) =>
       )
     : Effect.void;
 
+const MARKER =
+  "Directorate Ship continuation marker. It does not request any action on its own.";
+
+const relocated =
+  "The session moved to another OpenCode location. Start a new ship there.";
+
+/** Why recovery stops for a subagent the next step depends on. */
+const BLOCKED = {
+  interrupted: "The Liaison was interrupted before reporting.",
+  missing:
+    "The review's Liaison session is no longer available. Resuming dispatches a replacement, which may restart part of the review's time budget.",
+  unnoticed:
+    "A waiting subagent finished, but its completion message was not delivered.",
+};
+
+/** What one turn leaves for the next: nothing queued, planned, or awaited. */
+const settle = ({
+  admitting: _admitting,
+  awaiting: _awaiting,
+  inbox: _inbox,
+  lastHostFailure: _lastHostFailure,
+  notices: _notices,
+  plan: _plan,
+  wokeAt: _wokeAt,
+  ...settled
+}: ShipState) => settled;
+
+const turnFailure = (turn: SessionMessage.Idle) =>
+  turn.outcome === "failed"
+    ? `The session failed${turn.error ? `: ${turn.error.message}` : ""}.`
+    : "The session was interrupted.";
+
+/**
+ * What the session's history proves about the ship's last input: nothing yet (undefined), that it cannot be traced, or
+ * the messages since it with any reason they give to stop.
+ */
+const proven = (
+  state: ShipState,
+  messages: readonly SessionMessage.Info[],
+  failed: string | undefined
+):
+  | { readonly lost: string }
+  | {
+      readonly after: readonly SessionMessage.Info[];
+      readonly origin: string;
+      readonly reason: string | undefined;
+    }
+  | undefined => {
+  const { inbox, plan } = state;
+  const id = inbox?.id ?? state.origin;
+
+  const input = messages.find(
+    (message) =>
+      message.id === id &&
+      (message.type === "user" || message.type === "synthetic")
+  );
+
+  if (!input) {
+    // Missing delivery evidence is not evidence that an inbox item was cancelled; a known delivery was compacted away.
+    return inbox && inbox.deliveredAt === undefined
+      ? undefined
+      : { lost: checkpointID(messages) ? compacted : noProvenance };
+  }
+
+  const after = messages.slice(messages.indexOf(input) + 1);
+  const ended = turns(after);
+
+  // The host's times say idle, yet no turn has settled since the input: do not guess.
+  if (!ended.length) {
+    return;
+  }
+
+  // Every turn since the input, not only the last: a later success must not hide an interruption.
+  const turn = ended.find(({ outcome }) => outcome !== "succeeded");
+
+  const reason =
+    plan && checkpointHidesPlan(messages, plan)
+      ? compacted
+      : superseded(messages, state.id, plan?.origin ?? input.id, plan?.id);
+
+  return {
+    after,
+    origin: input.id,
+    reason: reason ?? (turn && (failed ?? turnFailure(turn))),
+  };
+};
+
+/** Why a subagent holds the next step back, if it does. An orphaned one neither runs nor sends a notice. */
+const held = (
+  act: Activity,
+  input: { interrupted: boolean; now: number; unnoticed: boolean }
+) => {
+  if (act.state === "running") {
+    return "busy" as const;
+  }
+
+  if (act.state !== "idle") {
+    return;
+  }
+
+  // The notice follows the subagent's settling; give the host a moment to deliver it.
+  if (input.unnoticed) {
+    return input.now - act.at <= NOTICE_GRACE_MS
+      ? ("busy" as const)
+      : ("unnoticed" as const);
+  }
+
+  return input.interrupted ? ("interrupted" as const) : undefined;
+};
+
+/** The same for a subagent whose session no longer exists: a Liaison cannot report, and no notice will come. */
+const gone = (owner: boolean, unnoticed: boolean) => {
+  if (owner) {
+    return "missing" as const;
+  }
+
+  return unnoticed ? ("unnoticed" as const) : undefined;
+};
+
+/** The awaited subagent whose completion notice this message is, if it arrived after the subagent was seen running. */
+const noticed = (
+  message: SessionMessage.Info,
+  awaiting: Readonly<Record<string, number>>
+) => {
+  const kind = kindOf(message.type, message.metadata);
+
+  return Predicate.isObject(kind) &&
+    createdAt(message) >= (awaiting[kind.child] ?? Infinity)
+    ? kind.child
+    : undefined;
+};
+
 export const registerShip = Effect.fn("Ship.register")(
   function* registerShip() {
     const host = yield* Host;
@@ -255,37 +419,10 @@ export const registerShip = Effect.fn("Ship.register")(
     const crypto = yield* Crypto.Crypto;
     const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
     const boot = yield* Effect.cached(uuid);
+    const { pid } = yield* ProcessIdentity;
 
-    const plans = new Map<SessionID, Plan>();
-
-    // Only idle observes background work. Ordered parent inbox deliveries consume its completion notices.
-    const waiting = new Map<
-      SessionID,
-      {
-        ship: string;
-        children: Map<string, number>;
-        inboxKinds: Map<string, InboxKind>;
-        wokeAt?: number | undefined;
-      }
-    >();
-
-    const backgroundFor = (id: SessionID, ship: string) => {
-      const current = waiting.get(id);
-
-      if (current?.ship === ship) {
-        return current;
-      }
-
-      const fresh = {
-        children: new Map<string, number>(),
-        inboxKinds: new Map<string, InboxKind>(),
-        ship,
-      };
-
-      waiting.set(id, fresh);
-
-      return fresh;
-    };
+    // What each queued input is, by inbox ID, until it settles. A reload forgets these; the message itself is read then.
+    const kinds = new Map<string, InboxKind>();
 
     const location = locationKey(host.location);
 
@@ -300,10 +437,17 @@ export const registerShip = Effect.fn("Ship.register")(
       state: ShipState,
       reason: string
     ) {
-      const paused: ShipState = { ...state, reason, status: "paused" };
+      const {
+        admitting: _admitting,
+        awaiting: _awaiting,
+        notices: _notices,
+        plan: _plan,
+        wokeAt: _wokeAt,
+        ...rest
+      } = state;
+
+      const paused: ShipState = { ...rest, reason, status: "paused" };
       yield* write(sessionID, paused);
-      plans.delete(sessionID);
-      waiting.delete(sessionID);
 
       return paused;
     });
@@ -320,7 +464,7 @@ export const registerShip = Effect.fn("Ship.register")(
 
       const state = yield* decode(raw);
 
-      // The host shares storage and events across locations; only the owner may disarm on reload.
+      // The host shares storage and events across locations.
       if (
         state.location !== location &&
         (!command || state.location !== undefined)
@@ -328,14 +472,7 @@ export const registerShip = Effect.fn("Ship.register")(
         return command ? state : undefined;
       }
 
-      return (state.status === "active" || state.status === "waiting") &&
-        (state.location !== location || state.boot !== (yield* boot))
-        ? yield* pause(
-            sessionID,
-            state,
-            "OpenCode reloaded or restarted before the ship finished."
-          )
-        : state;
+      return state;
     });
 
     const checkWorktree = Effect.fnUntraced(function* checkWorktree(
@@ -411,6 +548,16 @@ export const registerShip = Effect.fn("Ship.register")(
             return;
           }
 
+          // The seal names its ship first, so the review stays the ship's even once this record is stopped or replaced.
+          yield* store.withLock(
+            seal.id,
+            Effect.gen(function* own() {
+              yield* store.save({
+                ...(yield* store.load(seal.id)),
+                ship: state.id,
+              });
+            })
+          );
           yield* write(parentID, {
             ...state,
             chain: [...state.chain, seal.id],
@@ -450,6 +597,43 @@ export const registerShip = Effect.fn("Ship.register")(
     const history = (sessionID: SessionID) =>
       host.session.context({ sessionID }).pipe(Effect.orElseSucceed(() => []));
 
+    // OpenCode promotes input before assembling each request. Never put actionable instructions in the inbox itself.
+    const marker = (sessionID: SessionID, state: ShipState, id: string) =>
+      host.session.synthetic({
+        description: `Directorate ship: ${state.reason}`,
+        id: SessionMessage.ID.make(id),
+        metadata: metadata(state.id),
+        sessionID,
+        text: MARKER,
+      });
+
+    /** Persists `intent`, sends, then persists `submitted`. A failed send pauses the ship. */
+    const commit = <E>(
+      sessionID: SessionID,
+      intent: ShipState,
+      submitted: ShipState,
+      send: Effect.Effect<unknown, E>
+    ) =>
+      write(sessionID, intent).pipe(
+        Effect.andThen(send),
+        Effect.andThen(write(sessionID, submitted)),
+        Effect.onError((cause) => {
+          // Typed admission failures precede host enqueue. A defect or interruption may have left an item queued.
+          const { inbox: _inbox, ...rejected } = submitted;
+
+          const retained =
+            Cause.hasDies(cause) || Cause.hasInterrupts(cause)
+              ? submitted
+              : rejected;
+
+          return pause(
+            sessionID,
+            retained,
+            `Could not send the ship prompt: ${causeMessage(cause)}`
+          ).pipe(recover("could not persist ship pause after prompt failure"));
+        })
+      );
+
     const admit = Effect.fn("Ship.admit")(function* admit(
       sessionID: SessionID,
       state: ShipState,
@@ -470,164 +654,60 @@ export const registerShip = Effect.fn("Ship.register")(
       }
 
       const id = SessionMessage.ID.create();
-      const { lastHostFailure: _lastHostFailure, ...next } = state;
+      const checkpoint = checkpointID(messages);
 
-      const submitted: ShipState = {
-        ...next,
+      let submitted: ShipState = {
+        ...settle(state),
         inbox: { continuation: input === undefined, id },
         needsAttachments: input ? hasAttachments(input.prompt) : false,
         status: "waiting",
       };
 
-      // Do not leave an active loop behind if admission or its final storage write fails.
-      const pending = {
-        ...submitted,
-        reason: "Could not send the ship prompt.",
-        status: "paused" as const,
-      };
-
-      yield* write(sessionID, pending);
-
-      const message = { id, metadata: metadata(state.id), sessionID, text };
-
       if (!input && origin) {
-        plans.set(sessionID, {
-          checkpoint: checkpointID(messages),
-          id,
-          origin,
-          rendered: false,
-          text,
-        });
+        const plan = { id, origin, rendered: false, text };
+        submitted = {
+          ...submitted,
+          plan: checkpoint ? { ...plan, checkpoint } : plan,
+        };
       }
 
-      const delivery = input
-        ? host.session
-            .prompt({ ...input.prompt, ...message, delivery: input.delivery })
-            .pipe(Effect.asVoid)
-        : host.session
-            .synthetic({
-              ...message,
-              description: `Directorate ship: ${state.reason}`,
-              text: "Directorate Ship continuation marker. It does not request any action on its own.",
-            })
-            .pipe(Effect.asVoid);
+      if (!input) {
+        // A reload must not interrupt automatic admission between enqueue and its checkpoint; a crash there leaves the
+        // intent, not a pause, for recovery to submit again.
+        return yield* commit(
+          sessionID,
+          { ...submitted, admitting: true },
+          submitted,
+          marker(sessionID, state, id)
+        ).pipe(Effect.uninterruptible);
+      }
 
-      yield* delivery.pipe(
-        Effect.onError((cause) => {
-          // Typed admission failures precede host enqueue. A defect or interruption may have left an item queued.
-          const { inbox: _inbox, ...rejected } = pending;
-
-          const retained =
-            Cause.hasDies(cause) || Cause.hasInterrupts(cause)
-              ? pending
-              : rejected;
-
-          return pause(
-            sessionID,
-            retained,
-            `Could not send the ship prompt: ${causeMessage(cause)}`
-          ).pipe(recover("could not persist ship pause after prompt failure"));
+      // The user is here to retry: do not leave an active loop behind if admission or its final storage write fails.
+      yield* commit(
+        sessionID,
+        {
+          ...submitted,
+          reason: "Could not send the ship prompt.",
+          status: "paused",
+        },
+        submitted,
+        host.session.prompt({
+          ...input.prompt,
+          delivery: input.delivery,
+          id,
+          metadata: metadata(state.id),
+          sessionID,
+          text,
         })
       );
-      yield* write(sessionID, submitted);
     });
 
-    // OpenCode promotes input before assembling each request. Never put actionable instructions in the inbox itself.
-    const renderPlan = ({ sessionID, messages }: SessionContext) =>
-      Effect.suspend(() => {
-        const plan = plans.get(sessionID);
-
-        if (!plan) {
-          return Effect.void;
-        }
-
-        // The synthetic admission only wakes the runner; it does not wait for a model request.
-        return guarded(
-          sessionID,
-          Effect.gen(function* gateContinuation() {
-            const state = yield* read(sessionID);
-
-            if (
-              plans.get(sessionID) !== plan ||
-              state?.inbox?.id !== plan.id ||
-              (state.status !== "active" && state.status !== "waiting")
-            ) {
-              return;
-            }
-
-            const marker = messages.findIndex(
-              (message) => message.id === plan.id
-            );
-
-            const stored = yield* history(sessionID);
-
-            const promoted =
-              marker !== -1 ||
-              state.inbox.deliveredAt !== undefined ||
-              stored.some(
-                (message) =>
-                  message.id === plan.id && message.type === "synthetic"
-              );
-
-            if (!promoted) {
-              return;
-            }
-
-            // Completed checkpoints come from stored history, not the speculative compaction request.
-            if (checkpointHidesPlan(stored, plan)) {
-              const { inbox: _inbox, ...delivered } = state;
-              yield* pause(sessionID, delivered, compacted);
-
-              return;
-            }
-
-            if (marker === -1) {
-              return;
-            }
-
-            const reason = messages
-              .slice(0, marker)
-              .some((message) => message.id === plan.origin)
-              ? superseded(stored, state.id, plan.origin, plan.id)
-              : noProvenance;
-
-            if (reason) {
-              yield* pause(sessionID, state, reason);
-
-              return;
-            }
-
-            const entry = messages[marker];
-
-            if (entry?.role === "user") {
-              messages[marker] = {
-                ...entry,
-                content: [{ text: plan.text, type: "text" }],
-              };
-              plan.rendered = true;
-            }
-          })
-        );
-      }).pipe(recover("could not render ship continuation"));
-
-    const advance = Effect.fn("Ship.advance")(function* advance(
+    /** The next step for this state, from the seal and the tree as they are now. */
+    const decide = Effect.fnUntraced(function* decide(
       sessionID: SessionID,
       state: ShipState,
-      input?: CommandInvocation
+      manual = false
     ) {
-      if (
-        locationKey((yield* host.session.get({ sessionID })).location) !==
-        location
-      ) {
-        yield* pause(
-          sessionID,
-          state,
-          "The session moved to another OpenCode location. Start a new ship there."
-        );
-
-        return;
-      }
-
       const observed = yield* observeChain(sessionID, state).pipe(
         Effect.map(({ chain, seal }) => ({ chain, error: undefined, seal })),
         Effect.catch((error) =>
@@ -644,7 +724,7 @@ export const registerShip = Effect.fn("Ship.register")(
       const current = {
         ...state,
         chain,
-        reviewsAtResume: input ? chain.length : state.reviewsAtResume,
+        reviewsAtResume: manual ? chain.length : state.reviewsAtResume,
       };
 
       const review = seal?.reportedAt
@@ -661,6 +741,29 @@ export const registerShip = Effect.fn("Ship.register")(
         reviews: chain.length,
         seal,
       });
+
+      return { current, decision };
+    });
+
+    const advance = Effect.fn("Ship.advance")(function* advance(
+      sessionID: SessionID,
+      state: ShipState,
+      input?: CommandInvocation
+    ) {
+      if (
+        locationKey((yield* host.session.get({ sessionID })).location) !==
+        location
+      ) {
+        yield* pause(sessionID, state, relocated);
+
+        return;
+      }
+
+      const { current, decision } = yield* decide(
+        sessionID,
+        state,
+        input !== undefined
+      );
 
       const next = {
         ...current,
@@ -685,6 +788,109 @@ export const registerShip = Effect.fn("Ship.register")(
         return yield* failure(`${describe(ended)}\nNo continuation was sent.`);
       }
     });
+
+    /** Whether the step this plan was made for is still the step the seal and tree call for. */
+    const stillPlanned = Effect.fnUntraced(function* stillPlanned(
+      sessionID: SessionID,
+      state: ShipState,
+      plan: typeof Plan.Type
+    ) {
+      const { decision } = yield* decide(sessionID, {
+        ...state,
+        rounds: Math.max(0, state.rounds - 1),
+        step: undefined,
+      });
+
+      return decision.status === "active" && decision.text === plan.text;
+    });
+
+    // The synthetic admission only wakes the runner; it does not wait for a model request.
+    const renderPlan = ({ sessionID, messages }: SessionContext) =>
+      guarded(
+        sessionID,
+        Effect.gen(function* gateContinuation() {
+          const state = yield* read(sessionID);
+          const plan = state?.plan;
+
+          if (
+            !state ||
+            !plan ||
+            state.inbox?.id !== plan.id ||
+            !running(state)
+          ) {
+            return;
+          }
+
+          const index = messages.findIndex((message) => message.id === plan.id);
+
+          const stored = yield* history(sessionID);
+
+          const promoted =
+            index !== -1 ||
+            state.inbox.deliveredAt !== undefined ||
+            stored.some(
+              (message) =>
+                message.id === plan.id && message.type === "synthetic"
+            );
+
+          if (!promoted) {
+            return;
+          }
+
+          // Completed checkpoints come from stored history, not the speculative compaction request.
+          if (checkpointHidesPlan(stored, plan)) {
+            const { inbox: _inbox, ...delivered } = state;
+            yield* pause(sessionID, delivered, compacted);
+
+            return;
+          }
+
+          if (index === -1) {
+            return;
+          }
+
+          const reason = messages
+            .slice(0, index)
+            .some((message) => message.id === plan.origin)
+            ? superseded(stored, state.id, plan.origin, plan.id)
+            : noProvenance;
+
+          if (reason) {
+            yield* pause(sessionID, state, reason);
+
+            return;
+          }
+
+          // A plan that waited out a reload or restart may be for a tree that has since moved: leave its marker inert,
+          // and the settled turn is reassessed.
+          if (
+            !plan.rendered &&
+            state.boot !== (yield* boot) &&
+            !(yield* stillPlanned(sessionID, state, plan))
+          ) {
+            const { plan: _plan, ...stale } = state;
+            yield* write(sessionID, { ...stale, step: undefined });
+
+            return;
+          }
+
+          const entry = messages[index];
+
+          if (entry?.role === "user") {
+            if (!plan.rendered) {
+              yield* write(sessionID, {
+                ...state,
+                plan: { ...plan, rendered: true },
+              });
+            }
+
+            messages[index] = {
+              ...entry,
+              content: [{ text: plan.text, type: "text" }],
+            };
+          }
+        })
+      ).pipe(recover("could not render ship continuation"));
 
     const resume = Effect.fn("Ship.resume")(function* resume(
       input: CommandInvocation,
@@ -713,6 +919,7 @@ export const registerShip = Effect.fn("Ship.register")(
           boot: yield* boot,
           location,
           needsAttachments: false,
+          pid,
           reviewsAtResume: state.chain.length,
           rounds: 0,
           status: "active",
@@ -720,6 +927,210 @@ export const registerShip = Effect.fn("Ship.register")(
         },
         input
       );
+    });
+
+    /** What the next step still waits on: an awaited subagent's notice, or the unreported review's Liaison. */
+    const blocker = Effect.fnUntraced(function* blocker(
+      state: ShipState,
+      after: readonly SessionMessage.Info[]
+    ) {
+      const awaiting = state.awaiting ?? {};
+      const tip = state.chain.at(-1);
+
+      // A pruned or damaged seal is the next decision's error to report.
+      const seal = tip
+        ? yield* store
+            .load(tip)
+            .pipe(Effect.orElseSucceed(Function.constUndefined))
+        : undefined;
+
+      const owner = seal && !seal.reportedAt ? seal.ownerSession : undefined;
+
+      if (owner && seal?.halted) {
+        return "interrupted" as const;
+      }
+
+      const delivered = new Set(
+        after.map((message) => noticed(message, awaiting))
+      );
+
+      const now = yield* Clock.currentTimeMillis;
+
+      for (const child of new Set([
+        ...Object.keys(awaiting),
+        ...(owner ? [owner] : []),
+      ])) {
+        const unnoticed = child in awaiting && !delivered.has(child);
+
+        const info = yield* Option.match(asSessionID(child), {
+          onNone: () => Effect.succeedNone,
+          onSome: (sessionID) =>
+            host.session.get({ sessionID }).pipe(Effect.option),
+        });
+
+        const blocked = Option.isSome(info)
+          ? held(yield* activity(host, info.value), {
+              interrupted:
+                child === owner && info.value.outcome === "interrupted",
+              now,
+              unnoticed,
+            })
+          : gone(child === owner, unnoticed);
+
+        if (blocked) {
+          return blocked;
+        }
+      }
+    });
+
+    /** An automatic continuation whose admission was cut short. Returns the state to settle, if the host already holds it. */
+    const readmit = Effect.fnUntraced(function* readmit(
+      sessionID: SessionID,
+      state: ShipState,
+      messages: readonly SessionMessage.Info[]
+    ) {
+      const { admitting: _admitting, ...submitted } = state;
+      const { inbox, plan } = submitted;
+
+      if (!inbox || !plan) {
+        yield* pause(sessionID, submitted, noProvenance);
+
+        return;
+      }
+
+      if (messages.some((message) => message.id === inbox.id)) {
+        yield* write(sessionID, submitted);
+
+        return submitted;
+      }
+
+      const reason = superseded(messages, state.id, plan.origin);
+
+      if (reason) {
+        const { inbox: _inbox, ...rejected } = submitted;
+        yield* pause(sessionID, rejected, reason);
+
+        return;
+      }
+
+      // First admission wins for an ID the host already queued, so this never adds a second continuation.
+      yield* commit(
+        sessionID,
+        state,
+        submitted,
+        marker(sessionID, state, inbox.id)
+      ).pipe(Effect.uninterruptible);
+    });
+
+    /**
+     * A ship from before this plugin instance loaded, once its session is idle: decide from what the host recorded, not
+     * from events this instance may never have seen. Anything unproven waits or pauses.
+     */
+    const reconcile = Effect.fn("Ship.reconcile")(function* reconcile(
+      sessionID: SessionID,
+      stored: ShipState,
+      failed?: string
+    ) {
+      const session = yield* host.session.get({ sessionID });
+
+      if (locationKey(session.location) !== location) {
+        return yield* pause(sessionID, stored, relocated);
+      }
+
+      // A turn the restart orphaned is the host's to resume.
+      if (
+        session.time.archived ||
+        session.revert ||
+        (yield* activity(host, session)).state !== "idle"
+      ) {
+        return;
+      }
+
+      const messages = yield* host.session.context({ sessionID });
+
+      const state = stored.admitting
+        ? yield* readmit(sessionID, stored, messages)
+        : stored;
+
+      const found = state && proven(state, messages, failed);
+
+      if (!state || !found) {
+        return;
+      }
+
+      const settled = { ...settle(state), boot: yield* boot, pid };
+
+      if ("lost" in found) {
+        return yield* pause(sessionID, settled, found.lost);
+      }
+
+      // The exact input is in the history, so its attachments were delivered with it.
+      const delivered = {
+        ...settled,
+        needsAttachments: false,
+        origin: found.origin,
+      };
+
+      const blocked = found.reason
+        ? undefined
+        : yield* blocker(state, found.after);
+
+      if (blocked === "busy") {
+        return;
+      }
+
+      const reason = found.reason ?? (blocked && BLOCKED[blocked]);
+
+      if (reason) {
+        return yield* pause(sessionID, delivered, reason);
+      }
+
+      // Recompute the next step from the seal and current tree, not the old prompt text.
+      yield* advance(sessionID, {
+        ...delivered,
+        step: state.plan?.rendered === false ? undefined : delivered.step,
+      });
+    });
+
+    const recoverShips = Effect.gen(function* recoverShips() {
+      const current = yield* boot;
+      let after: string | undefined;
+
+      do {
+        const page = yield* host.storage.scan(
+          after ? { after, prefix } : { prefix }
+        );
+
+        for (const { key, value } of page.entries) {
+          const snapshot = Option.getOrUndefined(decodeSnapshot(value));
+
+          // Settled records, other locations', this instance's own, and another live server's need no lock; one that
+          // changes is seen by the next sweep.
+          if (
+            !snapshot ||
+            !running(snapshot) ||
+            snapshot.location !== location ||
+            snapshot.boot === current ||
+            (yield* foreign(snapshot.pid))
+          ) {
+            continue;
+          }
+
+          const sessionID = Session.ID.make(key.slice(prefix.length));
+          yield* guarded(
+            sessionID,
+            Effect.gen(function* recoverOne() {
+              const state = yield* read(sessionID);
+
+              if (state && running(state) && state.boot !== current) {
+                yield* reconcile(sessionID, state);
+              }
+            })
+          ).pipe(recover(`could not recover ship in ${sessionID}`));
+        }
+
+        after = page.next;
+      } while (after);
     });
 
     const clear = Effect.fnUntraced(function* clear(
@@ -743,11 +1154,10 @@ export const registerShip = Effect.fn("Ship.register")(
         return yield* failure(cancelFirst(pending));
       }
 
-      plans.delete(sessionID);
-      waiting.delete(sessionID);
       yield* host.storage.remove(storageKey(sessionID));
     });
 
+    // Only idle observes background work. Ordered parent inbox deliveries consume its completion notices.
     const idle = ({ sessionID, background }: SessionIdle) =>
       guarded(
         sessionID,
@@ -755,16 +1165,17 @@ export const registerShip = Effect.fn("Ship.register")(
           const at = yield* Clock.currentTimeMillis;
           const state = yield* read(sessionID);
 
-          if (state?.status !== "active" && state?.status !== "waiting") {
-            return;
-          }
+          const seen = background.flatMap((work) =>
+            work.kind === "subagent" && work.sessionID === sessionID
+              ? [[work.childSessionID, at] as const]
+              : []
+          );
 
-          const entry = backgroundFor(sessionID, state.id);
-
-          for (const work of background) {
-            if (work.kind === "subagent" && work.sessionID === sessionID) {
-              entry.children.set(work.childSessionID, at);
-            }
+          if (state && running(state) && seen.length) {
+            yield* write(sessionID, {
+              ...state,
+              awaiting: { ...state.awaiting, ...Object.fromEntries(seen) },
+            });
           }
         })
       ).pipe(recover("ship idle hook failed"));
@@ -854,6 +1265,7 @@ export const registerShip = Effect.fn("Ship.register")(
             chain: [],
             id,
             location,
+            pid,
             reason: "Waiting for the initial Directorate review.",
             request: raw,
             reviewsAtResume: 0,
@@ -877,42 +1289,33 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* onEnqueue() {
           const state = yield* read(sessionID);
 
-          if (state?.status === "active" || state?.status === "waiting") {
-            backgroundFor(sessionID, state.id).inboxKinds.set(
-              id,
-              inboxKind(item)
-            );
+          if (!state || !running(state)) {
+            return;
+          }
+
+          const kind = inboxKind(item);
+          kinds.set(id, kind);
+
+          // A notice outlives a reload: its cancellation must still pause the ship that waits on it.
+          if (Predicate.isObject(kind)) {
+            yield* write(sessionID, {
+              ...state,
+              notices: { ...state.notices, [id]: kind.child },
+            });
           }
         })
       ).pipe(recover("could not record ship inbox enqueue"));
 
-    const handoffReason = Effect.fnUntraced(function* handoffReason(
+    /** An item may have been queued before this instance existed. Inspect its exact ID only for its type, not its outcome. */
+    const classify = Effect.fnUntraced(function* classify(
       sessionID: SessionID,
-      id: string,
-      kind: InboxKind | undefined
+      id: string
     ) {
-      let classified = kind;
+      const message = (yield* history(sessionID)).find(
+        (entry) => entry.id === id
+      );
 
-      // An item may have been queued before Ship existed. Inspect its exact ID only for its type, not its outcome.
-      if (kind === undefined) {
-        const messages = yield* host.session
-          .context({ sessionID })
-          .pipe(Effect.orElseSucceed(() => []));
-
-        const message = messages.find((entry) => entry.id === id);
-
-        if (!message) {
-          return `Could not classify delivered input ${id}; Ship yielded control. Use /directorate-ship resume when ready.`;
-        }
-
-        classified =
-          message.type === "user" &&
-          message.metadata?.source !== "directorate-ship"
-            ? "user"
-            : "other";
-      }
-
-      return classified === "user" ? handoff : undefined;
+      return message && kindOf(message.type, message.metadata);
     });
 
     const recordDelivery = Effect.fnUntraced(function* recordDelivery(
@@ -922,7 +1325,7 @@ export const registerShip = Effect.fn("Ship.register")(
       at: number
     ) {
       const { lastHostFailure: _lastHostFailure, ...deliveredState } = state;
-      const plan = plans.get(sessionID);
+      const { plan } = state;
 
       // The primary hook can run before the stream supplies proof of exact promotion.
       if (
@@ -943,6 +1346,60 @@ export const registerShip = Effect.fn("Ship.register")(
       });
     });
 
+    /** An input other than the ship's own settled: a user prompt hands control back, a subagent's notice is consumed. */
+    const otherSettled = Effect.fnUntraced(function* otherSettled(
+      sessionID: SessionID,
+      state: ShipState,
+      id: string,
+      delivered: boolean,
+      at: number
+    ) {
+      const { [id]: notice, ...notices } = state.notices ?? {};
+      let kind = kinds.get(id) ?? (notice ? { child: notice } : undefined);
+      kinds.delete(id);
+
+      if (
+        delivered &&
+        (state.status === "active" ||
+          (state.status === "waiting" && state.inbox?.continuation))
+      ) {
+        kind ??= yield* classify(sessionID, id);
+
+        if (kind === undefined) {
+          return yield* pause(
+            sessionID,
+            state,
+            `Could not classify delivered input ${id}; Ship yielded control. Use /directorate-ship resume when ready.`
+          );
+        }
+
+        if (kind === "user") {
+          return yield* pause(sessionID, state, handoff);
+        }
+      }
+
+      if (!Predicate.isObject(kind)) {
+        return;
+      }
+
+      const { [kind.child]: observedAt, ...awaiting } = state.awaiting ?? {};
+
+      // An older notice may be consumed by this subscriber after the same child was relaunched.
+      if (!reached(at, observedAt)) {
+        return;
+      }
+
+      if (delivered) {
+        yield* write(sessionID, { ...state, awaiting, notices, wokeAt: at });
+      } else if (!queued(state)) {
+        yield* pause(
+          sessionID,
+          state,
+          "The waiting subagent's completion message was cancelled."
+        );
+      }
+    });
+
     const inboxSettled = (
       sessionID: SessionID,
       id: string,
@@ -958,45 +1415,11 @@ export const registerShip = Effect.fn("Ship.register")(
             return;
           }
 
-          const background = waiting.get(sessionID);
-          const kind = background?.inboxKinds.get(id);
-          background?.inboxKinds.delete(id);
-
           if (state.inbox?.id !== id) {
-            if (
-              delivered &&
-              (state.status === "active" ||
-                (state.status === "waiting" && state.inbox?.continuation))
-            ) {
-              const reason = yield* handoffReason(sessionID, id, kind);
-
-              if (reason) {
-                return yield* pause(sessionID, state, reason);
-              }
-            }
-
-            if (background && Predicate.isObject(kind)) {
-              const { child } = kind;
-
-              const observedAt = background.children.get(child);
-
-              // An older notice may be consumed by this subscriber after the same child was relaunched.
-              if (reached(at, observedAt)) {
-                if (delivered) {
-                  background.children.delete(child);
-                  background.wokeAt = at;
-                } else if (!queued(state)) {
-                  return yield* pause(
-                    sessionID,
-                    state,
-                    "The waiting subagent's completion message was cancelled."
-                  );
-                }
-              }
-            }
-
-            return;
+            return yield* otherSettled(sessionID, state, id, delivered, at);
           }
+
+          kinds.delete(id);
 
           if (state.inbox.deliveredAt !== undefined) {
             return;
@@ -1015,12 +1438,6 @@ export const registerShip = Effect.fn("Ship.register")(
         })
       ).pipe(recover("could not handle ship inbox delivery"));
 
-    const unrenderedPlan = (sessionID: SessionID, id: string | undefined) => {
-      const plan = plans.get(sessionID);
-
-      return plan && plan.id === id && !plan.rendered;
-    };
-
     const executionSettled = (
       sessionID: SessionID,
       at: number,
@@ -1031,7 +1448,16 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* onTerminal() {
           const state = yield* read(sessionID);
 
-          if (state?.status === "waiting") {
+          if (!state || !running(state)) {
+            return;
+          }
+
+          // This instance did not see the whole turn: the host's record decides, including how the turn ended.
+          if (state.boot !== (yield* boot)) {
+            return yield* reconcile(sessionID, state, reason);
+          }
+
+          if (state.status === "waiting") {
             // The host does not attribute a busy period to any one queued input.
             if (reason !== undefined) {
               yield* write(sessionID, { ...state, lastHostFailure: reason });
@@ -1040,44 +1466,34 @@ export const registerShip = Effect.fn("Ship.register")(
             return;
           }
 
-          if (state?.status !== "active") {
-            return;
-          }
-
-          const deliveredAt = state.inbox?.deliveredAt;
-          const background = waiting.get(sessionID);
-          const related = reached(at, deliveredAt);
-          const wokeForChild = !state.inbox && reached(at, background?.wokeAt);
-
-          if (reason !== undefined) {
-            if (related || wokeForChild) {
-              yield* pause(sessionID, state, reason);
-            }
-
-            return;
-          }
+          const related = reached(at, state.inbox?.deliveredAt);
+          const wokeForChild = !state.inbox && reached(at, state.wokeAt);
 
           if (!related && !wokeForChild) {
             return;
           }
 
-          if (unrenderedPlan(sessionID, state.inbox?.id)) {
+          if (reason !== undefined) {
+            return yield* pause(sessionID, state, reason);
+          }
+
+          if (state.plan && !state.plan.rendered) {
             yield* pause(sessionID, state, noProvenance);
 
             return;
           }
 
-          plans.delete(sessionID);
-
           // Consume this input's successful execution before deciding or waiting for a child result.
-          const { inbox: _inbox, ...settled } = state;
-          yield* write(sessionID, settled);
+          const {
+            inbox: _inbox,
+            plan: _plan,
+            wokeAt: _wokeAt,
+            ...settled
+          } = state;
 
-          if (background) {
-            background.wokeAt = undefined;
-          }
+          if (Object.keys(settled.awaiting ?? {}).length) {
+            yield* write(sessionID, settled);
 
-          if (background?.children.size) {
             return;
           }
 
@@ -1098,15 +1514,9 @@ export const registerShip = Effect.fn("Ship.register")(
       ).pipe(recover("could not settle ship session execution"));
 
     const remove = (sessionID: string) =>
-      guarded(
-        sessionID,
-        Effect.suspend(() => {
-          plans.delete(Session.ID.make(sessionID));
-          waiting.delete(Session.ID.make(sessionID));
-
-          return host.storage.remove(storageKey(sessionID));
-        })
-      ).pipe(recover("could not remove ship for deleted session"));
+      guarded(sessionID, host.storage.remove(storageKey(sessionID))).pipe(
+        recover("could not remove ship for deleted session")
+      );
 
     const moved = (
       sessionID: SessionID,
@@ -1122,11 +1532,7 @@ export const registerShip = Effect.fn("Ship.register")(
           const state = yield* read(sessionID);
 
           if (state?.status === "active" || state?.status === "waiting") {
-            yield* pause(
-              sessionID,
-              state,
-              "The session moved to another OpenCode location. Start a new ship there."
-            );
+            yield* pause(sessionID, state, relocated);
           }
         })
       ).pipe(recover("could not pause ship after moving session"));
@@ -1140,6 +1546,7 @@ export const registerShip = Effect.fn("Ship.register")(
       inboxEnqueued,
       inboxSettled,
       moved,
+      recoverShips,
       remove,
       sealed,
     };

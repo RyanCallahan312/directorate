@@ -27,10 +27,12 @@ import type { SessionInbox } from "@opencode/schema/session-inbox";
 import { SessionMessage } from "@opencode/schema/session-message";
 import {
   Cause,
+  Clock,
   ConfigProvider,
   Data,
   DateTime,
   Deferred,
+  Duration,
   Effect,
   Exit,
   Layer,
@@ -52,6 +54,7 @@ import {
   SealJson,
 } from "../src/model.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
+import { Worktree } from "../src/worktree.ts";
 import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {
@@ -158,7 +161,7 @@ interface BusEvent {
 }
 
 /** Serves one event per pull, so the plugin asking for the next event means it finished the previous one. */
-const eventBus = () => {
+const eventBus = (now: () => number) => {
   const queue = Effect.runSync(
     Queue.unbounded<{
       event: BusEvent & { created: number };
@@ -179,7 +182,7 @@ const eventBus = () => {
         Effect.gen(function* emit() {
           const handled = yield* Deferred.make<true>();
           yield* Queue.offer(queue, {
-            event: { created: Date.now(), ...event },
+            event: { created: now(), ...event },
             handled,
           });
           yield* Deferred.await(handled);
@@ -197,7 +200,7 @@ const eventBus = () => {
     },
     post: (event: BusEvent) => {
       Queue.offerUnsafe(queue, {
-        event: { created: Date.now(), ...event },
+        event: { created: now(), ...event },
         handled: Deferred.makeUnsafe<true>(),
       });
     },
@@ -233,15 +236,6 @@ const SessionNotFound = Schema.TaggedStruct("Session.NotFoundError", {
   sessionID: Schema.String,
 });
 
-const inboxEntry = (
-  sessionID: Session.ID,
-  id = SessionMessage.ID.create()
-) => ({
-  id,
-  sessionID,
-  time: { created: DateTime.nowUnsafe() },
-});
-
 /** Host state that outlives a plugin reload: instruction entries per session, and each child session's parent. */
 const entries = new Map<string, Map<string, string>>();
 const parents = new Map<string, string>();
@@ -253,7 +247,51 @@ const movedSessions = new Map<string, string>();
 /** OpenCode persists plugin storage across reloads and shares it across locations. */
 const storage = new Map<string, Schema.Json>();
 
-afterEach(() => storage.clear());
+/** Each storage key the plugin read, so a test can show what a sweep left alone. */
+const storageReads: string[] = [];
+
+type InboxItem = SessionInbox.User | SessionInbox.Synthetic;
+
+/** The host's queue outlives a plugin reload. */
+const inbox: InboxItem[] = [];
+
+/** Whether the host already holds this ID, queued or promoted: the first admission of an ID wins. */
+const admitted = (id: string | undefined) =>
+  inbox.some((item) => item.id === id);
+
+/** Each session's history as the host projects it: promoted inputs, and a marker for every turn that settled. */
+const projected = new Map<string, (InboxItem | SessionMessage.Idle)[]>();
+
+const projectInput = (item: InboxItem) => {
+  const items = projected.get(item.sessionID) ?? [];
+
+  if (!items.some(({ id }) => id === item.id)) {
+    projected.set(item.sessionID, [...items, item]);
+  }
+};
+
+/** What the host records of a session beyond its agent and parent. */
+const sessionRecords = new Map<
+  string,
+  Partial<Pick<Session.Info, "outcome" | "revert">> & {
+    time: Partial<Session.Info["time"]>;
+  }
+>();
+
+/** Sessions the host is executing right now, whatever their recorded times say. */
+const executing = new Set<string>();
+
+/** `session.wait` calls blocked on an executing session, until the caller's timeout interrupts them. */
+let blockedWaits = 0;
+
+afterEach(() => {
+  storage.clear();
+  storageReads.length = 0;
+  inbox.length = 0;
+  projected.clear();
+  sessionRecords.clear();
+  executing.clear();
+});
 
 type JsonPrimitive = string | number | boolean | null | undefined;
 
@@ -421,14 +459,31 @@ const harness = async (
 
   const prompts: SubmittedPrompt[] = [];
   const synthetics: SyntheticPrompt[] = [];
-  const inbox: (SessionInbox.User | SessionInbox.Synthetic)[] = [];
-  const delivered = new Set<SessionMessage.ID>();
   const checkpoints = new Map<string, SessionMessage.CompactionCompleted>();
   const deleted = new Set<string>();
-  const bus = eventBus();
+  // The host stamps events and messages with its clock, which a test may have made virtual.
+  const clock = await run(Clock.Clock);
+  const now = () => clock.currentTimeMillisUnsafe();
+  const bus = eventBus(now);
+
+  const inboxEntry = (
+    sessionID: Session.ID,
+    id = SessionMessage.ID.create()
+  ) => ({
+    id,
+    sessionID,
+    time: { created: DateTime.makeUnsafe(now()) },
+  });
+
   let promptFailure: Error | undefined;
 
-  const enqueue = (item: SessionInbox.User | SessionInbox.Synthetic) => {
+  const enqueue = (item: InboxItem) => {
+    const held = inbox.find(({ id }) => id === item.id);
+
+    if (held) {
+      return held;
+    }
+
     inbox.push(item);
     bus.post({
       data: { inboxID: item.id, item, sessionID: item.sessionID },
@@ -540,19 +595,16 @@ const harness = async (
         Effect.sync(() => {
           const checkpoint = checkpoints.get(sessionID);
 
-          const messages = [...delivered]
-            .flatMap(
-              (id) =>
-                inbox.find(
-                  (item) => item.id === id && item.sessionID === sessionID
-                ) ?? []
-            )
-            .map(({ id, payload, time, type }) => ({
-              ...payload,
-              id,
-              time,
-              type,
-            }));
+          const messages = (projected.get(sessionID) ?? []).map((entry) =>
+            entry.type === "idle"
+              ? entry
+              : {
+                  ...entry.payload,
+                  id: entry.id,
+                  time: entry.time,
+                  type: entry.type,
+                }
+          );
 
           return checkpoint ? [checkpoint, ...messages] : messages;
         }),
@@ -562,8 +614,11 @@ const harness = async (
             ? Effect.fail(SessionNotFound.make({ sessionID }))
             : Effect.succeed({
                 agent: sessionAgents.get(sessionID),
+                id: sessionID,
                 location: { directory: movedSessions.get(sessionID) ?? dir },
                 parentID: parents.get(sessionID),
+                time: {},
+                ...sessionRecords.get(sessionID),
               })
         ),
       hook: (
@@ -676,11 +731,29 @@ const harness = async (
             type: "synthetic",
           };
 
-          synthetics.push(input);
-          notices.push(text);
+          if (!admitted(id)) {
+            synthetics.push(input);
+            notices.push(text);
+          }
 
           return enqueue(item);
         }).pipe(Effect.tap(() => Deferred.succeed(notified, input.text))),
+      wait: ({ sessionID }: { sessionID: string }) =>
+        Effect.suspend(() => {
+          if (!executing.has(sessionID)) {
+            return Effect.void;
+          }
+
+          blockedWaits += 1;
+
+          return Effect.never.pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                blockedWaits -= 1;
+              })
+            )
+          );
+        }),
     },
     skill: {
       transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
@@ -698,11 +771,21 @@ const harness = async (
     },
     storage: {
       get: (key: string) =>
-        Effect.sync(() => structuredClone(storage.get(key))),
+        Effect.sync(() => {
+          storageReads.push(key);
+
+          return structuredClone(storage.get(key));
+        }),
       remove: (key: string) =>
         Effect.sync(() => {
           storage.delete(key);
         }),
+      scan: ({ prefix }: { prefix: string }) =>
+        Effect.sync(() => ({
+          entries: [...storage].flatMap(([key, value]) =>
+            key.startsWith(prefix) ? [{ key, value }] : []
+          ),
+        })),
       set: (key: string, value: Schema.Json) =>
         Effect.sync(() => {
           storage.set(key, structuredClone(value));
@@ -754,11 +837,12 @@ const harness = async (
     name: string,
     input: ToolInput,
     agent = "directorate_liaison",
-    session = "lead"
+    session = "lead",
+    runTool = run
   ) => {
     const tool = present(tools.get(name));
 
-    return run(
+    return runTool(
       Schema.decodeEffect(tool.input)(input).pipe(
         Effect.flatMap((decoded) =>
           tool.execute(decoded, {
@@ -909,8 +993,45 @@ const harness = async (
       sessionID: Session.ID.make(S(session)),
     });
 
+  /** What the host records when an execution starts or settles, without telling the plugin. */
+  const projectOutcome = (
+    outcome: "started" | "succeeded" | "interrupted" | "failed",
+    session = "lead"
+  ) => {
+    const sessionID = S(session);
+    const at = DateTime.makeUnsafe(now());
+    const previous = sessionRecords.get(sessionID);
+
+    if (outcome === "started") {
+      executing.add(sessionID);
+      sessionRecords.set(sessionID, {
+        ...previous,
+        time: { ...previous?.time, busy: at },
+      });
+    } else {
+      executing.delete(sessionID);
+      sessionRecords.set(sessionID, {
+        ...previous,
+        outcome,
+        time: { ...previous?.time, idle: at },
+      });
+      projected.set(sessionID, [
+        ...(projected.get(sessionID) ?? []),
+        SessionMessage.Idle.make({
+          id: SessionMessage.ID.create(),
+          outcome,
+          time: { created: at },
+          type: "idle",
+        }),
+      ]);
+    }
+
+    return DateTime.toEpochMillis(at);
+  };
+
   const execution = (outcome: "started" | "succeeded", session = "lead") =>
     bus.emit({
+      created: projectOutcome(outcome, session),
       data: { sessionID: S(session) },
       type: `session.execution.${outcome}`,
     });
@@ -922,6 +1043,10 @@ const harness = async (
     const history = await run(ctx.session.context({ sessionID }));
 
     const messages: SessionContext["messages"] = history.flatMap((item) => {
+      if (item.type === "idle") {
+        return [];
+      }
+
       const text =
         item.type === "compaction"
           ? `<conversation-checkpoint>\n<summary>${item.summary}</summary>\n</conversation-checkpoint>`
@@ -950,22 +1075,49 @@ const harness = async (
     return messages;
   };
 
-  const projectLatest = (session = "lead") => {
+  /** Promotes an input into the session's history; unless `told` is false, the plugin hears of the delivery. */
+  const promote = (item: InboxItem, told = true) => {
+    projectInput(item);
+
+    return told
+      ? bus.emit({
+          data: { inboxID: item.id, sessionID: item.sessionID },
+          type: "session.inbox.delivered",
+        })
+      : Promise.resolve();
+  };
+
+  const projectLatest = (session = "lead", told = true) => {
     const sessionID = S(session);
 
     const item = present(
       inbox.findLast((entry) => entry.sessionID === sessionID)
     );
 
-    delivered.add(item.id);
+    return { delivery: promote(item, told), id: item.id };
+  };
 
-    return {
-      delivery: bus.emit({
-        data: { inboxID: item.id, sessionID },
-        type: "session.inbox.delivered",
-      }),
-      id: item.id,
+  /** A background subagent's completion notice, queued for its parent. */
+  const notice = async (child: string, session = "lead") => {
+    const sessionID = Session.ID.make(S(session));
+
+    const item: SessionInbox.Synthetic = {
+      ...inboxEntry(sessionID),
+      delivery: "queue",
+      payload: {
+        metadata: { childID: S(child), source: "subagent" },
+        text: `${child} finished.`,
+      },
+      type: "synthetic",
     };
+
+    inbox.push(item);
+    await bus.emit({
+      data: { inboxID: item.id, item, sessionID },
+      type: "session.inbox.enqueued",
+    });
+
+    return item;
   };
 
   return {
@@ -977,11 +1129,7 @@ const harness = async (
     client,
     commands,
     compactHistory: (sessionID: string, summary: string) => {
-      for (const item of inbox) {
-        if (item.sessionID === sessionID) {
-          delivered.delete(item.id);
-        }
-      }
+      projected.delete(sessionID);
 
       checkpoints.set(
         sessionID,
@@ -1037,26 +1185,33 @@ const harness = async (
         type: "session.moved",
       });
     },
+    notice,
     notices,
     notified,
     projectLatest,
-    projectOrdinary: (text: string) => {
+    projectOrdinary: (text: string, told = true) => {
       const sessionID = Session.ID.make(S("lead"));
 
-      const item = enqueue({
+      const item: SessionInbox.User = {
         ...inboxEntry(sessionID),
         delivery: "steer",
         payload: { text },
         type: "user",
-      });
+      };
 
-      delivered.add(item.id);
+      inbox.push(item);
 
-      return bus.emit({
-        data: { inboxID: item.id, sessionID },
-        type: "session.inbox.delivered",
-      });
+      if (told) {
+        bus.post({
+          data: { inboxID: item.id, item, sessionID },
+          type: "session.inbox.enqueued",
+        });
+      }
+
+      return promote(item, told);
     },
+    projectOutcome,
+    promote,
     prompts,
     rejectNextPrompt: (error: Error) => {
       promptFailure = error;
@@ -2235,7 +2390,7 @@ test("/directorate-ship controls and execution events affect only the owning ses
   await h.deliver();
   await h.bus.emit({
     created: 0,
-    data: { reason: "shutdown", sessionID: lead },
+    data: { reason: "user", sessionID: lead },
     type: "session.execution.interrupted",
   });
   assert.equal(
@@ -2246,6 +2401,15 @@ test("/directorate-ship controls and execution events affect only the owning ses
 
   await h.bus.emit({
     data: { reason: "shutdown", sessionID: lead },
+    type: "session.execution.interrupted",
+  });
+  assert.equal(
+    shipState(lead).status,
+    "active",
+    "shutdown leaves Ship recoverable"
+  );
+  await h.bus.emit({
+    data: { reason: "user", sessionID: lead },
     type: "session.execution.interrupted",
   });
   assert.equal(shipState(lead).status, "paused");
@@ -2361,7 +2525,10 @@ test("/directorate-ship does not dispatch a fix if user input is projected durin
   t.mock.method(Worktree, "use", gated);
 
   const success = h.execution("succeeded");
-  await Effect.runPromise(Deferred.await(entered));
+  await Promise.race([
+    Effect.runPromise(Deferred.await(entered), { signal: t.signal }),
+    success.then(() => assert.fail("Execution finished before fingerprinting")),
+  ]);
 
   const delivered = h.projectOrdinary(
     "Stop editing; I will take it from here."
@@ -2583,30 +2750,729 @@ test("/directorate-ship ignores successor idle after failure and requires cancel
   assert.equal(reloaded.synthetics.length, 0);
 });
 
-test("/directorate-ship reload pauses old active state until an explicit resume", async () => {
-  const dir = repo();
-  const h = await harness(dir, "ship-reload");
-  const lead = h.S("lead");
+type Harness = Awaited<ReturnType<typeof harness>>;
+
+/**
+ * Virtual time for recovery tests. `load` starts a plugin instance on it, closing the one before as a reload does;
+ * `sweep` moves thirty seconds on and resolves once the recovery sweep it woke has finished.
+ */
+const virtual = (
+  body: (clock: {
+    load: (dir: string, ids: string) => Promise<Harness>;
+    sweep: () => Promise<void>;
+  }) => Promise<void>
+) =>
+  Effect.runPromise(
+    Effect.gen(function* virtualTime() {
+      yield* TestClock.setTime(Date.now());
+      const clock = yield* Clock.Clock;
+      const context = yield* Effect.context<never>();
+      let naps = 0;
+      let current: Harness | undefined;
+
+      // Each sweep ends by sleeping until the next one, so counting those sleeps tells when a sweep has finished.
+      const watched: Clock.Clock = {
+        currentTimeMillis: clock.currentTimeMillis,
+        currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+        currentTimeNanos: clock.currentTimeNanos,
+        currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+        monotonicTimeNanos: clock.monotonicTimeNanos,
+        monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+        sleep: (duration) => {
+          naps += Duration.toMillis(duration) === 30_000 ? 1 : 0;
+
+          return clock.sleep(duration);
+        },
+      };
+
+      const run = <A, E>(effect: Effect.Effect<A, E>) =>
+        Effect.runPromiseWith(context)(
+          Effect.provideService(effect, Clock.Clock, watched)
+        );
+
+      /** Resolves once the sweep fiber sleeps again after `before` naps; a check of an executing session waits out its timeout. */
+      const napped = async (before: number): Promise<void> => {
+        if (naps !== before) {
+          return;
+        }
+
+        if (blockedWaits) {
+          await Effect.runPromiseWith(context)(TestClock.adjust("250 millis"));
+        }
+
+        await delay(1);
+
+        return napped(before);
+      };
+
+      yield* Effect.tryPromise(() =>
+        body({
+          load: async (dir, ids) => {
+            if (current) {
+              await run(Scope.close(current.scope, Exit.void));
+              // A seal or ship from before the reload is older than the instance that recovers it.
+              await Effect.runPromiseWith(context)(
+                TestClock.adjust("1 second")
+              );
+            }
+
+            const before = naps;
+            current = await harness(dir, ids, run);
+
+            // Its sweep fiber is asleep before the first `sweep` counts from here.
+            await napped(before);
+
+            return current;
+          },
+          sweep: async () => {
+            const before = naps;
+            await Effect.runPromiseWith(context)(
+              TestClock.adjust("30 seconds")
+            );
+            await napped(before);
+          },
+        })
+      );
+    }).pipe(Effect.provide(TestClock.layer()))
+  );
+
+const LIAISON = "directorate_liaison";
+const FIXED_SOURCE = "export const a = 3\n";
+
+/** A ship whose review reported one confirmed finding; its fix continuation is queued, not yet delivered. */
+const shipWithQueuedFix = async (h: Harness) => {
   await h.createSession("lead", "build");
-  await h.ship("");
+  await h.ship("--scope local");
   await h.deliver();
-  const active = shipState(lead);
-  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+  await h.createSession("reviewer", LIAISON, "lead");
+  const finding = await fileShipFinding(h);
+  await h.finish();
+  assert.equal(h.synthetics.length, 1);
 
-  const reloaded = await harness(dir, "ship-reload");
-  await reloaded.idle();
-  assert.equal(shipState(lead).status, "paused");
-  assert.match(String(shipState(lead).reason), /reload|restart/iu);
-  assert.equal(reloaded.prompts.length, 0);
-  assert.equal(reloaded.synthetics.length, 0);
+  return finding;
+};
 
-  await reloaded.ship("resume");
-  const resumed = shipState(lead);
-  assert.equal(resumed.status, "waiting");
-  assert.equal(resumed.id, active.id);
-  assert.notEqual(resumed.boot, active.boot);
-  assert.equal(reloaded.prompts.length, 1);
-});
+/** The same ship once the agent has been shown the fix instructions and is working on them. */
+const shipWithDeliveredFix = async (h: Harness) => {
+  const finding = await shipWithQueuedFix(h);
+  assert.match((await h.deliver()) ?? "", /Fix all confirmed findings/u);
+
+  return finding;
+};
+
+/** A ship whose Liaison has sealed its review and not yet reported. */
+const shipWithOpenReview = async (h: Harness) => {
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("reviewer", LIAISON, "lead");
+  const shipID = String(shipState(h.S("lead")).id);
+
+  const sealed = await h.call(
+    "directorate_seal",
+    { scope: "local", ship: shipID },
+    LIAISON,
+    "reviewer"
+  );
+
+  return { seal: sealOf(sealed.content), shipID };
+};
+
+const patchShip = (sessionID: string, patch: Record<string, Schema.Json>) => {
+  storage.set(shipKey(sessionID), { ...shipState(sessionID), ...patch });
+};
+
+const patchSeal = (id: string, patch: Record<string, Schema.Json>) => {
+  const file = path.join(state, id, "seal.json");
+  writeFileSync(
+    file,
+    JSON.stringify({ ...JSON.parse(readFileSync(file, "utf-8")), ...patch })
+  );
+};
+
+test(
+  "/directorate-ship recovers a delivered fix and re-checks after missing its completion during reload",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-reload");
+      const lead = h.S("lead");
+      const { seal } = await shipWithQueuedFix(h);
+      const marker = h.projectLatest();
+      await marker.delivery;
+      assert.equal(shipState(lead).rounds, 1);
+
+      const reloaded = await load(dir, "ship-reload");
+      const context = await reloaded.modelContext(lead);
+      assert.match(
+        JSON.stringify(context.find(({ id }) => id === marker.id)?.content),
+        /Fix all confirmed findings/u
+      );
+
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+      reloaded.projectOutcome("succeeded");
+      const missed = await load(dir, "ship-reload");
+      await sweep();
+      assert.equal(missed.synthetics.length, 1);
+      const recheck = await missed.deliver();
+      assert.ok(recheck?.includes(`directorate_seal(recheck: "${seal}")`));
+      assert.equal(shipState(lead).rounds, 2);
+    })
+);
+
+test(
+  "/directorate-ship leaves a still-queued continuation alone across a reload and renders its saved plan once delivered",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-queued");
+      const lead = h.S("lead");
+      await shipWithQueuedFix(h);
+      const queued = shipState(lead).inbox;
+
+      const reloaded = await load(dir, "ship-queued");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0, "not sent a second time");
+      assert.equal(shipState(lead).status, "waiting");
+      assert.deepEqual(shipState(lead).inbox, queued);
+
+      assert.match(
+        (await reloaded.deliver()) ?? "",
+        /Fix all confirmed findings/u
+      );
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+      await reloaded.finish();
+      assert.equal(reloaded.synthetics.length, 1, "exactly one next step");
+      assert.equal(shipState(lead).rounds, 2);
+      assert.match(String(shipState(lead).step), /^recheck:/u);
+    })
+);
+
+test(
+  "/directorate-ship does not show a fix queued before a reload once the tree has changed, and reassesses instead",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-stale");
+      const lead = h.S("lead");
+      const { seal } = await shipWithQueuedFix(h);
+
+      const reloaded = await load(dir, "ship-stale");
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+      assert.doesNotMatch(
+        (await reloaded.deliver()) ?? "",
+        /Fix all confirmed findings/u
+      );
+      assert.equal(shipState(lead).plan, undefined);
+
+      await reloaded.finish();
+      assert.equal(reloaded.synthetics.length, 1);
+      const recheck = await reloaded.deliver();
+      assert.ok(recheck?.includes(`directorate_seal(recheck: "${seal}")`));
+    })
+);
+
+test(
+  "/directorate-ship re-submits a continuation whose admission a crash cut short, under the same ID",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-intent");
+      const lead = h.S("lead");
+      await shipWithQueuedFix(h);
+      const id = h.synthetics[0]?.id;
+      const held = () => inbox.filter((item) => item.id === id).length;
+
+      // As a crash after the host's enqueue and before the ship's checkpoint leaves it.
+      patchShip(lead, { admitting: true });
+      const acknowledged = await load(dir, "ship-intent");
+      await sweep();
+      assert.equal(acknowledged.synthetics.length, 0, "the host held it");
+      assert.equal(held(), 1);
+      assert.equal(shipState(lead).admitting, undefined);
+      assert.equal(shipState(lead).status, "waiting");
+
+      // As a crash before the host's enqueue leaves it.
+      patchShip(lead, { admitting: true });
+      inbox.splice(
+        inbox.findIndex((item) => item.id === id),
+        1
+      );
+      const resent = await load(dir, "ship-intent");
+      await sweep();
+      assert.deepEqual(
+        resent.synthetics.map((sent) => sent.id),
+        [id]
+      );
+      assert.equal(shipState(lead).rounds, 1, "limits are not spent twice");
+      assert.match((await resent.deliver()) ?? "", /Fix all confirmed/u);
+
+      await sweep();
+      assert.equal(resent.synthetics.length, 1, "one effective continuation");
+    })
+);
+
+test(
+  "/directorate-ship does not re-submit an unadmitted continuation after the user took over",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-intent-handoff");
+      const lead = h.S("lead");
+      await shipWithQueuedFix(h);
+      const id = h.synthetics[0]?.id;
+      patchShip(lead, { admitting: true });
+      inbox.splice(
+        inbox.findIndex((item) => item.id === id),
+        1
+      );
+
+      const reloaded = await load(dir, "ship-intent-handoff");
+      await reloaded.projectOrdinary("Work on something else", false);
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /ordinary user prompt/u);
+      assert.equal(shipState(lead).inbox, undefined);
+    })
+);
+
+test(
+  "/directorate-ship recovery yields to a user prompt delivered while the plugin was away",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-away-user");
+      const lead = h.S("lead");
+      await shipWithDeliveredFix(h);
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+
+      const reloaded = await load(dir, "ship-away-user");
+      await reloaded.projectOrdinary("Work on something else", false);
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /ordinary user prompt/u);
+    })
+);
+
+test(
+  "/directorate-ship recovery pauses for an interruption it never saw, even one a later successful turn followed",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-away-stop");
+      const lead = h.S("lead");
+      await shipWithDeliveredFix(h);
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+
+      const reloaded = await load(dir, "ship-away-stop");
+      reloaded.projectOutcome("interrupted");
+      // A background notice then woke the session, and that turn succeeded: the host's last outcome is a success.
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /interrupted/u);
+
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0, "a paused ship stays put");
+    })
+);
+
+test(
+  "/directorate-ship recovery waits for a running Liaison and pauses for one the user interrupted",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-away-LIAISON");
+      const lead = h.S("lead");
+      await shipWithOpenReview(h);
+      h.projectOutcome("started", "reviewer");
+
+      const reloaded = await load(dir, "ship-away-LIAISON");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "active");
+
+      reloaded.projectOutcome("interrupted", "reviewer");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /Liaison was interrupted/u);
+    })
+);
+
+test(
+  "/directorate-ship alone continues its own unreported review after a reload",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-owned");
+      const lead = h.S("lead");
+      const { seal, shipID } = await shipWithOpenReview(h);
+      assert.equal(sealJson(seal).ship, shipID);
+      h.projectOutcome("started", "reviewer");
+      h.projectOutcome("succeeded", "reviewer");
+
+      const reloaded = await load(dir, "ship-owned");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.deepEqual(
+        reloaded.synthetics.map((sent) => sent.sessionID),
+        [lead],
+        "the ship's step, and no standalone wake of its Liaison"
+      );
+      assert.equal(shipState(lead).step, `resume:${seal}`);
+      assert.equal(sealJson(seal).recovery, undefined);
+    })
+);
+
+test(
+  "/directorate-ship recovery pauses instead of replacing a Liaison whose session is gone",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-LIAISON-gone");
+      const lead = h.S("lead");
+      const { seal } = await shipWithOpenReview(h);
+      const { deadline } = sealJson(seal);
+
+      const reloaded = await load(dir, "ship-LIAISON-gone");
+      await reloaded.deleteSession("reviewer");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0, "no automatic takeover");
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /no longer available/u);
+      assert.deepEqual(sealJson(seal).deadline, deadline);
+    })
+);
+
+test(
+  "stopping a ship does not turn its unreported review into a standalone review that recovery wakes",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-stopped");
+      const { seal } = await shipWithOpenReview(h);
+      h.projectOutcome("started", "reviewer");
+      h.projectOutcome("succeeded", "reviewer");
+      await h.ship("stop");
+      assert.equal(storage.has(shipKey(h.S("lead"))), false);
+
+      await h.createSession("solo", LIAISON, "lead");
+
+      const standalone = await h.call(
+        "directorate_seal",
+        { mode: "default", target: { kind: "local" } },
+        LIAISON,
+        "solo"
+      );
+
+      h.projectOutcome("started", "solo");
+      h.projectOutcome("succeeded", "solo");
+
+      const reloaded = await load(dir, "ship-stopped");
+      await sweep();
+      assert.deepEqual(
+        reloaded.synthetics.map((sent) => sent.sessionID),
+        [h.S("solo")]
+      );
+      assert.equal(sealJson(seal).recovery, undefined);
+      assert.equal(
+        sealJson(sealOf(standalone.content)).recovery?.admitted,
+        true
+      );
+    })
+);
+
+/** A ship whose turn settled with a background subagent still running: it waits for that subagent's notice. */
+const shipAwaitingWorker = async (h: Harness) => {
+  const lead = Session.ID.make(h.S("lead"));
+  await h.createSession("lead", "build");
+  await h.ship("--scope local");
+  await h.deliver();
+  await h.createSession("worker", "explore", "lead");
+  await h.finish("lead", [
+    {
+      agent: "explore",
+      childSessionID: Session.ID.make(h.S("worker")),
+      description: "Background work",
+      kind: "subagent",
+      sessionID: lead,
+    },
+  ]);
+  assert.equal(shipState(lead).status, "active");
+  assert.equal(shipState(lead).inbox, undefined);
+
+  return lead;
+};
+
+test(
+  "/directorate-ship still pauses after a reload when the notice it waits for is cancelled",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-notice-cancel");
+      const lead = await shipAwaitingWorker(h);
+      const queued = await h.notice("worker");
+
+      const reloaded = await load(dir, "ship-notice-cancel");
+      await reloaded.bus.emit({
+        data: { inboxID: queued.id, sessionID: lead },
+        type: "session.inbox.cancelled",
+      });
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /message was cancelled/u);
+      assert.equal(reloaded.synthetics.length, 0);
+    })
+);
+
+test(
+  "/directorate-ship still pauses after a reload when the user interrupts the turn a subagent's notice woke",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-notice-stop");
+      const lead = await shipAwaitingWorker(h);
+
+      const reloaded = await load(dir, "ship-notice-stop");
+      await reloaded.promote(await reloaded.notice("worker"));
+      assert.deepEqual(shipState(lead).awaiting, {});
+      await reloaded.bus.emit({
+        created: reloaded.projectOutcome("interrupted"),
+        data: { reason: "user", sessionID: lead },
+        type: "session.execution.interrupted",
+      });
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /Interrupted by the user/u);
+      assert.equal(reloaded.synthetics.length, 0);
+    })
+);
+
+test(
+  "/directorate-ship recovery stops waiting for a notice that was never delivered",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-notice-lost");
+      const lead = await shipAwaitingWorker(h);
+      h.projectOutcome("started", "worker");
+
+      const reloaded = await load(dir, "ship-notice-lost");
+      await sweep();
+      assert.equal(shipState(lead).status, "active", "the subagent runs");
+
+      // It finished, and its notice was cancelled, while no instance was listening.
+      reloaded.projectOutcome("succeeded", "worker");
+      await sweep();
+      assert.equal(shipState(lead).status, "active", "a notice may follow");
+      await sweep();
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /was not delivered/u);
+      assert.equal(reloaded.synthetics.length, 0);
+    })
+);
+
+test(
+  "/directorate-ship recovery keeps the review allowance it had before the reload",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-allowance");
+      const lead = h.S("lead");
+      const { seal } = await shipWithDeliveredFix(h);
+      // Five earlier reviews in this run: the next would be the seventh.
+      patchShip(lead, { chain: ["a", "b", "c", "d", "e", seal] });
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+
+      const reloaded = await load(dir, "ship-allowance");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0, "no further review");
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /reached 6 reviews/u);
+      assert.equal(shipState(lead).reviewsAtResume, 0);
+      assert.equal(shipState(lead).rounds, 1);
+    })
+);
+
+test(
+  "/directorate-ship recovery leaves a paused ship alone, without reading it, and pauses one whose session moved",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-reload-paused");
+      const lead = h.S("lead");
+      const moved = h.S("moved");
+      await h.ship("");
+      await h.deliver();
+      await h.ship("pause");
+      await h.ship("", "moved");
+      await h.deliver("moved");
+
+      const reloaded = await load(dir, "ship-reload-paused");
+      reloaded.projectOutcome("succeeded");
+      reloaded.projectOutcome("succeeded", "moved");
+      movedSessions.set(moved, `${dir}-elsewhere`);
+      storageReads.length = 0;
+      await sweep();
+      assert.match(String(shipState(lead).reason), /Paused by the user/u);
+      assert.ok(!storageReads.includes(shipKey(lead)));
+      assert.equal(shipState(moved).status, "paused");
+      assert.match(String(shipState(moved).reason), /moved to another/u);
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(reloaded.prompts.length, 0);
+    })
+);
+
+test(
+  "/directorate-ship recovery pauses once, with the reason, when its saved seal is gone",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-pruned");
+      const lead = h.S("lead");
+      const { seal } = await shipWithDeliveredFix(h);
+
+      const reloaded = await load(dir, "ship-pruned");
+      rmSync(path.join(state, seal), { recursive: true });
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /could not inspect/u);
+      assert.equal(reloaded.synthetics.length, 0);
+    })
+);
+
+test(
+  "/directorate-ship recovery pauses, resumably, when a checkpoint hid a delivered continuation while the plugin was away",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-compacted");
+      const lead = h.S("lead");
+      await shipWithDeliveredFix(h);
+
+      const reloaded = await load(dir, "ship-compacted");
+      reloaded.compactHistory(lead, "Earlier work, summarized.");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /checkpoint/u);
+      assert.equal(reloaded.synthetics.length, 0);
+
+      await reloaded.ship("resume");
+      assert.equal(reloaded.prompts.length, 1);
+    })
+);
+
+test(
+  "/directorate-ship recovery that proves an attached prompt was delivered no longer asks for its attachments",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-attached");
+      const lead = h.S("lead");
+      await h.createSession("lead", "build");
+      await h.ship("--scope local", "lead", "queue", [
+        { uri: "file:///tmp/context.md" },
+      ]);
+      assert.equal(shipState(lead).needsAttachments, true);
+
+      const reloaded = await load(dir, "ship-attached");
+      await reloaded.projectLatest("lead", false).delivery;
+      reloaded.projectOutcome("interrupted");
+      await sweep();
+      assert.equal(shipState(lead).status, "paused");
+      assert.match(String(shipState(lead).reason), /interrupted/u);
+      assert.equal(shipState(lead).needsAttachments, false);
+
+      await reloaded.ship("resume");
+      assert.equal(reloaded.prompts.length, 1);
+    })
+);
+
+test(
+  "/directorate-ship recovery does not take a turn that began in the millisecond the last one settled for a settled one",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-tie");
+      const lead = h.S("lead");
+      await shipWithDeliveredFix(h);
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+
+      const reloaded = await load(dir, "ship-tie");
+      reloaded.projectOutcome("succeeded");
+      // The host's times are whole milliseconds: this successor's start equals its predecessor's end.
+      reloaded.projectOutcome("started");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "active");
+
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 1);
+    })
+);
+
+test(
+  "/directorate-ship recovery leaves a ship another live server process is driving",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "ship-foreign");
+      const lead = h.S("lead");
+      await shipWithDeliveredFix(h);
+      writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
+      patchShip(lead, { pid: process.ppid });
+
+      const reloaded = await load(dir, "ship-foreign");
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(shipState(lead).status, "active");
+
+      const gone = Number(
+        execFileSync(
+          process.execPath,
+          ["-e", "process.stdout.write(String(process.pid))"],
+          { encoding: "utf-8" }
+        )
+      );
+
+      patchShip(lead, { pid: gone });
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 1);
+      assert.equal(shipState(lead).pid, process.pid);
+    })
+);
 
 test("/directorate-ship can forget only the exact pending ID after a missed cancellation", async () => {
   const dir = repo();
@@ -4448,7 +5314,7 @@ test("a panel with nothing to review misses no Seat", async () => {
   assert.doesNotMatch(content, /Directorate Seat alpha/u);
 });
 
-test("follow-ups to a subagent are new runs of its session: earlier runs keep their outcome, and directorate_wait reports the new run once", async () => {
+test("follow-ups to a subagent are new runs of its session: earlier runs keep their outcome, and directorate_wait reports the new run once", async (t) => {
   const { S, call, launch, bus, hooks, followUp } = await harness(repo());
 
   const contentResult35 = await call("directorate_seal", {
@@ -4524,7 +5390,43 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     tool: "directorate_read",
   });
   assert.equal(runs()[0]?.[2], "completed");
-  const waiting = call("directorate_wait", { seal });
+
+  const polling = Deferred.makeUnsafe<true>();
+  const release = Deferred.makeUnsafe<true>();
+  const clock = Effect.runSync(Clock.Clock);
+
+  const waiting = call(
+    "directorate_wait",
+    { seal },
+    undefined,
+    undefined,
+    (effect) =>
+      Effect.runPromise(
+        Effect.provideService(effect, Clock.Clock, {
+          ...clock,
+          currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+          monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+          sleep: (duration) =>
+            Effect.gen(function* sleep() {
+              const span = yield* Effect.orDie(Effect.currentSpan);
+
+              // The poll sleeps in the tool span, not the nested lock retry span.
+              yield* span.name === "directorate_wait" &&
+              (yield* Deferred.succeed(polling, true))
+                ? Deferred.await(release)
+                : clock.sleep(duration);
+            }),
+        }),
+        { signal: t.signal }
+      )
+  );
+
+  // Let wait capture the running follow-up before sending its completion.
+  await Promise.race([
+    Effect.runPromise(Deferred.await(polling), { signal: t.signal }),
+    waiting.then(({ content }) => assert.fail(content)),
+  ]);
   await call(
     "directorate_ledger_verdict",
     {
@@ -4541,6 +5443,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     data: { sessionID: S("b") },
     type: "session.execution.succeeded",
   });
+  await Effect.runPromise(Deferred.succeed(release, true));
   const contentResult36 = await waiting;
   const out = contentResult36.content;
   assert.equal(out.match(/^- /gmu)?.length, 1, out);
@@ -5852,6 +6755,298 @@ test("after a plugin reload, the session's unreported seal is found even after a
   await present(h2.hooks["session.context"])(stranger);
   assert.deepEqual(Object.keys(stranger.tools), ["read"]);
 });
+
+/** A standalone review: a Liaison under `caller` that sealed the local changes and has not reported. */
+const openReview = async (h: Harness, session = "lead") => {
+  await h.createSession(session, LIAISON, "caller");
+
+  const sealed = await h.call(
+    "directorate_seal",
+    { mode: "default", target: { kind: "local" } },
+    LIAISON,
+    session
+  );
+
+  return h.sealOf(sealed.content);
+};
+
+/** The Liaison ended a turn of its review without reporting. */
+const idled = (h: Harness, session = "lead") => {
+  h.projectOutcome("started", session);
+  h.projectOutcome("succeeded", session);
+};
+
+test(
+  "standalone reviews resume the existing seal after a reload without resetting the budget",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-recovery");
+      await h.createSession("caller", "build");
+      const seal = await openReview(h);
+      h.projectOutcome("started");
+      const { deadline } = sealJson(seal);
+
+      const reloaded = await load(dir, "review-recovery");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0, "the Liaison is running");
+
+      reloaded.projectOutcome("succeeded");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 1);
+      assert.equal(reloaded.synthetics[0]?.sessionID, h.S("lead"));
+      assert.match(
+        reloaded.synthetics[0]?.text ?? "",
+        new RegExp(`existing Directorate review ${seal}`, "u")
+      );
+      assert.deepEqual(sealJson(seal).deadline, deadline);
+      assert.equal(sealJson(seal).recovery?.admitted, true);
+
+      const again = await load(dir, "review-recovery");
+      await sweep();
+      assert.equal(again.synthetics.length, 0, "one wake per Liaison");
+
+      await again.call("directorate_diff", { seal });
+      await again.call("directorate_report", { seal });
+      assert.equal(again.synthetics[0]?.sessionID, again.S("caller"));
+      assert.match(
+        again.synthetics[0]?.text ?? "",
+        /finished the recovered review/u
+      );
+    })
+);
+
+test(
+  "standalone reviews resume a Liaison a restart left mid-turn",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-orphaned");
+      await h.createSession("caller", "build");
+      const seal = await openReview(h);
+      h.projectOutcome("started");
+
+      const restarted = await load(dir, "review-orphaned");
+      // The turn began and never ended, and nothing is executing it: the server stopped under it.
+      executing.delete(h.S("lead"));
+      await sweep();
+      assert.deepEqual(
+        restarted.synthetics.map((sent) => sent.sessionID),
+        [h.S("lead")]
+      );
+      assert.equal(sealJson(seal).recovery?.admitted, true);
+    })
+);
+
+test(
+  "standalone review recovery does not re-arm a review the user interrupted, until an explicit resume",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-halted");
+      await h.createSession("caller", "build");
+      const seen = await openReview(h, "seen");
+      const unseen = await openReview(h, "unseen");
+
+      h.projectOutcome("started", "seen");
+      await h.bus.emit({
+        created: h.projectOutcome("interrupted", "seen"),
+        data: { reason: "user", sessionID: h.S("seen") },
+        type: "session.execution.interrupted",
+      });
+      assert.equal(sealJson(seen).halted, true);
+      // A compaction, or a turn about something else, then succeeds: the host's last outcome is a success.
+      idled(h, "seen");
+
+      const reloaded = await load(dir, "review-halted");
+      // The plugin was away for this interruption, and the same kind of turn followed it.
+      reloaded.projectOutcome("started", "unseen");
+      reloaded.projectOutcome("interrupted", "unseen");
+      idled(reloaded, "unseen");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(sealJson(unseen).halted, true);
+
+      await reloaded.call(
+        "directorate_seal",
+        { resume: seen },
+        LIAISON,
+        "seen"
+      );
+      assert.equal(sealJson(seen).halted, false);
+      idled(reloaded, "seen");
+
+      const resumed = await load(dir, "review-halted");
+      await sweep();
+      assert.deepEqual(
+        resumed.synthetics.map((sent) => sent.sessionID),
+        [h.S("seen")]
+      );
+    })
+);
+
+test(
+  "standalone review recovery sends a wake whose admission was lost, and does not repeat one whose acknowledgement was",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-intent");
+      await h.createSession("caller", "build");
+      const seal = await openReview(h);
+      idled(h);
+      const id = SessionMessage.ID.create();
+      const intent = { id, ownerSession: h.S("lead") };
+
+      // As a crash after the intent was saved and before the host admitted the wake leaves it.
+      patchSeal(seal, { recovery: intent });
+      const unsent = await load(dir, "review-intent");
+      await sweep();
+      assert.deepEqual(
+        unsent.synthetics.map((sent) => sent.id),
+        [id]
+      );
+      assert.equal(sealJson(seal).recovery?.admitted, true);
+
+      // As a crash after the host admitted it and before that was saved: the Liaison ran it and idled again.
+      patchSeal(seal, { recovery: intent });
+      await unsent.promote(present(inbox.find((item) => item.id === id)));
+      idled(unsent);
+      const unacknowledged = await load(dir, "review-intent");
+      await sweep();
+      assert.equal(unacknowledged.synthetics.length, 0);
+      assert.equal(sealJson(seal).recovery?.admitted, true);
+    })
+);
+
+test(
+  "a recovered review sees the runs that finished, or were orphaned, while no plugin instance was listening",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-children");
+      await h.createSession("caller", "build");
+      const seal = await openReview(h);
+      h.projectOutcome("started");
+
+      const start = async (child: string) => {
+        const returned = await h.launch(
+          `call-${child}`,
+          "directorate_auditor",
+          `question: is ${child} safe?`,
+          child,
+          "running"
+        );
+
+        await returned();
+        h.projectOutcome("started", child);
+      };
+
+      // One at a time: each launch takes the seal lock.
+      await start("finished");
+      await start("orphaned");
+      await start("working");
+
+      const status = (child: string) =>
+        sealJson(seal).children.find((run) => run.session === h.S(child))
+          ?.status;
+
+      assert.equal(status("finished"), "running");
+
+      const reloaded = await load(dir, "review-children");
+      reloaded.projectOutcome("succeeded", "finished");
+      executing.delete(h.S("orphaned"));
+      await sweep();
+      assert.equal(status("finished"), "completed");
+      assert.equal(status("orphaned"), "failed");
+      assert.equal(status("working"), "running");
+      assert.equal(reloaded.synthetics.length, 0, "the Liaison is running");
+    })
+);
+
+test(
+  "standalone review recovery stays inside its location and leaves archived, reverted, and reassigned Liaisons alone",
+  { timeout: 30_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-bounds");
+      const elsewhere = `${dir}-elsewhere`;
+      await h.createSession("caller", "build");
+      const seals = new Map<string, string>();
+
+      const open = async (name: string) => {
+        seals.set(name, await openReview(h, name));
+        idled(h, name);
+      };
+
+      await open("moved");
+      await open("archived");
+      await open("reverted");
+      await open("reassigned");
+      await open("ok");
+
+      const record = (name: string) => present(sessionRecords.get(h.S(name)));
+
+      movedSessions.set(h.S("moved"), elsewhere);
+      sessionRecords.set(h.S("archived"), {
+        ...record("archived"),
+        time: { ...record("archived").time, archived: DateTime.nowUnsafe() },
+      });
+      sessionRecords.set(h.S("reverted"), {
+        ...record("reverted"),
+        revert: { messageID: SessionMessage.ID.create() },
+      });
+      // Its session now records another review.
+      entries
+        .get(h.S("reassigned"))
+        ?.set("directorate-seal", `Active seal ${present(seals.get("ok"))}.`);
+
+      const reloaded = await load(dir, "review-bounds");
+      await sweep();
+      assert.deepEqual(
+        reloaded.synthetics.map((sent) => sent.sessionID),
+        [h.S("ok")]
+      );
+
+      for (const name of ["moved", "archived", "reverted", "reassigned"]) {
+        assert.equal(sealJson(present(seals.get(name))).recovery, undefined);
+      }
+
+      // The recovered review's caller has moved on: its Directive is not sent after it.
+      const ok = present(seals.get("ok"));
+      movedSessions.set(h.S("caller"), elsewhere);
+      await reloaded.call("directorate_diff", { seal: ok }, LIAISON, "ok");
+      await reloaded.call("directorate_report", { seal: ok }, LIAISON, "ok");
+      assert.equal(reloaded.synthetics.length, 1);
+    })
+);
+
+test(
+  "review recovery leaves a review another live server process is driving",
+  { timeout: 20_000 },
+  () =>
+    virtual(async ({ load, sweep }) => {
+      const dir = repo();
+      const h = await load(dir, "review-foreign");
+      await h.createSession("caller", "build");
+      const seal = await openReview(h);
+      assert.equal(sealJson(seal).pid, process.pid);
+      // Its sessions execute in that process, so this one sees a start with no end and nothing running.
+      h.projectOutcome("started");
+      executing.delete(h.S("lead"));
+      patchSeal(seal, { pid: process.ppid });
+
+      const reloaded = await load(dir, "review-foreign");
+      await sweep();
+      assert.equal(reloaded.synthetics.length, 0);
+      assert.equal(sealJson(seal).recovery, undefined);
+    })
+);
 
 test(
   "the scoped watchdog recovers an overdue seal after a three-day shutdown",

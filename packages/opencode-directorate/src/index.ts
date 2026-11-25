@@ -3,6 +3,8 @@
 // the deadline watchdog reports for it. Auditors, Seats, and Compliance run beside it: launching → running → completed | failed.
 // Tools used inside a state are in read-tools.ts and ledger-tools.ts; the state itself is the seal (store.ts).
 import { Plugin } from "@opencode/plugin/effect";
+import { Session } from "@opencode/schema/session";
+import { SessionMessage } from "@opencode/schema/session-message";
 import {
   Clock,
   DateTime,
@@ -58,7 +60,15 @@ import {
 } from "./model.ts";
 import type { Child, Seal } from "./model.ts";
 import { platformLayer } from "./platform.ts";
+import { ProcessIdentity } from "./process-identity.ts";
 import { readTools } from "./read-tools.ts";
+import {
+  activity,
+  createdAt,
+  foreign,
+  locationKey,
+  turns,
+} from "./recovery.ts";
 import { RepoScope } from "./repo-path.ts";
 import { finalize } from "./report.ts";
 import { reviewRequest } from "./request.ts";
@@ -225,6 +235,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
   const store = yield* Store;
   const settings = yield* SettingsStore;
   const { hook, tools } = yield* adapter;
+  const loadedAt = yield* Clock.currentTimeMillis;
+  const { pid } = yield* ProcessIdentity;
 
   const myRepo = yield* (yield* Git)
     .root(host.location.directory)
@@ -232,6 +244,33 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
   /** Frozen `[directorate settings]` system line per active seal, so mid-review file edits never bust the KV-cache prefix. */
   const sealSettingsLine = new Map<string, string | undefined>();
+
+  const notifyRecoveredReview = Effect.fnUntraced(
+    function* notifyRecoveredReview(seal: Seal, md: string) {
+      const { parentID } = yield* host.session.get({
+        sessionID: Session.ID.make(seal.ownerSession),
+      });
+
+      if (!parentID) {
+        return;
+      }
+
+      const parent = yield* host.session.get({ sessionID: parentID });
+
+      if (
+        locationKey(parent.location) === locationKey(host.location) &&
+        !parent.time.archived &&
+        !parent.revert
+      ) {
+        yield* host.session.synthetic({
+          resume: false,
+          sessionID: parentID,
+          text: `The Directorate finished the recovered review ${seal.id}:\n\n${md}`,
+        });
+      }
+    },
+    recover("could not deliver the recovered Directive")
+  );
 
   /** Reported, without the Liaison: abandoned for a new review, or past the deadline and its grace period. */
   const autoReport = Effect.fn("Directorate.autoReport")(function* autoReport(
@@ -491,20 +530,23 @@ const register = Effect.fn("Directorate.register")(function* register() {
                       ? undefined
                       : Math.max(5, Math.round(s.budgetMinutes / 2)));
 
+                  // An explicit resume continues a review the user had interrupted.
+                  const resumedSeal: Seal = {
+                    ...s,
+                    halted: false,
+                    owner: a.agent,
+                    ownerSession: a.session,
+                    pid,
+                  };
+
                   const taken: Seal =
                     minutes === undefined
-                      ? {
-                          ...s,
-                          owner: a.agent,
-                          ownerSession: a.session,
-                        }
+                      ? resumedSeal
                       : {
-                          ...s,
+                          ...resumedSeal,
                           budgetMinutes: minutes,
                           createdAt: now,
                           deadline: DateTime.add(now, { minutes }),
-                          owner: a.agent,
-                          ownerSession: a.session,
                         };
 
                   const updated =
@@ -795,6 +837,10 @@ const register = Effect.fn("Directorate.register")(function* register() {
         if (reported) {
           sealSettingsLine.delete(reported.id);
           yield* sessions.close(reported);
+
+          if (reported.recovery?.ownerSession === reported.ownerSession) {
+            yield* notifyRecoveredReview(reported, md);
+          }
         }
 
         return { content: md };
@@ -1263,6 +1309,14 @@ const register = Effect.fn("Directorate.register")(function* register() {
         return ship.moved(sessionID, event.data.location);
       }
 
+      // OpenCode restores suspended executions and jobs after shutdown.
+      if (
+        event.type === "session.execution.interrupted" &&
+        event.data.reason === "shutdown"
+      ) {
+        return Effect.void;
+      }
+
       if (event.type === "session.inbox.enqueued") {
         const { inboxID, item } = event.data;
 
@@ -1316,17 +1370,26 @@ const register = Effect.fn("Directorate.register")(function* register() {
           ? Effect.void
           : ship.executionSettled(sessionID, event.created, shipReason);
 
+      const stopped =
+        event.type === "session.execution.interrupted" &&
+        event.data.reason === "user";
+
       return shipOutcome.pipe(
         Effect.andThen(
-          childEvent(sessionID, (s) =>
-            finished(
+          childEvent(sessionID, (s) => {
+            const next = finished(
               s,
               sessionID,
               /failed|interrupted/u.test(event.type) ? "failed" : "completed",
               at,
               event.type !== "session.idle"
-            )
-          )
+            );
+
+            // The user stopped the Liaison itself: a later successful turn must not read as the review's own.
+            return stopped && s.ownerSession === sessionID && !s.halted
+              ? { ...(next ?? s), halted: true }
+              : next;
+          })
         )
       );
     }),
@@ -1341,7 +1404,167 @@ const register = Effect.fn("Directorate.register")(function* register() {
   /** Seals a sweep found reported, never read again: a reported seal never reopens. */
   const reported = new Set<string>();
 
+  /** Events missed across a reload leave a finished run recorded as running: settle it from the host's own record. */
+  const settleChildren = Effect.fn("Directorate.settleChildren")(
+    function* settleChildren(seal: Seal) {
+      for (const { session } of perSession(childOutstanding(seal))) {
+        const info = session ? yield* sessions.info(session) : undefined;
+        const act = info ? yield* activity(host, info) : undefined;
+
+        // A run that never began has not been orphaned; one that began and will never end has failed.
+        if (
+          !session ||
+          !info ||
+          !act ||
+          act.state === "running" ||
+          (act.state === "orphaned" && !info.time.busy)
+        ) {
+          continue;
+        }
+
+        const completed = act.state === "idle" && info.outcome === "succeeded";
+
+        const endedAt =
+          act.state === "idle"
+            ? DateTime.makeUnsafe(act.at)
+            : yield* DateTime.now;
+
+        // A follow-up still in the inbox is not settled by its session's earlier run.
+        yield* sessions.update(seal.id, (s) =>
+          finished(
+            s,
+            session,
+            completed ? "completed" : "failed",
+            endedAt,
+            true
+          )
+        );
+      }
+    }
+  );
+
+  /**
+   * A standalone review whose Liaison ended a turn without reporting before this instance loaded: wake it once. A review
+   * the user stopped, or one a ship owns, is not this sweep's to continue.
+   */
+  const recoverReview = Effect.fn("Directorate.recoverReview")(
+    function* recoverReview(seal: Seal) {
+      const sealedAt = DateTime.toEpochMillis(seal.createdAt);
+
+      if (
+        seal.owner !== REVIEWER ||
+        seal.ship !== undefined ||
+        seal.halted ||
+        (seal.recovery?.ownerSession === seal.ownerSession &&
+          seal.recovery.admitted) ||
+        sealedAt >= loadedAt
+      ) {
+        return;
+      }
+
+      /**
+       * The Liaison's session, if it is here and stalled: left mid-turn by a restart, or idle after a turn of this
+       * review that succeeded without reporting.
+       */
+      const stalledOwner = Effect.gen(function* stalledOwner() {
+        const session = yield* sessions.info(seal.ownerSession);
+
+        if (
+          !session ||
+          locationKey(session.location) !== locationKey(host.location) ||
+          session.agent !== REVIEWER ||
+          session.time.archived ||
+          session.revert
+        ) {
+          return;
+        }
+
+        const act = yield* activity(host, session);
+
+        const stalled =
+          act.state === "orphaned" ||
+          (act.state === "idle" &&
+            session.outcome === "succeeded" &&
+            act.at >= sealedAt);
+
+        return stalled ? session.id : undefined;
+      });
+
+      const sessionID = yield* stalledOwner;
+
+      if (!sessionID || (yield* sessions.recordedSeal(sessionID)) !== seal.id) {
+        return;
+      }
+
+      const messages = yield* host.session.context({ sessionID });
+
+      // An interruption this plugin never saw, even one a later successful turn has since followed.
+      const stopped =
+        seal.halted === undefined &&
+        turns(messages).some(
+          (turn) =>
+            turn.outcome === "interrupted" && createdAt(turn) >= sealedAt
+        );
+
+      yield* store.withLock(
+        seal.id,
+        Effect.gen(function* resumeOwner() {
+          const current = yield* store.load(seal.id);
+
+          if (
+            current.reportedAt ||
+            current.halted ||
+            current.ownerSession !== sessionID
+          ) {
+            return;
+          }
+
+          if (stopped) {
+            return yield* store.save({ ...current, halted: true });
+          }
+
+          const prior =
+            current.recovery?.ownerSession === sessionID
+              ? current.recovery
+              : undefined;
+
+          if (prior?.admitted || (yield* stalledOwner) !== sessionID) {
+            return;
+          }
+
+          const recovery = {
+            id: prior?.id ?? SessionMessage.ID.create(),
+            ownerSession: sessionID,
+          };
+
+          const mine = { ...current, pid };
+
+          // The intent is saved before the wake, and the wake's ID is reused until its admission is saved: the host
+          // keeps the first admission of an ID, so neither a lost wake nor a lost acknowledgement repeats or drops it.
+          if (!prior) {
+            yield* store.save({ ...mine, recovery });
+          }
+
+          if (!messages.some((message) => message.id === recovery.id)) {
+            yield* host.session.synthetic({
+              delivery: "queue",
+              id: SessionMessage.ID.make(recovery.id),
+              sessionID,
+              text: `Continue the existing Directorate review ${seal.id} after OpenCode reloaded or restarted. Use its saved coverage, child runs and ledger, and finish with directorate_report. Do not start a new seal or extend the deadline.`,
+            });
+          }
+
+          yield* store.save({
+            ...mine,
+            recovery: { ...recovery, admitted: true },
+          });
+        }).pipe(Effect.uninterruptible)
+      );
+    }
+  );
+
   const sweep = Effect.gen(function* sweep() {
+    yield* ship.recoverShips.pipe(recover("ship recovery sweep failed"));
     const bound = yield* sessions.boundSeals;
     const now = yield* Clock.currentTimeMillis;
 
@@ -1354,13 +1577,24 @@ const register = Effect.fn("Directorate.register")(function* register() {
       // After a reload no session is bound yet: recover this instance's reviews, wherever their repository is, and any
       // review of this repository.
       if (
-        now < DateTime.toEpochMillis(seal.deadline) + GRACE_MS ||
         !(
           bound.has(seal.id) ||
           seal.host === host.location.directory ||
           (myRepo !== null && seal.repo === myRepo)
         )
       ) {
+        continue;
+      }
+
+      if (now < DateTime.toEpochMillis(seal.deadline) + GRACE_MS) {
+        // Another live server's review is not this one's to settle or wake.
+        if (!(yield* foreign(seal.pid))) {
+          yield* settleChildren(seal).pipe(
+            Effect.andThen(recoverReview(seal)),
+            ignore(`could not recover review ${seal.id}`, "Warn")
+          );
+        }
+
         continue;
       }
 

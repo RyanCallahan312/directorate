@@ -94,7 +94,9 @@ The Liaison reviews; your editing agent addresses every verified finding, includ
 
 While Ship is **waiting**, `status` shows the exact inbox ID and the latest OpenCode failure or interruption seen before delivery. That outcome could belong to an older input; Ship can still continue if OpenCode delivers its prompt. Cancel the exact item in OpenCode before pausing, stopping, resuming, or replacing a ship with undelivered input.
 
-When OpenCode delivers a new ordinary user prompt after Ship's input, Ship pauses and hands control back to you. Background notices do not count as user input. Once your work is done, use `resume` to reassess and continue. The loop also pauses if a step makes no progress, an execution carrying Ship's input fails or is interrupted, the session moves, or the plugin reloads. After a move, stop or replace the old ship from the session's new location rather than resuming the old review there.
+When OpenCode delivers a new ordinary user prompt after Ship's input, Ship pauses and hands control back to you. Background notices do not count as user input. Once your work is done, use `resume` to reassess and continue. The loop also pauses if a step makes no progress, an execution carrying Ship's input fails or is interrupted by the user, or the session moves. After a move, stop or replace the old ship from the session's new location rather than resuming the old review there.
+
+Ship resumes automatically after an OpenCode reload or restart. It checks the saved seal and current working tree once the in-flight turn has settled, without resetting its limits or sending a second copy of queued input. If it can't verify delivery, it won't guess. It pauses instead of continuing when a turn it missed was interrupted or failed, a user prompt arrived while the plugin was away, the review's Liaison was interrupted or its session is gone, or a subagent's completion notice never arrived. Reviews a ship started are continued only by that ship, even after it is stopped. A ship or review driven by another live OpenCode server process on the same database is left to that process. Explicit pauses still require `resume`.
 
 If OpenCode installs a checkpoint that hides an automatic continuation or its origin after promotion, Ship pauses rather than sending fix instructions from a summary. Precomputing a summary alone does not pause Ship. Use `/directorate-ship resume` to reassess from the saved Directive; the old continuation is not needed.
 
@@ -111,11 +113,12 @@ stateDiagram-v2
     direction TB
     [*] --> Waiting: /directorate-ship [request]<br/>(admits kickoff prompt)
     Waiting --> Active: exact inbox item delivered
-    Waiting --> Paused: prompt cancelled, admission failed,<br/>user prompt ahead of continuation,<br/>compaction, move, or reload
+    Waiting --> Paused: prompt cancelled, admission failed,<br/>user prompt ahead of continuation,<br/>compaction or move
 
     Active --> Active: turn succeeded while<br/>background subagents run
     Active --> Deciding: turn succeeded<br/>(no background subagents left)
-    Active --> Paused: /directorate-ship pause, user prompt,<br/>execution failed/interrupted, compaction,<br/>wrong --scope, move, or reload
+    Active --> Paused: /directorate-ship pause, user prompt,<br/>execution failed/interrupted, compaction,<br/>wrong --scope or move
+    Active --> Deciding: recover settled turn after reload or restart
 
     Deciding --> Waiting: next step admitted<br/>(review, resume, fix, re-check, or finish)
     Deciding --> Paused: no progress, 6-review / 30-round limit,<br/>missing panel Seats, fixed commit,<br/>empty target, or read error
@@ -200,7 +203,7 @@ stateDiagram-v2
 | Containment Drift (Freshness) | the code moved since the seal | `directorate_refresh` (allowed once; a move that is not refreshed makes the Directive stale) |
 | Unverified Dossier (Open entries) | findings are unverified | verdicts, mostly from `directorate_compliance` |
 
-**Resume.** `directorate_seal resume: <id>` lets another session take over an unreported review. On takeover in drain or locked, the clock restarts with half the current budget (at least 5 minutes). A session resuming its own review keeps its deadline unless the call explicitly passes `budget_minutes`.
+**Resume.** After an OpenCode reload or restart, a review can resume in its existing Liaison session with the same seal and deadline. If the Liaison is idle after a successful turn but hasn't reported, or a restart left it mid-turn (OpenCode does not resume subagent sessions), the plugin sends one recovery prompt. Child runs that finished while the plugin was away are settled from OpenCode's record. A review you interrupted stays stopped until an explicit `directorate_seal resume`, and reviews owned by a ship are left to that ship. `directorate_seal resume: <id>` still lets another session manually take over an unreported review. On takeover in drain or locked, the clock restarts with half the current budget (at least 5 minutes). A session resuming its own review keeps its deadline unless the call explicitly passes `budget_minutes`.
 
 ### Auditors, Seats, and Compliance
 

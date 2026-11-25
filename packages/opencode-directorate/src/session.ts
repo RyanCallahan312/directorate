@@ -205,6 +205,8 @@ const make = Effect.gen(function* make() {
     }),
     directory: (sessionID: string) =>
       info(sessionID).pipe(Effect.map((i) => i?.location.directory)),
+    /** The host's record of a session, or none if it is gone or was never one. */
+    info,
     interrupt,
     /** A subagent call the Liaison of `parent` made for `seal`, open until `launchSettled`. */
     launch: (call: string, seal: string, parent: string) =>
@@ -244,6 +246,7 @@ const make = Effect.gen(function* make() {
         })
         .pipe(ignore(`could not notify the owner of ${seal.id}`, "Warn")),
     record,
+    recordedSeal,
     sealFor,
     /** A resumed seal's new owner session takes it over from the previous one. */
     takeOver: Effect.fn("Sessions.takeOver")(function* takeOver(
