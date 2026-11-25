@@ -1,6 +1,6 @@
 {
   "name": "@rc312/opencode-directorate",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Evidence-gated code review for OpenCode",
   "license": "MIT",
   "repository": {

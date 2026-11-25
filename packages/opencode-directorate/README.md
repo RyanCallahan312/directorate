@@ -30,7 +30,7 @@ The plugin enforces the parts of a review that should not depend on judgment:
 Install the package in a stable location so OpenCode can load it:
 
 ```sh
-npm install --global @rc312/opencode-directorate@0.1.0
+npm install --global @rc312/opencode-directorate@0.1.1
 package="$(npm root --global)/@rc312/opencode-directorate"
 ```
 
