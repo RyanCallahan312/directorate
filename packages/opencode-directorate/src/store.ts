@@ -24,7 +24,7 @@ import { StateRoot } from "./state-root.ts";
 
 export { StateRoot } from "./state-root.ts";
 
-const KEEP_DAYS = 14;
+const KEEP_DAYS = 31;
 const IO_CONCURRENCY = 16;
 const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/u;
 

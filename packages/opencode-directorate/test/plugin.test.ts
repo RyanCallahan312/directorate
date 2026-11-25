@@ -365,6 +365,7 @@ const harness = async (
           })
         ),
     },
+    app: { version: "2.2.3" },
     command: {
       transform: (register: (editor: CommandEditor) => void) =>
         Effect.sync(() => {
@@ -773,13 +774,15 @@ const add = (seal: string, o: AddFindingOverrides = {}) => ({
   ...o,
 });
 
-test("registers fifteen tools, four hooks, and the settings RPC; tools assert permission; auto target", async () => {
+test("registers review, export, and settings tools, four hooks, and the settings RPC; tools assert permission; auto target", async () => {
   const { tools, hooks, call, asserted, rpcs } = await harness(repo());
   assert.deepEqual([...rpcs.keys()], ["directorate"]);
   assert.deepEqual([...tools.keys()].toSorted(), [
     "directorate_configure",
     "directorate_coverage",
     "directorate_diff",
+    "directorate_export",
+    "directorate_export_list",
     "directorate_grep",
     "directorate_history",
     "directorate_ledger_add",
@@ -939,6 +942,232 @@ test("bundled registration preserves existing agent and skill overrides", async 
     "directorate_liaison",
     "directorate_seat",
   ]);
+});
+
+test("directorate_export archives every generation and available session trace for one seal", async (t) => {
+  const dir = repo();
+  const { call, prompts, requests, S } = await harness(dir);
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const id = sealOf(content);
+  const reviewDir = path.join(state, id);
+  const oldOwner = S("lead");
+  await call(
+    "directorate_seal",
+    { resume: id },
+    "directorate_liaison",
+    "new-lead"
+  );
+  assert.deepEqual(sealJson(id).previousOwnerSessions, [oldOwner]);
+
+  writeFileSync(path.join(dir, "src/a.ts"), "export const a = 3\n");
+  await call(
+    "directorate_refresh",
+    { seal: id },
+    "directorate_liaison",
+    "new-lead"
+  );
+  const child = S("seat");
+  const absent = S("missing");
+  const s = sealJson(id);
+
+  const run = {
+    agent: "directorate_seat",
+    call: "call-1",
+    prompt: "private prompt",
+    startedAt: s.createdAt,
+    status: "completed",
+  } as const;
+
+  writeFileSync(
+    path.join(reviewDir, "seal.json"),
+    Schema.encodeSync(SealJson)({
+      ...s,
+      children: [
+        { ...run, session: child },
+        { ...run, call: "call-2", session: child },
+        { ...run, call: "call-3", session: absent },
+      ],
+      reportedAt: s.createdAt,
+    })
+  );
+  writeFileSync(path.join(reviewDir, "report.md"), "# Saved Directive\n");
+  writeFileSync(
+    path.join(reviewDir, ".directorate-write-orphan"),
+    "not a review artifact"
+  );
+
+  const bin = path.join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(
+    path.join(bin, "opencode"),
+    `#!/bin/sh
+case "$1:$2:$3" in
+  *${absent}*) exit 1 ;;
+  session:export:ses*) printf '{"info":{"id":"%s"},"messages":[{"text":"private transcript"}]}\\n' "$3" ;;
+  api:get:/api/experimental/session/*/log\\?follow=false) printf 'data: {"type":"session.created"}\\n\\n' ;;
+  *) exit 2 ;;
+esac
+`,
+    { mode: 0o700 }
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = [bin, originalPath].join(path.delimiter);
+  t.after(() => {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  const invoke = (seal: string) =>
+    call("directorate_export", { seal }, "build", "requester");
+
+  await assert.rejects(invoke("directorate-../outside"), /Unknown seal id/u);
+  const exported = await invoke(id);
+  assert.deepEqual(requests.at(-1), {
+    action: "directorate_export",
+    resources: [id],
+  });
+
+  const output = path.join(state, "exports");
+  const archives = readdirSync(output);
+  assert.equal(archives.length, 1, "staging directory is cleaned up");
+  const archive = path.join(output, present(archives[0]));
+
+  const unzip = (name: string) =>
+    execFileSync("unzip", ["-p", archive, name], { encoding: "utf-8" });
+
+  assert.equal(statSync(archive).mode % 0o1000, 0o600);
+  const manifest = JSON.parse(unzip("manifest.json"));
+  assert.equal(manifest.seal, id);
+  assert.deepEqual(manifest.missingArtifacts, []);
+  assert.deepEqual(
+    manifest.sessions.map((session: { id: string }) => session.id),
+    [S("new-lead"), oldOwner, child, absent]
+  );
+  assert.match(
+    manifest.sessions.at(-1).error,
+    /Could not export transcript or event log/u
+  );
+  assert.deepEqual(manifest.artifacts, [
+    "seal/diff.g1.patch",
+    "seal/diff.patch",
+    "seal/ledger.json",
+    "seal/report.md",
+    "seal/seal.json",
+    "seal/snapshot",
+    "seal/snapshot.g1",
+  ]);
+  assert.equal(unzip("seal/report.md"), "# Saved Directive\n");
+  assert.match(unzip("seal/snapshot/src/a.ts"), /a = 2/u);
+  assert.match(unzip("seal/snapshot.g1/src/a.ts"), /a = 3/u);
+  assert.match(unzip(`sessions/${child}.json`), /private transcript/u);
+  assert.match(unzip(`sessions/${child}.sse`), /session\.created/u);
+  assert.match(exported.content, /unredacted.*Nothing was uploaded/u);
+  assert.equal(prompts.length, 0);
+});
+
+test("/directorate-export forwards the request and the agent can list review dates across linked worktrees", async () => {
+  const dir = repo();
+  const linked = path.join(dir, "linked workspace");
+  execFileSync("git", ["-C", dir, "worktree", "add", "--detach", linked]);
+
+  const { call, commands, prompts, S } = await harness(dir);
+
+  const { content } = await call("directorate_seal", {
+    target: { kind: "local" },
+  });
+
+  const first = sealOf(content);
+  const template = sealJson(first);
+
+  const seed = (suffix: string, location: string, daysAgo: number) => {
+    const id = `directorate-20261025000000-${suffix}`;
+    const directory = path.join(state, id);
+
+    const createdAt = DateTime.subtract(DateTime.nowUnsafe(), {
+      days: daysAgo,
+    });
+
+    mkdirSync(directory);
+    writeFileSync(
+      path.join(directory, "seal.json"),
+      Schema.encodeSync(SealJson)({
+        ...template,
+        createdAt,
+        id,
+        ownerSession: "",
+        repo: execFileSync(
+          "git",
+          ["-C", location, "rev-parse", "--show-toplevel"],
+          { encoding: "utf-8" }
+        ).trim(),
+      })
+    );
+    writeFileSync(path.join(directory, "diff.patch"), `patch for ${id}`);
+
+    return id;
+  };
+
+  const recent = seed("000001", dir, 24);
+  const worktree = seed("000002", linked, 5);
+  const old = seed("000003", dir, 40);
+  const unrelated = seed("000004", repo(), 5);
+  writeFileSync(
+    path.join(state, first, "seal.json"),
+    Schema.encodeSync(SealJson)({ ...template, ownerSession: "" })
+  );
+
+  const exportCommand = present(commands.get("directorate-export"));
+
+  const invoke = (text: string) =>
+    Effect.runPromise(
+      exportCommand.execute({
+        delivery: "queue",
+        prompt: { text },
+        sessionID: Session.ID.make(S("requester")),
+      })
+    );
+
+  const request = "everything in this project in the last month";
+  await invoke(request);
+  assert.equal(prompts.length, 1);
+  const submitted = present(prompts[0]);
+  assert.ok(submitted.text.endsWith(request));
+  assert.match(submitted.text, /directorate_export once per matching seal ID/u);
+  assert.match(submitted.text, /Do not open, attach, or upload/u);
+
+  const list = async (before?: string) => {
+    const result = await call(
+      "directorate_export_list",
+      before ? { before } : {},
+      "build",
+      "requester"
+    );
+
+    return JSON.parse(result.content);
+  };
+
+  const page = await list();
+  const ids = page.reviews.map((review: { seal: string }) => review.seal);
+  assert.deepEqual(new Set(ids), new Set([first, recent, worktree, old]));
+  assert.ok(!ids.includes(unrelated));
+  assert.ok(
+    page.reviews.every((review: { createdAt: string }) =>
+      Number.isFinite(Date.parse(review.createdAt))
+    )
+  );
+  const earlier = await list(worktree);
+
+  assert.deepEqual(
+    earlier.reviews.map((review: { seal: string }) => review.seal),
+    [recent]
+  );
 });
 
 test("/directorate-review forwards free-form requests and only offers setup questions for a bare command", async () => {

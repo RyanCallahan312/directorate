@@ -389,7 +389,7 @@ A few rules hold everywhere:
 
 ## What a seal stores
 
-Seals live under `$DIRECTORATE_STATE_DIR`. If that is unset, they live in `$XDG_STATE_HOME/opencode-directorate`, else in `~/.local/state/opencode-directorate`. Seals not written for 14 days are removed.
+Seals live under `$DIRECTORATE_STATE_DIR`. If that is unset, they live in `$XDG_STATE_HOME/opencode-directorate`, else in `~/.local/state/opencode-directorate`. Seals not written for 31 days are removed.
 
 ```text
 directorate-20261124071813-5eecd7/
@@ -400,6 +400,16 @@ directorate-20261124071813-5eecd7/
 ├── report.md          written once, when the seal is reported
 └── mutation.lock      present only while a writer holds the seal
 ```
+
+## Export a review
+
+Run `/directorate-export <seal id>` using the ID on the Directive's Containment line. Run `/directorate-export` alone to export the session's active seal, or the latest seal for the current repository if this session has none.
+
+You can also ask in plain language, for example `/directorate-export everything in this project in the last month`. The agent lists retained reviews in the current project and its registered Git worktrees, picks the matching seals, and creates one ZIP per seal. Date ranges use when the Directive was filed (or when an open review started or last resumed); `in the last month` means the rolling last 30 days. Reviews already pruned cannot be recovered.
+
+The command writes a ZIP to `exports/` under the Directorate state directory on the OpenCode server. It includes the seal, ledger, saved Directive, all captured patch and snapshot generations, and the available transcripts and durable event logs of the Liaison and its review agents. `manifest.json` lists the included files and any missing data. Do this before the seal is pruned; the exported ZIP is kept separately and isn't pruned with the seal.
+
+The OpenCode server needs `zip` and the `opencode` CLI on its `PATH`. If the CLI can't access the sessions, the export still saves the review artifacts and lists unavailable traces. **Exports are always unredacted.** They can contain private source, prompts, and tool output. Nothing is uploaded; inspect the ZIP before sharing it.
 
 ## Development
 

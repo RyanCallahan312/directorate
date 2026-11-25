@@ -357,6 +357,8 @@ const SealSchema = Schema.Struct({
   /** A panel review's Directorate Seats: one model per SeatSchema. */
   panel: opt(list(Schema.String)),
   postImage: Schema.Literals(["worktree", "commit"]),
+  /** Liaison sessions that owned this seal before a takeover, for full exports. */
+  previousOwnerSessions: opt(list(Schema.String)),
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
   recheckOf: opt(Schema.String),

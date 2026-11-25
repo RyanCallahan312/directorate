@@ -38,6 +38,7 @@ import {
 import { configureRpc, configureTool } from "./configure.ts";
 import { coverageSummary } from "./coverage.ts";
 import { failure, ignore, recover } from "./error.ts";
+import { exportReview, listExportReviews } from "./export.ts";
 import { Git } from "./git.ts";
 import { ledgerTools } from "./ledger-tools.ts";
 import { currentSeverity, unresolved } from "./ledger.ts";
@@ -79,6 +80,12 @@ import {
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 const GRACE_MS = 120_000;
+
+const GENERAL_TOOLS = new Set([
+  "directorate_configure",
+  "directorate_export",
+  "directorate_export_list",
+]);
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
 const LIAISON_ONLY =
@@ -271,6 +278,24 @@ const register = Effect.fn("Directorate.register")(function* register() {
   yield* host.command.transform((editor) => {
     editor.add({
       description:
+        "Export full, unredacted Directorate reviews [seal ID or request in plain language]",
+      execute: ({ delivery, prompt, sessionID }) =>
+        host.session
+          .prompt({
+            ...prompt,
+            delivery,
+            sessionID,
+            text: [
+              "Handle the user's Directorate export request below. If it names a seal ID, use it directly. Otherwise call directorate_export_list to find retained reviews in the current project. For a blank request, use activeSeal or the first (newest) review. For a range or other selection, use the listing's UTC clock and review metadata, following nextBefore until all applicable pages have been checked. For time ranges use reportedAt when present, otherwise createdAt; interpret 'in the last month' as the rolling last 30 days unless the user specifies a calendar month. Ask if the scope is unclear; never silently broaden it.",
+              "Call directorate_export once per matching seal ID. Export existing reviews only; do not start a review. Do not open, attach, or upload the resulting unredacted ZIPs. Report their paths and any missing data or failed exports. If there are no matches, say so; pruned reviews cannot be recovered.",
+              `User's request:\n${prompt.text}`,
+            ].join("\n\n"),
+          })
+          .pipe(Effect.asVoid),
+      name: "directorate-export",
+    });
+    editor.add({
+      description:
         "Start a Directorate review [request, --scope branch|local|repository, or --recheck <seal>]",
       execute: ({ delivery, prompt, sessionID }) => {
         const again =
@@ -363,6 +388,28 @@ const register = Effect.fn("Directorate.register")(function* register() {
     readTools(tool);
     ledgerTools(tool);
     configureTool(tool);
+
+    tool({
+      description:
+        "List retained Directorate reviews in this project and its registered Git worktrees, newest seal IDs first. Continue with nextBefore. Returns review metadata, not transcripts or source.",
+      *execute(input, c) {
+        const page = yield* listExportReviews(c.sessionID, input.before);
+
+        return { content: JSON.stringify(page) };
+      },
+      input: Schema.Struct({ before: optional(str) }),
+      name: "directorate_export_list",
+    });
+
+    tool({
+      description:
+        "Write a full, unredacted ZIP for one existing Directorate seal to the local exports directory. Use only when the user requests an export. Returns the saved path and warns of unavailable data; does not upload anything.",
+      *execute(input) {
+        return { content: yield* exportReview(input.seal) };
+      },
+      input: Schema.Struct({ seal: str }),
+      name: "directorate_export",
+    });
 
     // Sealed: one review per session, started fresh, resumed from another session, or restarted by abandoning.
     tool({
@@ -475,9 +522,22 @@ const register = Effect.fn("Directorate.register")(function* register() {
                           ownerSession: a.session,
                         };
 
-                  yield* store.save(taken);
+                  const updated =
+                    s.ownerSession && s.ownerSession !== a.session
+                      ? {
+                          ...taken,
+                          previousOwnerSessions: [
+                            ...new Set([
+                              ...(s.previousOwnerSessions ?? []),
+                              s.ownerSession,
+                            ]),
+                          ],
+                        }
+                      : taken;
 
-                  return { previousOwner: s.ownerSession, seal: taken };
+                  yield* store.save(updated);
+
+                  return { previousOwner: s.ownerSession, seal: updated };
                 })
               );
 
@@ -1286,12 +1346,9 @@ const register = Effect.fn("Directorate.register")(function* register() {
         const agent: string = event.agent;
 
         if (!ROLE_SET.has(agent)) {
-          // Other agents get the Liaison, not the harness: no review tools but the settings one.
+          // Other agents can configure and export without getting the review harness.
           for (const name of Object.keys(event.tools ?? {})) {
-            if (
-              name.startsWith("directorate_") &&
-              name !== "directorate_configure"
-            ) {
+            if (name.startsWith("directorate_") && !GENERAL_TOOLS.has(name)) {
               Reflect.deleteProperty(event.tools, name);
             }
           }
@@ -1361,7 +1418,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
         event.action === "subagent"
           ? CHILD_ROLE_SET.has(target)
           : event.action.startsWith("directorate_") &&
-            event.action !== "directorate_configure";
+            !GENERAL_TOOLS.has(event.action);
 
       // A request that names no agent is the session's agent's, as the host resolves it.
       const caller = covered

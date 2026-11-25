@@ -442,7 +442,11 @@ export const renderReport = (input: {
     );
   }
 
-  return withSynthesis(out, input.synthesis).join("\n");
+  return [
+    ...withSynthesis(out, input.synthesis),
+    "",
+    `Export this review: \`/directorate-export ${seal.id}\` (unredacted).`,
+  ].join("\n");
 };
 
 interface Freshness {
