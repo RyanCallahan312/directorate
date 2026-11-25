@@ -9,7 +9,7 @@ const SECRETS =
 const ENV_EXAMPLE = /(?:^|\/)\.env\.(?:example|sample|template)$/iu;
 
 /** Git internals: a dependency's own .git/config can hold a remote URL with a token. */
-const GIT_DIR = /(?:^|\/)\.git(?:\/|$)/u;
+const GIT_DIR = /(?:^|\/)\.git(?:\/|$)/iu;
 const GENERATED = /(?:\.min\.(?:js|css)|\.map|\.snap)$/u;
 
 /**

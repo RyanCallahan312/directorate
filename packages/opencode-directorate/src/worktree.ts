@@ -1,17 +1,26 @@
 // Directorate live working-tree access, under one path policy, and the signatures that tell whether it moved since the seal.
-import { Context, Crypto, Effect, FileSystem, Layer, Path } from "effect";
+import {
+  Bytes,
+  Context,
+  Crypto,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+} from "effect";
 import type { PlatformError } from "effect/PlatformError";
 
 import { ReviewError } from "./error.ts";
 import { isSecret } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
+import { encodeUtf8 } from "./utf8.ts";
 
 const IO_CONCURRENCY = 16;
 
 /** A working-tree path as captured: its bytes (a symlink as its link text, a submodule as its commit) and mode, or absent. */
 interface LiveEntry {
-  readonly buf?: Buffer;
+  readonly buf?: Uint8Array;
   readonly mode: "absent" | "link" | "exec" | "file" | "gitlink";
 }
 
@@ -85,7 +94,7 @@ const make = Effect.gen(function* make() {
     function* entry(
       repo: string,
       path: string
-    ): Effect.fn.Return<LiveEntry, PlatformError> {
+    ): Effect.fn.Return<LiveEntry, PlatformError | ReviewError> {
       const { abs, st } = yield* stat(repo, path);
 
       // An untracked nested repository is listed as `dir/`; only a tracked gitlink names its directory bare.
@@ -95,7 +104,7 @@ const make = Effect.gen(function* make() {
         return head === undefined
           ? { mode: "absent" }
           : {
-              buf: Buffer.from(`Subproject commit ${head}\n`),
+              buf: encodeUtf8(`Subproject commit ${head}\n`),
               mode: "gitlink",
             };
       }
@@ -105,7 +114,7 @@ const make = Effect.gen(function* make() {
 
         return link === undefined
           ? { mode: "absent" }
-          : { buf: Buffer.from(`symlink -> ${link}\n`), mode: "link" };
+          : { buf: encodeUtf8(`symlink -> ${link}\n`), mode: "link" };
       }
 
       if (st?.type !== "File") {
@@ -114,14 +123,38 @@ const make = Effect.gen(function* make() {
 
       const buf = yield* orMissing(fs.readFile(abs));
 
-      // Each of the last three octal digits is odd when its execute bit is set.
-      const executable = /[1357]/u.test(st.mode.toString(8).slice(-3));
+      if (buf === undefined) {
+        return { mode: "absent" };
+      }
 
-      return buf === undefined
-        ? { mode: "absent" }
-        : { buf: Buffer.from(buf), mode: executable ? "exec" : "file" };
+      // Git for Windows retains modes in the index, including links checked out as text.
+      const indexed =
+        paths.sep === "\\" ? yield* git.indexMode(repo, path) : undefined;
+
+      if (indexed === "120000") {
+        return {
+          buf: Bytes.concat([encodeUtf8("symlink -> "), buf, encodeUtf8("\n")]),
+          mode: "link",
+        };
+      }
+
+      // Each of the last three octal digits is odd when its execute bit is set.
+      const executable =
+        indexed === undefined
+          ? /[1357]/u.test(st.mode.toString(8).slice(-3))
+          : indexed === "100755";
+
+      return { buf, mode: executable ? "exec" : "file" };
     },
-    (effect, _repo, path) => effect.pipe(unreadable(path))
+    (effect, _repo, path) =>
+      effect.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ReviewError({
+              message: `Cannot read ${path}: ${cause.message}`,
+            })
+        )
+      )
   );
 
   /** An entry's signature: its mode and content hash, or "deleted". */

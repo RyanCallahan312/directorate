@@ -1,7 +1,5 @@
-import { fileURLToPath } from "node:url";
-
 import { Agent, Skill } from "@opencode/plugin/effect";
-import { Data, Effect, FileSystem, Schema } from "effect";
+import { Data, Effect, FileSystem, Path, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
 import { ROLES } from "./model.ts";
@@ -28,7 +26,8 @@ class MissingFrontmatter extends Data.TaggedError("MissingFrontmatter")<{
 
 const readMarkdown = Effect.fn("Directorate.readMarkdown")(
   function* readMarkdown(url: URL) {
-    const path = fileURLToPath(url);
+    const paths = yield* Path.Path;
+    const path = yield* paths.fromFileUrl(url);
     const fs = yield* FileSystem.FileSystem;
     const text = yield* fs.readFileString(path);
     const match = /^---\r?\n(?<yaml>[\s\S]*?)\r?\n---\r?\n/u.exec(text);

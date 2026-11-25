@@ -1,16 +1,42 @@
 import { DateTime, Effect, FileSystem, Path, Result, Schema } from "effect";
 
+import { writeArchive } from "./archive.ts";
 import { command } from "./command.ts";
 import { failure } from "./error.ts";
 import { Git } from "./git.ts";
 import { Host } from "./host.ts";
 import { Sessions } from "./session.ts";
 import { Store } from "./store.ts";
+import { decodeUtf8 } from "./utf8.ts";
 
 const TIMEOUT = 120_000;
 const SESSION_ID = /^ses[\w-]+$/u;
 const DIFF = /^diff(?:\.g\d+)?\.patch$/u;
 const SNAPSHOT = /^snapshot(?:\.g\d+)?$/u;
+
+const ExportManifest = Schema.fromJsonString(
+  Schema.Struct({
+    artifacts: Schema.Array(Schema.String),
+    exportedAt: Schema.String,
+    formatVersion: Schema.Literal(1),
+    missingArtifacts: Schema.Array(Schema.String),
+    openCodeVersion: Schema.String,
+    reported: Schema.Boolean,
+    runsWithoutSession: Schema.Array(Schema.String),
+    seal: Schema.String,
+    sessions: Schema.Array(
+      Schema.Struct({
+        error: Schema.optional(Schema.String),
+        id: Schema.String,
+        log: Schema.optional(Schema.String),
+        transcript: Schema.optional(Schema.String),
+      })
+    ),
+  }),
+  { space: 2 }
+);
+
+const encodeManifest = Schema.encodeEffect(ExportManifest);
 
 export const PAGE_SIZE = 50;
 
@@ -25,21 +51,7 @@ export const listExportReviews = Effect.fn("Directorate.listExportReviews")(
       (yield* Host).location.directory;
 
     const repo = yield* git.root(directory);
-
-    const worktrees = yield* git.run(repo, [
-      "worktree",
-      "list",
-      "--porcelain",
-      "-z",
-    ]);
-
-    const roots = new Set([
-      repo,
-      ...worktrees
-        .split("\0")
-        .filter((line) => line.startsWith("worktree "))
-        .map((line) => line.slice("worktree ".length)),
-    ]);
+    const roots = new Set([repo, ...(yield* git.worktrees(repo))]);
 
     const page = (yield* store.list())
       .filter(
@@ -223,8 +235,8 @@ export const exportReview = Effect.fn("Directorate.exportReview")(
 
         const exportedTranscript =
           Result.isSuccess(transcript) &&
-          transcriptId(transcript.success.toString("utf-8")).valueOrUndefined
-            ?.info.id === session
+          transcriptId(decodeUtf8(transcript.success)).valueOrUndefined?.info
+            .id === session
             ? `sessions/${session}.json`
             : undefined;
 
@@ -260,30 +272,18 @@ export const exportReview = Effect.fn("Directorate.exportReview")(
       { concurrency: 2 }
     );
 
-    const manifest = {
+    const manifest = yield* encodeManifest({
       ...review,
       exportedAt: DateTime.formatIso(yield* DateTime.now),
       formatVersion: 1,
       openCodeVersion: host.app.version,
       sessions: sessionExports,
-    };
+    });
 
-    yield* fs.writeFileString(
-      paths.join(staging, "manifest.json"),
-      JSON.stringify(manifest, null, 2)
-    );
+    yield* fs.writeFileString(paths.join(staging, "manifest.json"), manifest);
 
     const temp = paths.join(staging, "archive.zip");
-    yield* command(
-      "zip",
-      ["-q", "-r", "archive.zip", "manifest.json", "seal", "sessions"],
-      {
-        cwd: staging,
-        env: { ZIPOPT: "" },
-        timeout: TIMEOUT,
-      }
-    );
-    yield* fs.chmod(temp, 0o600);
+    yield* writeArchive(staging, temp, ["manifest.json", "seal", "sessions"]);
 
     const archive = paths.join(
       output,

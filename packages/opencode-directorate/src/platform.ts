@@ -3,17 +3,42 @@ import * as NodeChildProcessSpawner from "@effect/platform-node-shared/NodeChild
 import * as NodeCrypto from "@effect/platform-node-shared/NodeCrypto";
 import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
 import * as NodePath from "@effect/platform-node-shared/NodePath";
-import { Layer } from "effect";
+import { Effect, FileSystem, Layer, Option } from "effect";
+import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 
 import { Git } from "./git.ts";
+import { nodeProcessIdentity } from "./process-identity.ts";
 import { SettingsStore } from "./settings.ts";
 import { StateRoot, Store } from "./store.ts";
 import { Worktree } from "./worktree.ts";
 
+const processLayer = Layer.unwrap(
+  Effect.serviceOption(ChildProcessSpawner).pipe(
+    Effect.map(
+      Option.match({
+        onNone: () => NodeChildProcessSpawner.layer,
+        onSome: (spawner) => Layer.succeed(ChildProcessSpawner, spawner),
+      })
+    )
+  )
+);
+
+const fileSystemLayer = Layer.unwrap(
+  Effect.serviceOption(FileSystem.FileSystem).pipe(
+    Effect.map(
+      Option.match({
+        onNone: () => NodeFileSystem.layer,
+        onSome: (fs) => Layer.succeed(FileSystem.FileSystem, fs),
+      })
+    )
+  )
+);
+
 const nodeLayer = Layer.mergeAll(
-  NodeChildProcessSpawner.layer,
-  NodeCrypto.layer
-).pipe(Layer.provideMerge(Layer.merge(NodeFileSystem.layer, NodePath.layer)));
+  processLayer,
+  NodeCrypto.layer,
+  nodeProcessIdentity
+).pipe(Layer.provideMerge(Layer.merge(fileSystemLayer, NodePath.layer)));
 
 export const platformLayer = Layer.mergeAll(
   Store.layer,

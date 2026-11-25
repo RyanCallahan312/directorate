@@ -50,7 +50,6 @@ import {
   ModelRef,
   PANELIST,
   REFUTER,
-  RepoScope,
   REVIEW_SCOPE_TARGET,
   REVIEWER,
   ReviewScopeSchema,
@@ -60,6 +59,7 @@ import {
 import type { Child, Seal } from "./model.ts";
 import { platformLayer } from "./platform.ts";
 import { readTools } from "./read-tools.ts";
+import { RepoScope } from "./repo-path.ts";
 import { finalize } from "./report.ts";
 import { createSeal, recheckable, recheckSeal, refreshSeal } from "./seal.ts";
 import { Host, Sessions } from "./session.ts";

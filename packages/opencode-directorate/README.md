@@ -314,7 +314,7 @@ Who may decide an entry:
 
 ## How the code is laid out
 
-Each layer depends only on the layers below it. Services are Effect `Context.Service`s with a `layer`, built once when the plugin starts: `platform.ts` assembles `Git`, `Worktree`, `Store`, `SettingsStore`, and the Node platform, and `index.ts` adds `Host` (the OpenCode plugin context) and `Sessions`. The package also exports a TUI part (`tui.ts`), a desktop GUI part (`gui.ts`, built to `dist/`), and the RPC definition they share with the server (`rpc.ts`). Both app parts run the same dialog steps (`configure-flow.ts`). The TUI and GUI APIs are promise-based, so those three files are plain async code; everything they call runs in Effect on the server.
+Each layer depends only on the layers below it. Services are Effect `Context.Service`s with a `layer`, built once when the plugin starts: `platform.ts` assembles `Git`, `Worktree`, `Store`, `SettingsStore`, and the Node platform, and `index.ts` adds `Host` (the OpenCode plugin context) and `Sessions`. The package also exports a TUI part (`tui.ts`), a desktop GUI part (`gui.ts`, built to `dist/`), and the RPC definition they share with the server (`rpc.ts`). Both app parts run the same Effect workflow (`configure-flow.ts`). The command adapter (`configure-client.ts`) bridges OpenCode’s Promise-based UI and RPC APIs. OpenCode Desktop ties each run to the plugin’s lifetime.
 
 ```mermaid
 flowchart TB
@@ -409,7 +409,7 @@ You can also ask in plain language, for example `/directorate-export everything 
 
 The command writes a ZIP to `exports/` under the Directorate state directory on the OpenCode server. It includes the seal, ledger, saved Directive, all captured patch and snapshot generations, and the available transcripts and durable event logs of the Liaison and its review agents. `manifest.json` lists the included files and any missing data. Do this before the seal is pruned; the exported ZIP is kept separately and isn't pruned with the seal.
 
-The OpenCode server needs `zip` and the `opencode` CLI on its `PATH`. If the CLI can't access the sessions, the export still saves the review artifacts and lists unavailable traces. **Exports are always unredacted.** They can contain private source, prompts, and tool output. Nothing is uploaded; inspect the ZIP before sharing it.
+The OpenCode server uses the `opencode` CLI on its `PATH` to read session traces. If the CLI can't access the sessions, the export still saves the review artifacts and lists unavailable traces. **Exports are always unredacted.** They can contain private source, prompts, and tool output. Inspect the ZIP before sharing it. The export is saved locally.
 
 ## Development
 

@@ -4,34 +4,37 @@
 import { Command, Plugin } from "@opencode/plugin/gui";
 import type { Context } from "@opencode/plugin/gui";
 
-import { configure, messageOf } from "./configure-flow.ts";
+import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
 import type { Dialogs } from "./configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
 /** The app's dialogs and toasts as the walk asks for them. Its select has no disabled options: those are left out. */
 export const guiDialogs = (ctx: Context): Dialogs => ({
-  alert: (o) => ctx.dialogs.alert(o),
-  confirm: (o) => ctx.dialogs.confirm(o),
+  alert: (o) => fromHost(() => ctx.dialogs.alert(o)),
+  confirm: (o) => fromHost(() => ctx.dialogs.confirm(o)),
   path: (p) => p,
-  prompt: (o) => ctx.dialogs.prompt(o),
+  prompt: (o) => fromHost(() => ctx.dialogs.prompt(o)),
   select: (o) =>
-    ctx.dialogs.select({
-      ...o,
-      options: o.options.flatMap(({ disabled, ...option }) =>
-        disabled ? [] : [option]
-      ),
+    fromHost(() =>
+      ctx.dialogs.select({
+        ...o,
+        options: o.options.flatMap(({ disabled, ...option }) =>
+          disabled ? [] : [option]
+        ),
+      })
+    ),
+  toast: (o) =>
+    showToast(() => {
+      ctx.toast.show({
+        description: o.description,
+        title: o.title ?? "The Directorate",
+        variant: o.variant === "warning" ? "default" : o.variant,
+      });
     }),
-  toast: (o) => {
-    ctx.toast.show({
-      description: o.description,
-      title: o.title ?? "The Directorate",
-      variant: o.variant === "warning" ? "default" : o.variant,
-    });
-  },
 });
 
 /** /directorate-configure against the server and location of the session in front, read when it runs. */
-export const configureInGui = async (ctx: Context): Promise<void> => {
+export const configureInGui = (ctx: Context): Promise<void> => {
   const session = ctx.sessions.current();
 
   const directorate = (session?.server.client ?? ctx.client).rpc(
@@ -39,14 +42,14 @@ export const configureInGui = async (ctx: Context): Promise<void> => {
   );
 
   const location = session?.location;
-  await configure(guiDialogs(ctx), {
-    settings: () => directorate.settings(undefined, { location }),
-    write: (input) => directorate.write(input, { location }),
-  }).catch((error) =>
-    ctx.dialogs.alert({
-      description: messageOf(error),
-      title: "The Directorate // Settings",
-    })
+
+  return configureFromHost(
+    guiDialogs(ctx),
+    {
+      settings: fromHost(() => directorate.settings(undefined, { location })),
+      write: (input) => fromHost(() => directorate.write(input, { location })),
+    },
+    ctx.signal
   );
 };
 

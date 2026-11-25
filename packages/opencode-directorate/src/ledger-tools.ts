@@ -1,4 +1,3 @@
-// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
 import { DateTime, Effect, Function, Schema } from "effect";
 
 import {
@@ -24,7 +23,6 @@ import {
   Lens,
   NoteKind,
   PANELIST,
-  RepoPath,
   REVIEWER,
   SCOUT,
   SeveritySchema,
@@ -32,6 +30,8 @@ import {
   VerdictKind,
 } from "./model.ts";
 import type { Entry } from "./model.ts";
+// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
+import { RepoPath } from "./repo-path.ts";
 import { Host, Sessions } from "./session.ts";
 import { Store } from "./store.ts";
 import {

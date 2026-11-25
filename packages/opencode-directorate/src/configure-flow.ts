@@ -1,8 +1,7 @@
 // /directorate-configure's dialog walk over one directorate.json, shared by the TUI part (tui.ts) and the GUI part (gui.ts): each
 // adapts its host's dialogs to Dialogs and binds the settings RPC (rpc.ts) to a location as Backend. The server checks
-// models and thinking levels and writes the file; this only asks. The TUI and GUI plugin APIs are promise-based, so
-// this is plain async code.
-import { Predicate } from "effect";
+// models and thinking levels and writes the file. The flow only orchestrates dialogs and the settings RPC.
+import { Data, Effect, Result } from "effect";
 
 import {
   DEFAULT_BUDGET,
@@ -41,39 +40,39 @@ export interface Dialogs {
     readonly placeholder?: string;
     readonly current?: V | undefined;
     readonly options: readonly Option<V>[];
-  }) => Promise<V | undefined>;
+  }) => Effect.Effect<V | undefined, SettingsError>;
   prompt: (options: {
     readonly title: string;
     readonly description?: string;
     readonly value?: string;
-  }) => Promise<string | undefined>;
+  }) => Effect.Effect<string | undefined, SettingsError>;
   confirm: (options: {
     readonly title: string;
     readonly description: string;
     readonly confirm: string;
     readonly cancel: string;
-  }) => Promise<boolean | undefined>;
+  }) => Effect.Effect<boolean | undefined, SettingsError>;
   alert: (options: {
     readonly title: string;
     readonly description: string;
-  }) => Promise<void>;
+  }) => Effect.Effect<void, SettingsError>;
   toast: (options: {
     readonly title?: string;
     readonly description: string;
     readonly variant: "success" | "warning" | "error";
-  }) => void;
+  }) => Effect.Effect<void, SettingsError>;
   /** A path for display, such as with the home directory abbreviated. */
   path: (path: string) => string;
 }
 
 /** The settings RPC, bound to the location being configured. */
 export interface Backend {
-  settings: () => Promise<SettingsView>;
+  readonly settings: Effect.Effect<SettingsView, SettingsError>;
   write: (input: {
     readonly previous: Settings;
     readonly scope: SettingsScope;
     readonly settings: Settings;
-  }) => Promise<WriteResult>;
+  }) => Effect.Effect<WriteResult, SettingsError>;
 }
 
 type Lens = (typeof LENSES)[number];
@@ -114,10 +113,11 @@ const SCOPE_HINT: Record<ReviewScope, string> = {
   repository: "whole repository, including unchanged files",
 };
 
-export const messageOf = (cause: unknown) =>
-  Predicate.hasProperty(cause, "message")
-    ? String(cause.message)
-    : String(cause);
+export class SettingsError extends Data.TaggedError(
+  "DirectorateSettingsError"
+)<{
+  readonly message: string;
+}> {}
 
 const unset = (fallback: string) => `unset: ${fallback}`;
 
@@ -182,16 +182,16 @@ const selectScope = (dialog: Dialogs, now: SettingsView) =>
     title: "The Directorate // Settings",
   });
 
-const pickVariant = async (
+const pickVariant = Effect.fnUntraced(function* pickVariant(
   dialog: Dialogs,
   choice: Choice,
   current?: string
-): Promise<Seat | undefined> => {
+) {
   if (!choice.variants.length) {
     return { model: choice.ref };
   }
 
-  const variant = await dialog.select<string | null>({
+  const variant = yield* dialog.select<string | null>({
     current: current ?? null,
     options: [
       ...choice.variants.map((v) => ({ title: v, value: v })),
@@ -201,16 +201,16 @@ const pickVariant = async (
   });
 
   if (variant === undefined) {
-    return undefined;
+    return;
   }
 
   return variant === null
     ? { model: choice.ref }
     : { model: choice.ref, variant };
-};
+});
 
-const addSeat = async (ctx: FlowContext): Promise<Seat | undefined> => {
-  const choice = await ctx.dialog.select<Choice>({
+const addSeat = Effect.fnUntraced(function* addSeat(ctx: FlowContext) {
+  const choice = yield* ctx.dialog.select<Choice>({
     options: ctx.now.models.map((m) => ({
       description: m.name,
       group: m.ref.split("/")[0] ?? m.ref,
@@ -221,21 +221,21 @@ const addSeat = async (ctx: FlowContext): Promise<Seat | undefined> => {
     title: "Seat a model on The Directorate",
   });
 
-  return choice ? pickVariant(ctx.dialog, choice) : undefined;
-};
+  return choice ? yield* pickVariant(ctx.dialog, choice) : undefined;
+});
 
-const editSeatAt = async (
+const editSeatAt = Effect.fnUntraced(function* editSeatAt(
   ctx: FlowContext,
   seats: readonly Seat[],
   index: number
-): Promise<readonly Seat[]> => {
+) {
   const seat = seats[index];
 
   if (!seat) {
     return seats;
   }
 
-  const action = await ctx.dialog.select<"variant" | "up" | "remove">({
+  const action = yield* ctx.dialog.select<"variant" | "up" | "remove">({
     options: [
       { title: "Thinking level…", value: "variant" },
       { disabled: index === 0, title: "Move up", value: "up" },
@@ -259,7 +259,7 @@ const editSeatAt = async (
     const choice = ctx.now.models.find((m) => m.ref === seat.model);
 
     if (!choice) {
-      ctx.dialog.toast({
+      yield* ctx.dialog.toast({
         description: `${seat.model} is not an available chat model on this plane; remove it or pick another.`,
         variant: "warning",
       });
@@ -267,20 +267,23 @@ const editSeatAt = async (
       return seats;
     }
 
-    const next = await pickVariant(ctx.dialog, choice, seat.variant);
+    const next = yield* pickVariant(ctx.dialog, choice, seat.variant);
 
     return next ? seats.map((s, i) => (i === index ? next : s)) : seats;
   }
 
   return seats;
-};
+});
 
-const editSeats = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
-  const step = async (
-    seats: readonly Seat[],
-    at?: number | "add" | "clear"
-  ): Promise<Settings> => {
-    const pick = await ctx.dialog.select<number | "add" | "clear">({
+const editSeats = Effect.fnUntraced(function* editSeats(
+  ctx: FlowContext,
+  draft: Settings
+) {
+  let seats = draft.panel?.models ?? [];
+  let at: number | "add" | "clear" | undefined;
+
+  while (true) {
+    const pick = yield* ctx.dialog.select<number | "add" | "clear">({
       current: at,
       options: [
         ...seats.map((s, i) => ({
@@ -307,30 +310,39 @@ const editSeats = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
       return { ...draft, panel: { ...draft.panel, models: seats } };
     }
 
+    at = pick;
+
     if (pick === "clear") {
-      return step([], pick);
+      seats = [];
+      continue;
     }
 
     if (pick === "add") {
-      const seat = await addSeat(ctx);
+      const seat = yield* addSeat(ctx);
 
-      return step(seat ? [...seats, seat] : seats, pick);
+      seats = seat ? [...seats, seat] : seats;
+      continue;
     }
 
-    const next = await editSeatAt(ctx, seats, pick);
+    seats = yield* editSeatAt(ctx, seats, pick);
+  }
+});
 
-    return step(next, pick);
-  };
+const editBudgets = Effect.fnUntraced(function* editBudgets(
+  ctx: FlowContext,
+  draft: Settings
+) {
+  const budgets = new Map(
+    ModeSchema.literals.map((mode) => [mode, budgetOf(draft, mode)] as const)
+  );
 
-  return step(draft.panel?.models ?? []);
-};
+  let at: Mode | undefined;
 
-const editBudgets = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
-  const step = async (current: Settings, at?: Mode): Promise<Settings> => {
-    const mode = await ctx.dialog.select<Mode>({
+  while (true) {
+    const mode = yield* ctx.dialog.select<Mode>({
       current: at,
       options: ModeSchema.literals.map((m) => {
-        const currentMinutes = budgetOf(current, m);
+        const currentMinutes = budgets.get(m);
 
         return {
           description:
@@ -345,17 +357,19 @@ const editBudgets = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
     });
 
     if (!mode) {
-      return current;
+      return { ...draft, budget_minutes: Object.fromEntries(budgets) };
     }
 
-    const text = await ctx.dialog.prompt({
+    const text = yield* ctx.dialog.prompt({
       description: `Minutes, 2–240; used as-is for panels too. Type "unset" to fall back to ${budgetFallback(ctx.base, mode)} min.`,
       title: `${mode} budget`,
-      value: String(budgetOf(current, mode) ?? ""),
+      value: String(budgets.get(mode) ?? ""),
     });
 
+    at = mode;
+
     if (text === undefined) {
-      return step(current, mode);
+      continue;
     }
 
     const minutes = ["", "unset"].includes(text.trim().toLowerCase())
@@ -363,34 +377,29 @@ const editBudgets = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
       : Number(text);
 
     if (minutes !== undefined && !(minutes >= 2 && minutes <= 240)) {
-      ctx.dialog.toast({
+      yield* ctx.dialog.toast({
         description: `"${text}" is not 2–240 minutes.`,
         variant: "error",
       });
 
-      return step(current, mode);
+      continue;
     }
 
-    return step(
-      {
-        ...current,
-        budget_minutes: { ...current.budget_minutes, [mode]: minutes },
-      },
-      mode
-    );
-  };
+    budgets.set(mode, minutes);
+  }
+});
 
-  return step(draft);
-};
+const editLenses = Effect.fnUntraced(function* editLenses(
+  ctx: FlowContext,
+  draft: Settings
+) {
+  let current = draft;
+  let at: Lens | "inherit" | undefined;
 
-const editLenses = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
-  const step = async (
-    current: Settings,
-    at?: Lens | "inherit"
-  ): Promise<Settings> => {
+  while (true) {
     const off = new Set(lensesOff(ctx.base, current));
 
-    const pick = await ctx.dialog.select<Lens | "inherit">({
+    const pick = yield* ctx.dialog.select<Lens | "inherit">({
       current: at,
       options: [
         ...LENSES.map((l) => ({
@@ -415,33 +424,31 @@ const editLenses = (ctx: FlowContext, draft: Settings): Promise<Settings> => {
       return current;
     }
 
+    at = pick;
+
     if (pick === "inherit") {
       const { lenses: _, ...rest } = current;
 
-      return step(rest, pick);
+      current = rest;
+      continue;
     }
 
     if (!off.delete(pick)) {
       off.add(pick);
     }
 
-    return step(
-      {
-        ...current,
-        lenses: { disabled: LENSES.filter((l) => off.has(l)) },
-      },
-      pick
-    );
-  };
+    current = {
+      ...current,
+      lenses: { disabled: LENSES.filter((l) => off.has(l)) },
+    };
+  }
+});
 
-  return step(draft);
-};
-
-const editReviewScope = async (
+const editReviewScope = Effect.fnUntraced(function* editReviewScope(
   ctx: FlowContext,
   draft: Settings
-): Promise<Settings> => {
-  const reviewScope = await choose<ReviewScope | "unset">(
+) {
+  const reviewScope = yield* choose<ReviewScope | "unset">(
     ctx.dialog,
     "Default review scope",
     draft.default_scope ?? "unset",
@@ -466,13 +473,13 @@ const editReviewScope = async (
   }
 
   return reviewScope ? { ...draft, default_scope: reviewScope } : draft;
-};
+});
 
-const editMode = async (
+const editMode = Effect.fnUntraced(function* editMode(
   ctx: FlowContext,
   draft: Settings
-): Promise<Settings> => {
-  const mode = await choose<Mode | "unset">(
+) {
+  const mode = yield* choose<Mode | "unset">(
     ctx.dialog,
     "Default mode",
     draft.mode ?? "unset",
@@ -497,13 +504,13 @@ const editMode = async (
   const { mode: _, ...rest } = draft;
 
   return mode === "unset" ? rest : { ...rest, mode };
-};
+});
 
-const editPanel = async (
+const editPanel = Effect.fnUntraced(function* editPanel(
   ctx: FlowContext,
   draft: Settings
-): Promise<Settings> => {
-  const on = await choose<"on" | "off" | "unset">(
+) {
+  const on = yield* choose<"on" | "off" | "unset">(
     ctx.dialog,
     "Panel by default",
     panelState(draft.panel?.enabled),
@@ -538,7 +545,7 @@ const editPanel = async (
     ...draft,
     panel: on === "unset" ? panel : { ...panel, enabled: on === "on" },
   };
-};
+});
 
 const menuOptions = (
   ctx: FlowContext,
@@ -600,10 +607,10 @@ const menuOptions = (
 
 const MENU_ACTIONS: Record<
   Exclude<Item, "save">,
-  (ctx: FlowContext, draft: Settings) => Promise<Settings>
+  (ctx: FlowContext, draft: Settings) => Effect.Effect<Settings, SettingsError>
 > = {
   budgets: editBudgets,
-  clear: () => Promise.resolve({}),
+  clear: () => Effect.succeed({}),
   lenses: editLenses,
   mode: editMode,
   panel: editPanel,
@@ -611,43 +618,45 @@ const MENU_ACTIONS: Record<
   seats: editSeats,
 };
 
-const saveSettings = async (
-  ctx: FlowContext,
-  draft: Settings
-): Promise<boolean> => {
-  try {
-    const out = await ctx.directorate.write({
-      previous: ctx.now[ctx.scope],
-      scope: ctx.scope,
-      settings: draft,
-    });
+const saveSettings = Effect.fn("Directorate.saveSettings")(
+  function* saveSettings(ctx: FlowContext, draft: Settings) {
+    const saved = yield* ctx.directorate
+      .write({
+        previous: ctx.now[ctx.scope],
+        scope: ctx.scope,
+        settings: draft,
+      })
+      .pipe(Effect.result);
 
-    ctx.dialog.toast({
+    if (Result.isFailure(saved)) {
+      yield* ctx.dialog.alert({
+        description: saved.failure.message,
+        title: "Directorate settings <rejected/not saved>",
+      });
+
+      return false;
+    }
+
+    const out = saved.success;
+    yield* ctx.dialog.toast({
       description: `${out.removed ? "Revoked" : "<Filed/Saved>"} ${ctx.dialog.path(out.path)}. Effective: ${out.effective}.`,
       title: "The Directorate",
       variant: "success",
     });
 
     return true;
-  } catch (error) {
-    await ctx.dialog.alert({
-      description: messageOf(error),
-      title: "Directorate settings <rejected/not saved>",
-    });
-
-    return false;
   }
-};
+);
 
-const confirmDiscard = async (
+const confirmDiscard = Effect.fnUntraced(function* confirmDiscard(
   dialog: Dialogs,
   changed: boolean
-): Promise<boolean> => {
+) {
   if (!changed) {
     return true;
   }
 
-  const discard = await dialog.confirm({
+  const discard = yield* dialog.confirm({
     cancel: "Keep editing",
     confirm: "Discard",
     description: "Your Directorate settings changes have not been filed.",
@@ -655,46 +664,53 @@ const confirmDiscard = async (
   });
 
   return Boolean(discard);
-};
+});
 
-const runMenu = async (
+const runMenu = Effect.fnUntraced(function* runMenu(
   ctx: FlowContext,
-  draft: Settings,
-  at?: Item
-): Promise<void> => {
-  const changed = !sameSettings(draft, ctx.now[ctx.scope]);
+  saved: Settings
+) {
+  let draft = saved;
+  let at: Item | undefined;
 
-  const item = await ctx.dialog.select<Item>({
-    current: at,
-    options: menuOptions(ctx, draft, changed),
-    title: `The Directorate // ${ctx.scope === "global" ? "Global Charter" : "Local Jurisdiction"}${changed ? " (unsaved)" : ""}`,
-  });
+  while (true) {
+    const changed = !sameSettings(draft, saved);
 
-  if (item === undefined) {
-    if (await confirmDiscard(ctx.dialog, changed)) {
-      return;
+    const item = yield* ctx.dialog.select<Item>({
+      current: at,
+      options: menuOptions(ctx, draft, changed),
+      title: `The Directorate // ${ctx.scope === "global" ? "Global Charter" : "Local Jurisdiction"}${changed ? " (unsaved)" : ""}`,
+    });
+
+    if (item === undefined) {
+      if (yield* confirmDiscard(ctx.dialog, changed)) {
+        return;
+      }
+
+      continue;
     }
 
-    return runMenu(ctx, draft, at);
-  }
+    at = item;
 
-  if (item === "save") {
-    if (!changed || (await saveSettings(ctx, draft))) {
-      return;
+    if (item === "save") {
+      if (!changed || (yield* saveSettings(ctx, draft))) {
+        return;
+      }
+
+      continue;
     }
 
-    return runMenu(ctx, draft, item);
+    draft = normalizeSettings(yield* MENU_ACTIONS[item](ctx, draft));
   }
-
-  const next = normalizeSettings(await MENU_ACTIONS[item](ctx, draft));
-
-  return runMenu(ctx, next, item);
-};
+});
 
 /** /directorate-configure: pick a scope, change its settings, save. Escape goes back a step; nothing is written until Save. */
-export const configure = async (dialog: Dialogs, directorate: Backend) => {
-  const now = await directorate.settings();
-  const scope = await selectScope(dialog, now);
+export const configure = Effect.fn("Directorate.configure")(function* configure(
+  dialog: Dialogs,
+  directorate: Backend
+) {
+  const now = yield* directorate.settings;
+  const scope = yield* selectScope(dialog, now);
 
   if (!scope) {
     return;
@@ -702,5 +718,5 @@ export const configure = async (dialog: Dialogs, directorate: Backend) => {
 
   // What an unset key falls back to: the global file under a project's, then Directorate defaults.
   const base: Settings = scope === "project" ? now.global : {};
-  await runMenu({ base, dialog, directorate, now, scope }, now[scope]);
-};
+  yield* runMenu({ base, dialog, directorate, now, scope }, now[scope]);
+});

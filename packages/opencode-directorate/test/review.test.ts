@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
 import {
   ConfigProvider,
   DateTime,
@@ -57,7 +58,6 @@ import {
   unresolved,
   verdictError,
 } from "../src/ledger.ts";
-import { RepoPath, RepoScope } from "../src/model.ts";
 import type {
   Actor,
   Entry,
@@ -68,6 +68,7 @@ import type {
 } from "../src/model.ts";
 import { platformLayer } from "../src/platform.ts";
 import type { Platform } from "../src/platform.ts";
+import { RepoPath, RepoScope } from "../src/repo-path.ts";
 import { assess, finalize, renderReport } from "../src/report.ts";
 import {
   changedSinceSeal,
@@ -78,6 +79,7 @@ import {
 import { SettingsStore } from "../src/settings.ts";
 import { StateRoot, Store } from "../src/store.ts";
 import { currentFingerprint } from "../src/target.ts";
+import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {
   assert.ok(value !== undefined && value !== null, "expected a value");
@@ -96,6 +98,7 @@ const {
 } = fs;
 
 const { join } = nodePath;
+const windows = process.platform === "win32";
 const state = mkdtempSync(join(tmpdir(), "directorate-state-"));
 
 const platformWithEnv = (env: Record<string, string>) =>
@@ -108,6 +111,13 @@ const testPlatform = platformWithEnv({ DIRECTORATE_STATE_DIR: state });
 
 const run = <A, E>(effect: Effect.Effect<A, E, Platform>) =>
   Effect.runPromise(effect.pipe(Effect.provide(testPlatform)));
+
+const withGh = (script: string) => {
+  const layer = testPlatform.pipe(Layer.provide(commandFixture("gh", script)));
+
+  return <A, E>(effect: Effect.Effect<A, E, Platform>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer)));
+};
 
 // The seal store, as the tests reach it.
 const store = Effect.service(Store);
@@ -132,7 +142,7 @@ const settingsFile = (env: Record<string, string>) =>
     )
   );
 
-test("the global settings file follows OpenCode's config directory: DIRECTORATE_SETTINGS, OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, HOME", async () => {
+test("the global settings file follows OpenCode configuration and the native home directory", async () => {
   const all = {
     DIRECTORATE_SETTINGS: "/x/directorate.json",
     HOME: "/x/home",
@@ -143,15 +153,19 @@ test("the global settings file follows OpenCode's config directory: DIRECTORATE_
   assert.equal(await settingsFile(all), "/x/directorate.json");
   assert.equal(
     await settingsFile({ ...all, DIRECTORATE_SETTINGS: "" }),
-    "/x/oc/directorate.json"
+    join("/x/oc", "directorate.json")
   );
   assert.equal(
     await settingsFile({ HOME: "/x/home", XDG_CONFIG_HOME: "/x/xdg" }),
-    "/x/xdg/opencode/directorate.json"
+    join("/x/xdg", "opencode", "directorate.json")
   );
   assert.equal(
     await settingsFile({ HOME: "/x/home" }),
-    "/x/home/.config/opencode/directorate.json"
+    join("/x/home", ".config", "opencode", "directorate.json")
+  );
+  assert.equal(
+    await settingsFile({ USERPROFILE: "/x/windows" }),
+    join("/x/windows", ".config", "opencode", "directorate.json")
   );
 });
 
@@ -160,7 +174,7 @@ const stateRoot = (env: Record<string, string>) =>
     Effect.service(StateRoot).pipe(Effect.provide(platformWithEnv(env)))
   );
 
-test("the state root comes from Effect Config: DIRECTORATE_STATE_DIR, then XDG_STATE_HOME, then HOME", async () => {
+test("the state root comes from Effect Config: explicit directory, XDG state, or the native home directory", async () => {
   assert.equal(
     await stateRoot({
       DIRECTORATE_STATE_DIR: "/x/directorate",
@@ -171,11 +185,15 @@ test("the state root comes from Effect Config: DIRECTORATE_STATE_DIR, then XDG_S
   );
   assert.equal(
     await stateRoot({ HOME: "/x/home", XDG_STATE_HOME: "/x/xdg" }),
-    "/x/xdg/opencode-directorate"
+    join("/x/xdg", "opencode-directorate")
   );
   assert.equal(
     await stateRoot({ HOME: "/x/home" }),
-    "/x/home/.local/state/opencode-directorate"
+    join("/x/home", ".local", "state", "opencode-directorate")
+  );
+  assert.equal(
+    await stateRoot({ USERPROFILE: "/x/windows" }),
+    join("/x/windows", ".local", "state", "opencode-directorate")
   );
 });
 
@@ -197,7 +215,7 @@ test("the command adapter keeps argv and binary output intact, and caps each out
 
   assert.deepEqual(
     out,
-    Buffer.concat([Buffer.from([0, 255]), Buffer.from(argv)])
+    Uint8Array.from([0, 255, ...new TextEncoder().encode(argv)])
   );
 
   const exceedsCap = (stream: "stdout" | "stderr") =>
@@ -281,6 +299,7 @@ const repo = (
   const dir = mkdtempSync(join(tmpdir(), "directorate-repo-"));
   dirs.push(dir);
   g(dir, "init", "-q", "-b", "main");
+  g(dir, "config", "core.autocrlf", "false");
   g(dir, "config", "user.email", "t@e.com");
   g(dir, "config", "user.name", "t");
 
@@ -292,6 +311,30 @@ const repo = (
   g(dir, "commit", "-qm", "init");
 
   return dir;
+};
+
+const directoryLink = (target: string, link: string) =>
+  symlinkSync(target, link, windows ? "junction" : "dir");
+
+const stageLink = (dir: string, file: string, target: string) => {
+  if (windows) {
+    write(dir, file, target);
+    const oid = g(dir, "hash-object", "-w", "--", file).trim();
+    g(dir, "update-index", "--add", "--cacheinfo", `120000,${oid},${file}`);
+
+    return;
+  }
+
+  symlinkSync(target, join(dir, file));
+  g(dir, "add", "--", file);
+};
+
+const makeExecutable = (dir: string, file: string) => {
+  if (windows) {
+    g(dir, "update-index", "--chmod=+x", "--", file);
+  } else {
+    fs.chmodSync(join(dir, file), 0o755);
+  }
 };
 
 const scout = { agent: "directorate_auditor", session: "s-scout" };
@@ -779,36 +822,33 @@ test("diff parsing: names from raw records, hunks and offsets from the patch, mo
 });
 
 test("names git quotes in patch headers (quotes, tabs, non-ASCII) seal exactly; a quoted secret stays withheld", async () => {
+  const secret = windows ? "my dir/.env" : 'my"dir/.env';
+  const renamed = windows ? "ren amed.ts" : 'ren"amed.ts';
+  const tabbed = windows ? "tab here.ts" : "tab\there.ts";
+
   const dir = repo({
+    [secret]: "TOKEN=one\n",
     "café.ts": "b\n",
     "has space.ts": "a\n",
-    'my"dir/.env': "TOKEN=one\n",
     "plain.ts": "p\n",
     "t.ts": "t\n",
   });
 
   write(dir, "has space.ts", "a\nconst x = 1\n");
   write(dir, "café.ts", "b\nconst y = 2\n");
-  write(dir, "tab\there.ts", "const tab = 1\n");
-  g(dir, "mv", "plain.ts", 'ren"amed.ts');
+  write(dir, tabbed, "const tab = 1\n");
+  g(dir, "mv", "plain.ts", renamed);
   unlinkSync(join(dir, "t.ts"));
-  symlinkSync("plain.ts", join(dir, "t.ts"));
-  write(dir, 'my"dir/.env', "TOKEN=supersecret\n");
+  stageLink(dir, "t.ts", "plain.ts");
+  write(dir, secret, "TOKEN=supersecret\n");
   const seal = await local(dir);
   const byPath = new Map(seal.files.map((f) => [f.path, f]));
-  assert.deepEqual([...byPath.keys()].toSorted(), [
-    "café.ts",
-    "has space.ts",
-    'my"dir/.env',
-    'ren"amed.ts',
-    "t.ts",
-    "tab\there.ts",
-  ]);
   assert.deepEqual(
-    [
-      present(byPath.get('ren"amed.ts')).status,
-      present(byPath.get('ren"amed.ts')).oldPath,
-    ],
+    [...byPath.keys()].toSorted(),
+    ["café.ts", "has space.ts", secret, renamed, "t.ts", tabbed].toSorted()
+  );
+  assert.deepEqual(
+    [present(byPath.get(renamed)).status, present(byPath.get(renamed)).oldPath],
     ["renamed", "plain.ts"]
   );
   assert.equal(
@@ -816,15 +856,13 @@ test("names git quotes in patch headers (quotes, tabs, non-ASCII) seal exactly; 
     "modified",
     "a typechange is one file with both of git's sections"
   );
-  assert.match(present(byPath.get('my"dir/.env')).excluded ?? "", /secret/u);
+  assert.match(present(byPath.get(secret)).excluded ?? "", /secret/u);
   assert.ok(
     !readFileSync(await run(diffFile(seal)), "utf-8").includes("supersecret")
   );
   assert.ok(await run(checkQuote(seal, at("has space.ts", 2), "const x = 1")));
   assert.ok(await run(checkQuote(seal, at("café.ts", 2), "const y = 2")));
-  assert.ok(
-    await run(checkQuote(seal, at("tab\there.ts", 1), "const tab = 1"))
-  );
+  assert.ok(await run(checkQuote(seal, at(tabbed, 1), "const tab = 1")));
   const tc = seal.regions.filter((r) => r.file === "t.ts");
   assert.ok(tc.length >= 2, "both sections of the typechange are regions");
   const shown = await run(renderRegions(seal, tc));
@@ -852,10 +890,28 @@ test("tool paths decode to the repository's form: contained, normalized, the roo
     ["", "", "src"]
   );
   assert.ok(Option.isNone(decodeScope("../x")));
+
+  if (windows) {
+    for (const bad of [
+      "..\\outside",
+      "C:\\outside",
+      "\\\\server\\share",
+      "a.txt:stream",
+      ".git. /config",
+    ]) {
+      assert.ok(Option.isNone(decodePath(bad)), bad);
+    }
+
+    assert.equal(Option.getOrThrow(decodePath("src\\a.ts")), "src/a.ts");
+  }
 });
 
 // ---------- sealing ----------
 test("local seal: staged+unstaged+untracked, secrets withheld, symlinks as link text, snapshot survives later edits", async () => {
+  const outside = mkdtempSync(join(tmpdir(), "directorate-out-"));
+  dirs.push(outside);
+  const target = join(outside, "outside.txt");
+  writeFileSync(target, "OUTSIDE-CONTENT\n");
   const dir = repo();
   write(
     dir,
@@ -864,7 +920,7 @@ test("local seal: staged+unstaged+untracked, secrets withheld, symlinks as link 
   );
   write(dir, "src/new.ts", "export const x = 1\n");
   write(dir, ".env", "TOKEN=supersecret\n");
-  symlinkSync("/etc/hosts", join(dir, "src/link.ts"));
+  stageLink(dir, "src/link.ts", target);
   const seal = await local(dir);
   assert.deepEqual(seal.files.map((f) => f.path).toSorted(), [
     ".env",
@@ -874,8 +930,11 @@ test("local seal: staged+unstaged+untracked, secrets withheld, symlinks as link 
   ]);
   const diff = readFileSync(await run(diffFile(seal)), "utf-8");
   assert.ok(!diff.includes("supersecret"));
-  assert.match(diff, /symlink -> \/etc\/hosts/u);
-  assert.ok(!diff.includes("localhost"));
+  assert.match(
+    (await run(sealedFile(seal, "src/link.ts"))) ?? "",
+    /symlink -> .*outside\.txt/u
+  );
+  assert.ok(!diff.includes("OUTSIDE-CONTENT"));
   write(dir, "src/math.ts", "changed\n");
   assert.match((await run(sealedFile(seal, "src/math.ts"))) ?? "", /half/u);
   await assert.rejects(run(readLines(seal, ".env", "new")), /withheld/u);
@@ -1084,7 +1143,7 @@ test("path policy: symlinked parents withheld; secrets through symlinks, .git, a
   });
 
   rmSync(join(dir, "lib"), { recursive: true });
-  symlinkSync(outside, join(dir, "lib"));
+  directoryLink(outside, join(dir, "lib"));
   const seal = await local(dir);
 
   const blob =
@@ -1103,7 +1162,7 @@ test("path policy: symlinked parents withheld; secrets through symlinks, .git, a
 
   write(dir2, ".env", "API_KEY=leak\n");
   mkdirSync(join(dir2, "notes"));
-  symlinkSync("../.env", join(dir2, "notes/x.txt"));
+  directoryLink(join(dir2, "src"), join(dir2, "notes/link"));
   write(dir2, "node_modules/lib/index.js", "module.exports = 1\n");
   write(dir2, "wip.ts", "untracked\n");
 
@@ -1117,14 +1176,21 @@ test("path policy: symlinked parents withheld; secrets through symlinks, .git, a
   );
 
   await assert.rejects(
-    run(readable(c, "notes/x.txt")),
+    run(readable(c, "notes/link/x.ts")),
     /not found at the seal/u,
     "ignored non-dependency files are not readable"
   );
   mkdirSync(join(dir2, "node_modules/evil"), { recursive: true });
-  symlinkSync("../../.env", join(dir2, "node_modules/evil/x.js"));
+  const hiddenLink = "node_modules/evil/link";
+
+  if (windows) {
+    directoryLink(join(dir2, ".git"), join(dir2, hiddenLink));
+  } else {
+    symlinkSync("../../.env", join(dir2, hiddenLink));
+  }
+
   await assert.rejects(
-    run(readable(c, "node_modules/evil/x.js")),
+    run(readable(c, windows ? `${hiddenLink}/config` : hiddenLink)),
     /withheld/u,
     "a dependency symlink to a secret is withheld"
   );
@@ -1139,8 +1205,8 @@ test("path policy: symlinked parents withheld; secrets through symlinks, .git, a
     "module.exports = 2\n"
   );
   mkdirSync(join(dir2, "app/node_modules"), { recursive: true });
-  symlinkSync(
-    "../../node_modules/.bun/pkg@1.0.0+abc123/node_modules/pkg",
+  directoryLink(
+    join(dir2, "node_modules/.bun/pkg@1.0.0+abc123/node_modules/pkg"),
     join(dir2, "app/node_modules/pkg")
   );
   assert.deepEqual(await run(readable(c, "app/node_modules/pkg/index.js")), {
@@ -1247,51 +1313,48 @@ test("range and PR reviews in a shallow clone missing the merge base ask to deep
     shallow
   );
 
-  const bin = mkdtempSync(join(tmpdir(), "directorate-bin-"));
-  dirs.push(bin);
-  writeFileSync(
-    join(bin, "gh"),
-    `#!/bin/sh\necho '${JSON.stringify({ baseRefName: "main", baseRefOid: base, headRefName: "feat", headRefOid: head, number: 7, title: "t", url: "u" })}'\n`,
-    { mode: 0o755 }
-  );
+  const metadata = JSON.stringify({
+    baseRefName: "main",
+    baseRefOid: base,
+    headRefName: "feat",
+    headRefOid: head,
+    number: 7,
+    title: "t",
+    url: "u",
+  });
+
+  const runPr = withGh(`process.stdout.write(${JSON.stringify(metadata)});`);
 
   const seal = (target: Parameters<typeof createSeal>[0]["target"]) =>
-    run(createSeal({ mode: "default", owner: lead, repo: shallow, target }));
+    runPr(createSeal({ mode: "default", owner: lead, repo: shallow, target }));
 
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath}`;
+  await assert.rejects(
+    seal({ base: "origin/main", head: "origin/feat", kind: "range" }),
+    /merge base of origin\/main and origin\/feat: this shallow clone.*git fetch --deepen/u
+  );
+  await assert.rejects(
+    seal({ kind: "pr", pr: "7" }),
+    /merge base of main and feat: this shallow clone.*git fetch --unshallow/u
+  );
 
-  try {
-    await assert.rejects(
-      seal({ base: "origin/main", head: "origin/feat", kind: "range" }),
-      /merge base of origin\/main and origin\/feat: this shallow clone.*git fetch --deepen/u
-    );
-    await assert.rejects(
-      seal({ kind: "pr", pr: "7" }),
-      /merge base of main and feat: this shallow clone.*git fetch --unshallow/u
-    );
+  g(shallow, "fetch", "-q", "--deepen=1");
 
-    g(shallow, "fetch", "-q", "--deepen=1");
+  const range = await seal({
+    base: "origin/main",
+    head: "origin/feat",
+    kind: "range",
+  });
 
-    const range = await seal({
-      base: "origin/main",
-      head: "origin/feat",
-      kind: "range",
-    });
-
-    assert.deepEqual(
-      range.files.map((f) => f.path),
-      ["src/math.ts"],
-      "only the branch's change, not main's later commit"
-    );
-    const pr = await seal({ kind: "pr", pr: "7" });
-    assert.deepEqual(
-      pr.files.map((f) => f.path),
-      ["src/math.ts"]
-    );
-  } finally {
-    process.env.PATH = oldPath;
-  }
+  assert.deepEqual(
+    range.files.map((f) => f.path),
+    ["src/math.ts"],
+    "only the branch's change, not main's later commit"
+  );
+  const pr = await seal({ kind: "pr", pr: "7" });
+  assert.deepEqual(
+    pr.files.map((f) => f.path),
+    ["src/math.ts"]
+  );
 });
 
 test("reading a sealed blob fails when git fails, instead of reading as a missing file", async () => {
@@ -1340,12 +1403,14 @@ test("reading a sealed blob fails when git fails, instead of reading as a missin
 
 test("grep withholds secrets by their full name, even one containing a colon", async () => {
   const dir = repo();
-  write(dir, "conf:prod/.env", "TOKEN=supersecret\n");
-  write(dir, "a:b.ts", "const TOKEN = 1\n");
+  const prefix = windows ? "conf.prod" : "conf:prod";
+  const source = windows ? "a.b.ts" : "a:b.ts";
+  write(dir, `${prefix}/.env`, "TOKEN=supersecret\n");
+  write(dir, source, "const TOKEN = 1\n");
   const seal = await local(dir);
   const out = await run(grepSealed(seal, "TOKEN"));
   assert.ok(!out.includes("supersecret"), out);
-  assert.match(out, /^a:b\.ts:1:const TOKEN = 1$/mu);
+  assert.ok(out.split("\n").includes(`${source}:1:const TOKEN = 1`));
 });
 
 test("store: legacy seals migrate on load; malformed seals and ledgers are damaged, not defaults", async () => {
@@ -1414,72 +1479,65 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
   );
 });
 
-const root = process.getuid?.() === 0;
+test("worktree read errors fail the capture; withheld files are never read and secrets stay secrets", async () => {
+  const dir = repo();
+  write(dir, "src/locked.ts", "export const x = 1\n");
+  writeFileSync(join(dir, ".env"), Buffer.from([0, 1, 2, 0]));
 
-test(
-  "worktree read errors fail the capture; withheld files are never read and secrets stay secrets",
-  { skip: root && "root reads anything" },
-  async () => {
-    const dir = repo();
-    write(dir, "src/locked.ts", "export const x = 1\n");
-    fs.chmodSync(join(dir, "src/locked.ts"), 0o000);
+  const attempted: string[] = [];
 
-    try {
-      await assert.rejects(
-        run(
-          createSeal({
-            mode: "default",
-            owner: lead,
-            repo: dir,
-            target: { kind: "local" },
-          })
-        ),
-        /Cannot read src\/locked\.ts/u,
-        "not sealed as a deletion"
-      );
-    } finally {
-      fs.chmodSync(join(dir, "src/locked.ts"), 0o644);
-    }
+  const failReads = Layer.effect(
+    FileSystem.FileSystem,
+    FileSystem.FileSystem.pipe(
+      Effect.map((native) =>
+        FileSystem.FileSystem.of({
+          ...native,
+          readFile: (file) => {
+            const name = nodePath.basename(file);
 
-    // An unreadable binary .env: paths and local seals list it as a withheld secret without reading it.
-    writeFileSync(join(dir, ".env"), Buffer.from([0, 1, 2, 0]));
-    fs.chmodSync(join(dir, ".env"), 0o000);
+            if (name === "locked.ts" || name === ".env") {
+              attempted.push(name);
 
-    try {
-      const p = await run(
-        createSeal({
-          mode: "full",
-          owner: lead,
-          repo: dir,
-          target: { kind: "paths" },
+              return native.readFile(dir);
+            }
+
+            return native.readFile(file);
+          },
         })
-      );
+      )
+    )
+  ).pipe(Layer.provide(NodeFileSystem.layer));
 
-      assert.match(
-        present(p.files.find((f) => f.path === ".env")).excluded ?? "",
-        /secret/u
-      );
-      const mdResult = await run(finalize(p, { entries: [], notes: [] }, {}));
-      assert.match(mdResult.md, /1 changed secret-like file was withheld/u);
+  const layer = testPlatform.pipe(Layer.provide(failReads));
 
-      const l = await run(
-        createSeal({
-          mode: "default",
-          owner: lead,
-          repo: dir,
-          target: { kind: "local", paths: [".env"] },
-        })
-      );
+  const capture = (target: Parameters<typeof createSeal>[0]["target"]) =>
+    Effect.runPromise(
+      createSeal({ mode: "full", owner: lead, repo: dir, target }).pipe(
+        Effect.provide(layer)
+      )
+    );
 
-      assert.match(
-        present(l.files.find((f) => f.path === ".env")).excluded ?? "",
-        /secret/u
-      );
-    } finally {
-      fs.chmodSync(join(dir, ".env"), 0o644);
-    }
-  }
-);
+  await assert.rejects(
+    capture({ kind: "local" }),
+    /Cannot read src\/locked\.ts/u
+  );
+  rmSync(join(dir, "src/locked.ts"));
+
+  const paths = await capture({ kind: "paths" });
+  assert.match(
+    present(paths.files.find((f) => f.path === ".env")).excluded ?? "",
+    /secret/u
+  );
+  const report = await run(finalize(paths, { entries: [], notes: [] }, {}));
+  assert.match(report.md, /1 changed secret-like file was withheld/u);
+
+  const localSeal = await capture({ kind: "local", paths: [".env"] });
+  assert.match(
+    present(localSeal.files.find((f) => f.path === ".env")).excluded ?? "",
+    /secret/u
+  );
+  assert.deepEqual(attempted, ["locked.ts"]);
+});
 
 test(
   "a 200,000-line addition seals: regions number new lines in one pass",
@@ -1559,7 +1617,7 @@ test("mode changes count as drift; binary files compare by bytes", async () => {
   );
   const fingerprintResult3 = await run(currentFingerprint(seal));
   assert.equal(fingerprintResult3.fingerprint, seal.fingerprint);
-  fs.chmodSync(join(dir, "run.sh"), 0o755);
+  makeExecutable(dir, "run.sh");
   const fingerprintResult4 = await run(currentFingerprint(seal));
   assert.notEqual(fingerprintResult4.fingerprint, seal.fingerprint);
 });
@@ -1927,8 +1985,8 @@ test("listings: worktree seals list what was sealed; dependency directories list
     "KEY=1\n"
   );
   mkdirSync(join(dir, "app/node_modules"), { recursive: true });
-  symlinkSync(
-    "../../node_modules/.bun/pkg@1.0.0+abc123/node_modules/pkg",
+  directoryLink(
+    join(dir, "node_modules/.bun/pkg@1.0.0+abc123/node_modules/pkg"),
     join(dir, "app/node_modules/pkg")
   );
   const links = await run(listFiles(seal, "app/node_modules"));
@@ -1947,7 +2005,7 @@ test("listings: worktree seals list what was sealed; dependency directories list
   );
   assert.match(pkg, /^\.env {2}\(withheld\)$/mu);
   assert.match(pkg, /^index\.js$/mu);
-  symlinkSync(nodePath.dirname(dir), join(dir, "node_modules/up"));
+  directoryLink(nodePath.dirname(dir), join(dir, "node_modules/up"));
   assert.match(
     await run(listFiles(seal, "node_modules")),
     /^up\/ -> \(outside the repository\)$/mu,
@@ -2768,7 +2826,7 @@ test("mode-only change after the seal: refresh captures it as a metadata region"
   const dir = repo({ "run.sh": "echo hi\n" });
   write(dir, "run.sh", "echo hello\n");
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
-  fs.chmodSync(join(dir, "run.sh"), 0o755);
+  makeExecutable(dir, "run.sh");
   const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
   assert.deepEqual(r.files, ["run.sh"]);
   assert.ok(r.newRegions.length >= 1, "the changed region is unread");
@@ -2782,14 +2840,19 @@ test("mode-only change after the seal: refresh captures it as a metadata region"
 
 test("typechange refresh: an exec-bit change unreads only the section whose header changed", async () => {
   const dir = repo({ "plain.ts": "p\n" });
-  symlinkSync("plain.ts", join(dir, "link"));
-  g(dir, "add", "link");
+  stageLink(dir, "link", "plain.ts");
   g(dir, "commit", "-qm", "link");
   unlinkSync(join(dir, "link"));
   write(dir, "link", "echo hi\n");
+
+  if (windows) {
+    g(dir, "rm", "--cached", "--", "link");
+    g(dir, "add", "--", "link");
+  }
+
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   assert.equal(seal.regions.filter((x) => x.file === "link").length, 2);
-  fs.chmodSync(join(dir, "link"), 0o755);
+  makeExecutable(dir, "link");
   const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
   assert.equal(
     r.newRegions.length,
@@ -3159,10 +3222,11 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
   g(dir, "commit", "-qam", "pr");
   const head = g(dir, "rev-parse", "HEAD").trim();
   const base = g(dir, "rev-parse", "main").trim();
-  const bin = mkdtempSync(join(tmpdir(), "directorate-bin-"));
-  dirs.push(bin);
-  const json = join(bin, "pr.json");
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\ncat "${json}"\n`, { mode: 0o755 });
+  const json = join(dir, ".git", "pr.json");
+
+  const runPr = withGh(
+    `process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(json)}));`
+  );
 
   const meta = (h: string, b: string) =>
     writeFileSync(
@@ -3178,56 +3242,49 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
       })
     );
 
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath}`;
-
-  try {
-    writeFileSync(json, "{}");
-    await assert.rejects(
-      run(
-        createSeal({
-          mode: "default",
-          owner: lead,
-          repo: dir,
-          target: { kind: "pr", pr: "7" },
-        })
-      ),
-      /Invalid GitHub CLI response/u
-    );
-    meta(head, base);
-
-    const seal = await run(
+  writeFileSync(json, "{}");
+  await assert.rejects(
+    runPr(
       createSeal({
         mode: "default",
         owner: lead,
         repo: dir,
         target: { kind: "pr", pr: "7" },
       })
-    );
+    ),
+    /Invalid GitHub CLI response/u
+  );
+  meta(head, base);
 
-    const fingerprintResult11 = await run(currentFingerprint(seal));
-    assert.equal(fingerprintResult11.fingerprint, seal.fingerprint);
-    meta(head, "1".repeat(40));
-    await assert.rejects(
-      run(currentFingerprint(seal)),
-      /base moved .* not fetched/u
-    );
-    meta("2".repeat(40), base);
-    const cur = await run(currentFingerprint(seal));
-    assert.match(cur.unfetched ?? "", /PR head moved/u);
+  const seal = await runPr(
+    createSeal({
+      mode: "default",
+      owner: lead,
+      repo: dir,
+      target: { kind: "pr", pr: "7" },
+    })
+  );
 
-    const { md } = await run(
-      finalize(
-        await run(loadSeal(seal.id)),
-        { entries: [], notes: [] },
-        { cur: Result.succeed(cur) }
-      )
-    );
+  const fingerprintResult11 = await runPr(currentFingerprint(seal));
+  assert.equal(fingerprintResult11.fingerprint, seal.fingerprint);
+  meta(head, "1".repeat(40));
+  await assert.rejects(
+    runPr(currentFingerprint(seal)),
+    /base moved .* not fetched/u
+  );
+  meta("2".repeat(40), base);
+  const cur = await runPr(currentFingerprint(seal));
+  assert.match(cur.unfetched ?? "", /PR head moved/u);
 
-    assert.match(md, /status: \*\*stale\*\*/u);
-  } finally {
-    process.env.PATH = oldPath;
-  }
+  const { md } = await runPr(
+    finalize(
+      await runPr(loadSeal(seal.id)),
+      { entries: [], notes: [] },
+      { cur: Result.succeed(cur) }
+    )
+  );
+
+  assert.match(md, /status: \*\*stale\*\*/u);
 });
 
 test("budget lines are written for each role", () => {

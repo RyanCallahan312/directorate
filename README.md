@@ -4,11 +4,11 @@ The Directorate is an evidence-gated code review plugin for OpenCode. See the [`
 
 ## Workspace development
 
-Run `mise install` to install the pinned Bun and Node.js versions.
+Install Git and run `mise install` to install the pinned Bun and Node.js versions. The same commands run on macOS, Linux, and Windows.
 
 ```sh
 bun install --frozen-lockfile
-bun run check       # lint, typecheck, and test the workspaces
+bun run check       # lint, format check, build, typecheck, and test the workspaces
 bun run build       # build the workspaces
 bun run dev         # start workspace development processes
 bun run format      # apply formatting and safe lint fixes

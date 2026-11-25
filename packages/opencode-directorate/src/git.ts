@@ -6,6 +6,7 @@ import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 
 import { command } from "./command.ts";
 import { failure, ReviewError } from "./error.ts";
+import { decodeUtf8 } from "./utf8.ts";
 
 const GIT_ENV = (extra: Record<string, string> = {}) => ({
   GIT_CONFIG_PARAMETERS: "",
@@ -73,7 +74,7 @@ const make = Effect.gen(function* make() {
       )
     );
 
-    return output.toString("utf-8");
+    return decodeUtf8(output);
   });
 
   /** A file's bytes at a revision, or undefined when the revision has no such file (git exits 128). Anything else fails. */
@@ -114,6 +115,13 @@ const make = Effect.gen(function* make() {
       Effect.orElseSucceed(() => false)
     );
 
+  const indexMode = (repo: string, path: string) =>
+    run(repo, ["ls-files", "--stage", "-z", "--", path]).pipe(
+      Effect.map(
+        (out) => /^(?<mode>\d+) [0-9a-f]+ 0\t/u.exec(out)?.groups?.mode
+      )
+    );
+
   const root = (dir: string) =>
     run(dir, ["rev-parse", "--show-toplevel"]).pipe(
       Effect.map((out) => out.trim())
@@ -124,8 +132,27 @@ const make = Effect.gen(function* make() {
    * base of a root commit, and stands in for HEAD before the first commit.
    */
   const emptyTree = (repo: string) =>
-    run(repo, ["hash-object", "-t", "tree", "/dev/null"]).pipe(
+    run(repo, ["hash-object", "-t", "tree", "--stdin"]).pipe(
       Effect.map((out) => out.trim())
+    );
+
+  const worktrees = (repo: string) =>
+    run(repo, ["worktree", "list", "--porcelain", "-z"], [0], {
+      LC_ALL: "C",
+    }).pipe(
+      Effect.map((out) => out.split("\0")),
+      Effect.catchIf(
+        (error) => error.message.includes("unknown switch `z'"),
+        () =>
+          run(repo, ["worktree", "list", "--porcelain"]).pipe(
+            Effect.map((out) => out.split(/\r?\n/u))
+          )
+      ),
+      Effect.map((fields) =>
+        fields
+          .filter((field) => field.startsWith("worktree "))
+          .map((field) => field.slice("worktree ".length))
+      )
     );
 
   /** The commit `rev` names, or else the empty tree. */
@@ -388,7 +415,7 @@ const make = Effect.gen(function* make() {
 
   const gh = (repo: string, args: string[]) =>
     exec("gh", args, { cwd: repo, timeout: 30_000 }).pipe(
-      Effect.map((output) => output.toString("utf-8")),
+      Effect.map(decodeUtf8),
       Effect.mapError(
         (cause) =>
           new ReviewError({
@@ -433,6 +460,7 @@ const make = Effect.gen(function* make() {
     hasCommit,
     /** HEAD, or the empty tree in a repository with no commits yet. */
     head: (repo: string) => commitOrEmpty(repo, "HEAD"),
+    indexMode,
     isIgnored,
     mergeBase,
     parentOf,
@@ -441,6 +469,7 @@ const make = Effect.gen(function* make() {
     root,
     run,
     untracked,
+    worktrees,
   };
 });
 

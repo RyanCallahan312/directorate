@@ -114,6 +114,7 @@ const make = Effect.gen(function* make() {
         ),
         Config.orElse(() =>
           Config.NonEmptyString("HOME").pipe(
+            Config.orElse(() => Config.NonEmptyString("USERPROFILE")),
             Config.map((home) => inDir(path.join(home, ".config", "opencode")))
           )
         )
@@ -133,7 +134,7 @@ const make = Effect.gen(function* make() {
       return (
         globalFile ??
         (yield* failure(
-          "No global settings file: none of DIRECTORATE_SETTINGS, OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, or HOME is set."
+          "No global settings file: none of DIRECTORATE_SETTINGS, OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, HOME, or USERPROFILE is set."
         ))
       );
     }

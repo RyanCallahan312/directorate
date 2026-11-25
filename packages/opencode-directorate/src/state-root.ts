@@ -17,6 +17,7 @@ export class StateRoot extends Context.Service<StateRoot, string>()(
         ),
         Config.orElse(() =>
           Config.NonEmptyString("HOME").pipe(
+            Config.orElse(() => Config.NonEmptyString("USERPROFILE")),
             Config.map((home) =>
               path.join(home, ".local", "state", "opencode-directorate")
             )

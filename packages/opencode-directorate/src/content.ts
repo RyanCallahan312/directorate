@@ -4,9 +4,11 @@ import { Effect, FileSystem, Option, Path, Schema } from "effect";
 import { failure, ReviewError } from "./error.ts";
 import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
-import { isUrl, LineRef } from "./model.ts";
+import { isUrl } from "./model.ts";
 import type { Anchor, Entry, Seal, Side } from "./model.ts";
+import { LineRef } from "./repo-path.ts";
 import { Store } from "./store.ts";
+import { decodeUtf8 } from "./utf8.ts";
 
 const IO_CONCURRENCY = 16;
 
@@ -61,7 +63,7 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
 
 export const sealedFile = (seal: Seal, path: string, side: Side = "new") =>
   sealedBytes(seal, path, side).pipe(
-    Effect.map((bytes) => bytes?.toString("utf-8"))
+    Effect.map((bytes) => bytes && decodeUtf8(bytes))
   );
 
 /** Whether a repository path lies in a dependency directory (node_modules, vendor, venv, …); a directory counts too. */

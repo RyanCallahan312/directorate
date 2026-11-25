@@ -1,10 +1,12 @@
-import { Data, Effect, Stream } from "effect";
+import { Bytes, Data, Effect, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+import { decodeUtf8 } from "./utf8.ts";
 
 class CommandError extends Data.TaggedError("DirectorateCommandError")<{
   message: string;
   code?: number | "NotFound";
-  stdout?: Buffer;
+  stdout?: Uint8Array;
 }> {}
 
 // The process runner for git and gh, shaped like OpenCode's own AppProcess.run (packages/util/src/process.ts), which
@@ -68,7 +70,7 @@ export const command = Effect.fn("Directorate.command")(
       { concurrency: 3 }
     );
 
-    const output = Buffer.concat(stdout.chunks, stdout.bytes);
+    const output = Bytes.concat(stdout.chunks);
 
     if (code === 0) {
       return output;
@@ -77,7 +79,7 @@ export const command = Effect.fn("Directorate.command")(
     return yield* new CommandError({
       code,
       message:
-        Buffer.concat(stderr.chunks, stderr.bytes).toString("utf-8").trim() ||
+        decodeUtf8(Bytes.concat(stderr.chunks)).trim() ||
         `exited with code ${code}`,
       stdout: output,
     });

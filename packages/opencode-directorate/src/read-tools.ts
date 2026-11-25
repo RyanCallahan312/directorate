@@ -15,7 +15,8 @@ import {
   nextRegions,
 } from "./coverage.ts";
 import { failure } from "./error.ts";
-import { DispositionSchema, RepoPath, RepoScope, SideSchema } from "./model.ts";
+import { DispositionSchema, SideSchema } from "./model.ts";
+import { RepoPath, RepoScope } from "./repo-path.ts";
 import { Sessions } from "./session.ts";
 import { Store } from "./store.ts";
 import {

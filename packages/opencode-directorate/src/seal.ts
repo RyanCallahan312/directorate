@@ -1,5 +1,6 @@
 // Directorate sealing: capture a target's diff, snapshot, and regions into a containment seal, and re-capture it once when the code moves.
 import {
+  Bytes,
   Crypto,
   Data,
   DateTime,
@@ -38,6 +39,7 @@ import type {
 import { emptyLedger, Store } from "./store.ts";
 import { currentFingerprint, endsFingerprint, resolveEnds } from "./target.ts";
 import type { Current } from "./target.ts";
+import { decodeUtf8 } from "./utf8.ts";
 import { Worktree } from "./worktree.ts";
 
 const FILE_REGION_LINES = 300;
@@ -73,7 +75,7 @@ const settled =
       Effect.catchTag("DirectorateCaptureDrift", () => failure(message))
     );
 
-const binary = (buf: Buffer) => buf.subarray(0, 8000).includes(0);
+const binary = (buf: Uint8Array) => buf.subarray(0, 8000).includes(0);
 
 interface Captured {
   text: string;
@@ -125,7 +127,7 @@ const diffModeLines = (
 
 /** A path's bytes and git mode on one side of a change. */
 interface Version {
-  readonly buf: Buffer;
+  readonly buf: Uint8Array;
   readonly mode: string;
 }
 
@@ -134,7 +136,8 @@ const sameVersion = (old: Version | undefined, now: Version | undefined) =>
   old === undefined || now === undefined
     ? old === now
     : old.mode === now.mode &&
-      old.buf.equals(
+      Bytes.Equivalence(
+        old.buf,
         old.mode === "120000"
           ? now.buf.subarray("symlink -> ".length, -1)
           : now.buf
@@ -260,7 +263,7 @@ const versionPatch = Effect.fn("Directorate.versionPatch")(
 
 /** A captured worktree entry as a version, or undefined when absent. */
 const liveVersion = (e: {
-  readonly buf?: Buffer;
+  readonly buf?: Uint8Array;
   readonly mode: Parameters<typeof gitFileMode>[0];
 }) =>
   e.buf === undefined
@@ -419,7 +422,7 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
           };
         }
 
-        const text = buf.toString("utf-8");
+        const text = decodeUtf8(buf);
         const lines = text.split("\n");
         const n = text.replace(/\n$/u, "").split("\n").length;
         const regions: Omit<Region, "id">[] = [];
@@ -464,7 +467,8 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
 const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   seal: Seal,
   scope: readonly string[] | undefined,
-  unwatched: readonly string[]
+  unwatched: readonly string[],
+  sigs: Readonly<Record<string, string>> | undefined
 ) {
   const git = yield* Git;
   const worktree = seal.postImage === "worktree";
@@ -502,13 +506,19 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
     { concurrency: IO_CONCURRENCY }
   );
 
-  // git diffs an unwatched file as its index entry, so its piece, and the deletion of a rename's source, come from the bytes.
-  const unwatchedNames = new Set(unwatched);
-  const misread = tracked.filter((p) => unwatchedNames.has(p.path));
+  // Rediff paths Git reads differently from the snapshot, including files below a directory junction.
+  const rediffNames = new Set([
+    ...unwatched,
+    ...tracked
+      .filter((p) => p.code !== "D" && sigs?.[p.path] === "deleted")
+      .map((p) => p.path),
+  ]);
+
+  const misread = tracked.filter((p) => rediffNames.has(p.path));
 
   const rediffed = yield* Effect.forEach(
     [
-      ...unwatched.map((path) => ({ path, removed: false })),
+      ...Array.from(rediffNames, (path) => ({ path, removed: false })),
       ...misread.flatMap((p) =>
         p.code === "R" && p.oldPath !== undefined
           ? [{ path: p.oldPath, removed: true }]
@@ -522,7 +532,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
 
   const { text, files } = assemble([
     ...tracked.filter(
-      (p) => replacements.get(p.path) !== p && !unwatchedNames.has(p.path)
+      (p) => replacements.get(p.path) !== p && !rediffNames.has(p.path)
     ),
     ...extra.filter(Predicate.isNotUndefined),
     ...rediffed.filter(Predicate.isNotUndefined),
@@ -596,10 +606,12 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
     yield* beforeCapture();
   }
 
+  const sigs = worktree ? Object.fromEntries(signed) : undefined;
+
   const { text, files, regions }: Captured =
     seal.target.kind === "paths"
       ? yield* capturePaths(top, scope, new Set(changed))
-      : yield* captureDiff(seal, scope, hidden);
+      : yield* captureDiff(seal, scope, hidden, sigs);
 
   // A file renamed from a withheld path is withheld too: its content came from there.
   yield* Effect.forEach(
@@ -608,7 +620,6 @@ const capture = Effect.fn("Directorate.capture")(function* capture(
     { discard: true }
   );
   yield* store.writeDiff(seal, text);
-  const sigs = worktree ? Object.fromEntries(signed) : undefined;
 
   const deleted = [
     ...new Set([

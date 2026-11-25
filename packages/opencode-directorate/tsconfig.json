@@ -15,7 +15,10 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "allowedExperimentalApis": ["effect/encoding/Zip"],
         "allowedUnstableApis": [
+          "effect/ByteSize#toNumber",
+          "effect/Bytes",
           "effect/FileSystem",
           "effect/Path",
           "effect/Crypto",

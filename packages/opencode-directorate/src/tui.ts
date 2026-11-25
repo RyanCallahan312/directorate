@@ -2,7 +2,7 @@
 // walk (configure-flow.ts) on the TUI's dialogs and the settings RPC (rpc.ts) at the TUI's location.
 import type { Plugin } from "@opencode/plugin/tui";
 
-import { configure, messageOf } from "./configure-flow.ts";
+import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
 import type { Dialogs } from "./configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
@@ -11,26 +11,32 @@ export const tuiDialogs = (context: Plugin.Context): Dialogs => {
   const { dialog, toast, format } = context.ui;
 
   return {
-    alert: (o) => dialog.alert({ message: o.description, title: o.title }),
+    alert: (o) =>
+      fromHost(() => dialog.alert({ message: o.description, title: o.title })),
     confirm: (o) =>
-      dialog.confirm({
-        label: { cancel: o.cancel, confirm: o.confirm },
-        message: o.description,
-        title: o.title,
-      }),
+      fromHost(() =>
+        dialog.confirm({
+          label: { cancel: o.cancel, confirm: o.confirm },
+          message: o.description,
+          title: o.title,
+        })
+      ),
     path: (p) => format.path(p),
-    prompt: (o) => dialog.prompt(o),
+    prompt: (o) => fromHost(() => dialog.prompt(o)),
     select: (o) =>
-      dialog.select({
-        ...o,
-        options: o.options.map(({ group, ...rest }) =>
-          group === undefined ? rest : { ...rest, category: group }
-        ),
+      fromHost(() =>
+        dialog.select({
+          ...o,
+          options: o.options.map(({ group, ...rest }) =>
+            group === undefined ? rest : { ...rest, category: group }
+          ),
+        })
+      ),
+    toast: ({ description, title, variant }) =>
+      showToast(() => {
+        const options = { message: description, variant };
+        toast.show(title === undefined ? options : { ...options, title });
       }),
-    toast: ({ description, title, variant }) => {
-      const options = { message: description, variant };
-      toast.show(title === undefined ? options : { ...options, title });
-    },
   };
 };
 
@@ -48,23 +54,19 @@ const plugin: Plugin.Definition = {
           group: "The Directorate",
           id: "directorate.configure",
           palette: true,
-          run: async () => {
+          run: () => {
             const location =
               context.location ?? context.data.location.default();
 
             const directorate = context.client.rpc(DirectorateRpc);
 
-            try {
-              await configure(tuiDialogs(context), {
-                settings: () => directorate.settings(undefined, { location }),
-                write: (input) => directorate.write(input, { location }),
-              });
-            } catch (error) {
-              await context.ui.dialog.alert({
-                message: messageOf(error),
-                title: "The Directorate // Settings",
-              });
-            }
+            return configureFromHost(tuiDialogs(context), {
+              settings: fromHost(() =>
+                directorate.settings(undefined, { location })
+              ),
+              write: (input) =>
+                fromHost(() => directorate.write(input, { location })),
+            });
           },
           slash: { name: "directorate-configure" },
           title: "Configure The Directorate",

@@ -16,6 +16,7 @@ import { inScope, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import type { Region, Seal, Side } from "./model.ts";
 import { Store } from "./store.ts";
+import { encodeUtf8 } from "./utf8.ts";
 
 /**
  * OpenCode cuts any tool result over 2,000 lines or 50 KiB and shows the model only a preview, so The Directorate pages its own
@@ -26,7 +27,7 @@ export const OUTPUT_MAX_LINES = 1500;
 const LINE_MAX_CHARS = 1000;
 const READ_MAX_LINES = 400;
 
-const lineSize = (line: string) => Buffer.byteLength(line) + 1;
+const lineSize = (line: string) => encodeUtf8(line).byteLength + 1;
 
 /** One page of tool output, filled line by line within OUTPUT_MAX_BYTES and OUTPUT_MAX_LINES. */
 const outputPage = () => {

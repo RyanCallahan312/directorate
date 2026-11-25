@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -26,13 +27,15 @@ import {
   Deferred,
   Effect,
   Exit,
+  Layer,
   Queue,
   Schema,
   Scope,
   Stream,
 } from "effect";
 import type { Types } from "effect";
-import { Yaml } from "effect/encoding";
+import { Yaml, Zip } from "effect/encoding";
+import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
@@ -43,6 +46,7 @@ import {
   SealJson,
 } from "../src/model.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
+import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {
   assert.ok(value !== undefined && value !== null, "expected a value");
@@ -110,13 +114,17 @@ after(() => {
 });
 
 const repo = (): string => {
-  const dir = mkdtempSync(path.join(tmpdir(), "directorate-repo-"));
+  const dir = realpathSync(
+    mkdtempSync(path.join(tmpdir(), "directorate-repo-"))
+  );
+
   dirs.push(dir);
 
   const g = (...a: string[]) =>
     execFileSync("git", ["-C", dir, ...a], { stdio: "pipe" });
 
   g("init", "-q", "-b", "main");
+  g("config", "core.autocrlf", "false");
   g("config", "user.email", "t@e.com");
   g("config", "user.name", "t");
   mkdirSync(path.join(dir, "src"));
@@ -329,7 +337,10 @@ const harness = async (
   run = Effect.runPromise,
   deny: (request: { action: string; resources: string[] }) => boolean = () =>
     false,
-  existing?: { agent: Types.DeepMutable<Agent.Info>; skill: Skill.Info }
+  existing?: { agent: Types.DeepMutable<Agent.Info>; skill: Skill.Info },
+  commandsLayer:
+    | Layer.Layer<ChildProcessSpawner>
+    | Layer.Layer<never> = Layer.empty
 ) => {
   const tag = ids ?? `h${(uid += 1)}`;
   const S = (name: string) => `ses_${name}-${tag}`;
@@ -562,7 +573,7 @@ const harness = async (
       .effect(hostContext)
       .pipe(
         Effect.provideService(Scope.Scope, scope),
-        Effect.provide(stateConfig)
+        Effect.provide(Layer.merge(stateConfig, commandsLayer))
       )
   );
 
@@ -997,9 +1008,48 @@ test("bundled registration preserves existing agent and skill overrides", async 
   ]);
 });
 
-test("directorate_export archives every generation and available session trace for one seal", async (t) => {
+const openCodeFixture = commandFixture(
+  "opencode",
+  `
+const [command, action, value] = process.argv.slice(1);
+if (/^ses_missing-/u.test(value) || value.includes("/ses_missing-")) {
+  process.exit(1);
+}
+if (command === "session" && action === "export" && value.startsWith("ses")) {
+  process.stdout.write(JSON.stringify({
+    info: { id: value },
+    messages: [{ text: "private transcript" }],
+  }) + "\\n");
+} else if (command === "api" && action === "get" &&
+  /^\\/api\\/experimental\\/session\\/ses[\\w-]+\\/log\\?follow=false$/u.test(value)) {
+  process.stdout.write('data: {"type":"session.created"}\\n\\n');
+} else {
+  process.exit(2);
+}
+`
+);
+
+const exportHarness = (dir: string) =>
+  harness(dir, undefined, undefined, undefined, undefined, openCodeFixture);
+
+const readArchive = (archive: string) =>
+  Effect.runPromise(
+    Stream.make(readFileSync(archive)).pipe(
+      Stream.pipeThroughChannel(Zip.decode()),
+      Stream.filter((entry) => entry.header.type === "File"),
+      Stream.mapEffect((entry) =>
+        Stream.mkString(Stream.decodeText(entry.body)).pipe(
+          Effect.map((content) => [entry.header.path, content] as const)
+        )
+      ),
+      Stream.runCollect,
+      Effect.map((files) => new Map(files))
+    )
+  );
+
+test("directorate_export archives every generation and available session trace for one seal", async () => {
   const dir = repo();
-  const { call, prompts, requests, S } = await harness(dir);
+  const { call, prompts, requests, S } = await exportHarness(dir);
 
   const { content } = await call("directorate_seal", {
     target: { kind: "local" },
@@ -1053,30 +1103,6 @@ test("directorate_export archives every generation and available session trace f
     "not a review artifact"
   );
 
-  const bin = path.join(dir, "bin");
-  mkdirSync(bin);
-  writeFileSync(
-    path.join(bin, "opencode"),
-    `#!/bin/sh
-case "$1:$2:$3" in
-  *${absent}*) exit 1 ;;
-  session:export:ses*) printf '{"info":{"id":"%s"},"messages":[{"text":"private transcript"}]}\\n' "$3" ;;
-  api:get:/api/experimental/session/*/log\\?follow=false) printf 'data: {"type":"session.created"}\\n\\n' ;;
-  *) exit 2 ;;
-esac
-`,
-    { mode: 0o700 }
-  );
-  const originalPath = process.env.PATH;
-  process.env.PATH = [bin, originalPath].join(path.delimiter);
-  t.after(() => {
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
-  });
-
   const invoke = (seal: string) =>
     call("directorate_export", { seal }, "build", "requester");
 
@@ -1092,10 +1118,13 @@ esac
   assert.equal(archives.length, 1, "staging directory is cleaned up");
   const archive = path.join(output, present(archives[0]));
 
-  const unzip = (name: string) =>
-    execFileSync("unzip", ["-p", archive, name], { encoding: "utf-8" });
+  const files = await readArchive(archive);
+  const unzip = (name: string) => present(files.get(name));
 
-  assert.equal(statSync(archive).mode % 0o1000, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(archive).mode % 0o1000, 0o600);
+  }
+
   const manifest = JSON.parse(unzip("manifest.json"));
   assert.equal(manifest.seal, id);
   assert.deepEqual(manifest.missingArtifacts, []);
@@ -1128,7 +1157,7 @@ esac
 test("/directorate-export forwards the request and the agent can list review dates across linked worktrees", async () => {
   const dir = repo();
   const linked = path.join(dir, "linked workspace");
-  execFileSync("git", ["-C", dir, "worktree", "add", "--detach", linked]);
+  execFileSync("git", ["-C", dir, "worktree", "add", "-q", "--detach", linked]);
 
   const { call, commands, prompts, S } = await harness(dir);
 
@@ -1226,9 +1255,9 @@ test("/directorate-export forwards the request and the agent can list review dat
   );
 });
 
-test("directorate_export lists the owner's reads under its session, not as a missing session", async (t) => {
+test("directorate_export lists the owner's reads under its session, not as a missing session", async () => {
   const dir = repo();
-  const { call, S } = await harness(dir);
+  const { call, S } = await exportHarness(dir);
 
   const { content } = await call("directorate_seal", {
     target: { kind: "local" },
@@ -1237,29 +1266,6 @@ test("directorate_export lists the owner's reads under its session, not as a mis
   const id = sealOf(content);
   await call("directorate_diff", { seal: id });
   assert.ok(sealJson(id).regions.some((r) => r.readBy.includes("owner")));
-
-  const bin = path.join(dir, "bin");
-  mkdirSync(bin);
-  writeFileSync(
-    path.join(bin, "opencode"),
-    `#!/bin/sh
-case "$1:$2:$3" in
-  session:export:ses*) printf '{"info":{"id":"%s"},"messages":[]}\\n' "$3" ;;
-  api:get:/api/experimental/session/*/log\\?follow=false) printf 'data: {"type":"session.created"}\\n\\n' ;;
-  *) exit 2 ;;
-esac
-`,
-    { mode: 0o700 }
-  );
-  const originalPath = process.env.PATH;
-  process.env.PATH = [bin, originalPath].join(path.delimiter);
-  t.after(() => {
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
-  });
 
   const exported = await call(
     "directorate_export",
@@ -1275,11 +1281,8 @@ esac
     present(readdirSync(output).find((name) => name.startsWith(`${id}-`)))
   );
 
-  const manifest = JSON.parse(
-    execFileSync("unzip", ["-p", archive, "manifest.json"], {
-      encoding: "utf-8",
-    })
-  );
+  const files = await readArchive(archive);
+  const manifest = JSON.parse(present(files.get("manifest.json")));
 
   assert.deepEqual(manifest.sessions, [
     {
@@ -2125,6 +2128,7 @@ interface DesktopContext {
         })
       | undefined;
   };
+  signal: AbortSignal;
   toast: { show: (t: ToastMessage) => void };
 }
 
@@ -2210,7 +2214,8 @@ const tui = (client: TestRpcClient, dir: string, steps: DialogStep[]) => {
 const desktop = async (
   client: TestRpcClient,
   session: { location?: { directory: string } } | undefined,
-  steps: DialogStep[]
+  steps: DialogStep[],
+  signal = new AbortController().signal
 ) => {
   const guiModule = await import("@opencode/plugin/gui");
   const rpcModule = await import("@opencode/plugin/rpc");
@@ -2279,6 +2284,7 @@ const desktop = async (
       select: ask("select"),
     },
     sessions: { current: () => session && { ...session, server: { client } } },
+    signal,
     toast: {
       show: (t) => {
         toasts.push(t);
@@ -2312,6 +2318,33 @@ const pick = (title: string) => (d: DialogPrompt) => {
 };
 
 const esc = (): undefined => undefined;
+
+test("Desktop configuration stops when its plugin is unloaded during a dialog", async () => {
+  const dir = repo();
+  const { client } = await harness(dir);
+  const controller = new AbortController();
+
+  const d = await desktop(
+    client,
+    { location: { directory: dir } },
+    [
+      (dialog) => {
+        controller.abort();
+
+        return pick("Global Charter")(dialog);
+      },
+    ],
+    controller.signal
+  );
+
+  await d.command.run();
+  assert.deepEqual(
+    d.seen.map((dialog) => dialog.title),
+    ["The Directorate // Settings"]
+  );
+  assert.deepEqual(d.alerts, []);
+  assert.deepEqual(d.toasts, []);
+});
 
 test("/directorate-configure in the TUI: a slash and palette command whose dialogs write directorate.json through the RPC", async () => {
   const dir = repo();
@@ -2386,12 +2419,9 @@ test("/directorate-configure in the TUI: a slash and palette command whose dialo
     },
   });
   assert.equal(t.toasts[1]?.variant, "success");
-  assert.match(
+  assert.equal(
     present(t.toasts[1]?.message),
-    new RegExp(
-      `<Filed/Saved> ${globalSettings}\\. Effective: mode full · scope local · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs\\.`,
-      "u"
-    )
+    `<Filed/Saved> ${globalSettings}. Effective: mode full · scope local · panel on · panel models prov/beta, prov/alpha#xhigh · budgets full 45 min · lenses off docs.`
   );
 });
 
@@ -2445,9 +2475,9 @@ test("/directorate-configure in OpenCode Desktop: the built GUI bundle runs the 
     { budget_minutes: { full: 30 }, mode: "full" }
   );
   assert.equal(d.toasts[0]?.variant, "success");
-  assert.match(
+  assert.equal(
     present(d.toasts[0]?.description),
-    /^<Filed\/Saved> .*\.opencode\/directorate\.json\. Effective: mode full · budgets full 30 min\.$/u
+    `<Filed/Saved> ${path.join(dir, ".opencode", "directorate.json")}. Effective: mode full · budgets full 30 min.`
   );
 
   // The app's select has no disabled options: in the home directory, "Local Jurisdiction (This project)" is left out.
@@ -2775,7 +2805,7 @@ test("directorate_configure: validated writes per scope; the project overrides g
 
   const g = contentResult19.content;
 
-  assert.match(g, new RegExp(`Wrote ${globalSettings}`, "u"));
+  assert.ok(g.includes(`Wrote ${globalSettings}`));
   assert.deepEqual(
     JSON.parse(readFileSync(globalSettings, "utf-8")).panel.models[0],
     { model: "prov/alpha", variant: "xhigh" }
@@ -2792,9 +2822,12 @@ test("directorate_configure: validated writes per scope; the project overrides g
 
   const p = contentResult20.content;
 
+  assert.ok(
+    p.startsWith(`Wrote ${path.join(dir, ".opencode", "directorate.json")}:`)
+  );
   assert.match(
     p,
-    /\.opencode\/directorate\.json:[\s\S]*"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/u
+    /"disabled": \[\n\s+"ux"[\s\S]*\nEffective settings: mode code-quality · panel off · panel models prov\/alpha#xhigh, prov\/beta · budgets code-quality 12 min · lenses off ux, docs/u
   );
   const contentResult21 = await cfg({ action: "show", find: "ALP" });
   const shown = contentResult21.content;

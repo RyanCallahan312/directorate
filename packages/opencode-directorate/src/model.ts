@@ -1,13 +1,6 @@
 // Directorate schemas: one per stored shape, plus the values tools take in. The domain types derive from them and are read-only:
 // every change builds a new seal or ledger. seal.json and ledger.json are decoded and encoded through them.
-import {
-  Effect,
-  Option,
-  Path,
-  Schema,
-  SchemaIssue,
-  SchemaTransformation,
-} from "effect";
+import { Effect, Schema, SchemaIssue, SchemaTransformation } from "effect";
 import type { SchemaAST } from "effect";
 
 /**
@@ -390,113 +383,11 @@ export const SealJson = Schema.fromJsonString(SealSchema, { space: 2 });
 export const LedgerJson = Schema.fromJsonString(LedgerSchema, { space: 2 });
 
 // ---------- tool input values ----------
-/** A stand-in repository root: paths are resolved lexically beneath it, in git's POSIX form on every host. */
-const ROOT = "/repo";
-
 export const invalid = (
   input: string,
   options: SchemaAST.ParseOptions,
   message: string
 ) => Effect.fail(new SchemaIssue.InvalidValue({ message }, input, options));
-
-/** The repository-relative form of `input`, or none if it is absolute or climbs out; the root itself is "". */
-const inRepo = (input: string) =>
-  Path.Path.use((path) =>
-    Effect.succeed(
-      Option.map(path.resolveWithin(ROOT, input.trim()), (abs) =>
-        path.relative(ROOT, abs)
-      )
-    )
-  ).pipe(Effect.provide(Path.layer));
-
-/** A directory scope in the repository, in git's form; "." (the whole repository) decodes to "". */
-export const RepoScope = Schema.String.pipe(
-  Schema.decodeTo(
-    Schema.String,
-    SchemaTransformation.transformEffect({
-      decode: (input, options) =>
-        inRepo(input).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                invalid(
-                  input,
-                  options,
-                  `Path ${input} must be relative to the repository and stay inside it.`
-                ),
-              onSome: Effect.succeed,
-            })
-          )
-        ),
-      encode: Effect.succeed,
-    })
-  )
-);
-
-/** A file in the repository, in git's form. */
-export const RepoPath = RepoScope.check(
-  Schema.makeFilter(
-    (p: string) => p !== "" || "Expected a file path, not the repository root."
-  )
-);
-
-const LINE_REF = /^(?<path>.+?):(?<start>\d+)(?:-(?<end>\d+))?$/u;
-
-/** An evidence reference other than a URL: path:line or path:start-end, decoded to its parts and encoded back. */
-export const LineRef = Schema.String.pipe(
-  Schema.decodeTo(
-    Schema.Struct({ end: Schema.Int, path: Schema.String, start: Schema.Int }),
-    SchemaTransformation.transformEffect({
-      decode: (input, options) => {
-        const m = LINE_REF.exec(input.trim());
-
-        const path = m?.[1];
-
-        if (!m || path === undefined) {
-          return invalid(
-            input,
-            options,
-            'use a bare path:line, path:start-end, or URL, with no side marker such as (old) and no prose; both sides are checked, and notes such as "none: searched …" go in trigger, brief, or rationale'
-          );
-        }
-
-        const start = Number(m[2]);
-        const end = Number(m[3] ?? m[2]);
-
-        if (start < 1 || end < start) {
-          return invalid(input, options, "invalid line range");
-        }
-
-        return inRepo(path).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                invalid(
-                  input,
-                  options,
-                  `Path ${m[1]} must be relative to the repository and stay inside it.`
-                ),
-              onSome: (relative) =>
-                relative
-                  ? Effect.succeed({ end, path: relative, start })
-                  : invalid(
-                      input,
-                      options,
-                      "Expected a file path, not the repository root."
-                    ),
-            })
-          )
-        );
-      },
-      encode: (r) =>
-        Effect.succeed(
-          r.start === r.end
-            ? `${r.path}:${r.start}`
-            : `${r.path}:${r.start}-${r.end}`
-        ),
-    })
-  )
-);
 
 export const isUrl = (ref: string) => /^https?:\/\//u.test(ref.trim());
 
@@ -624,5 +515,7 @@ export const normalizeSettings = (s: Settings): Settings => {
 export const isUnset = (s: Settings) =>
   Object.keys(normalizeSettings(s)).length === 0;
 
+const settingsEquivalent = Schema.toEquivalence(SettingsSchema);
+
 export const sameSettings = (a: Settings, b: Settings) =>
-  JSON.stringify(normalizeSettings(a)) === JSON.stringify(normalizeSettings(b));
+  settingsEquivalent(normalizeSettings(a), normalizeSettings(b));
