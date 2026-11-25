@@ -13,7 +13,7 @@ Read tools are `directorate_diff`, `directorate_read`, `directorate_ls`, `direct
 
 **Only the Liaison runs a review.** Any other agent (such as `build`) dispatches `directorate_liaison` with the target and focus, waits for its result, and relays the Directive verbatim. To re-check after fixing findings, it sends a follow-up to the same Liaison session (see [Re-check after fixes](#re-check-after-fixes)). The plugin enforces this:
 
-- Agents outside The Directorate see no `directorate_*` tools except `directorate_configure`, on every request kind (steps, compaction, generate), so their prompt-cache prefix stays the same. A call is denied with a pointer to the Liaison; a request that names no agent counts as the session's agent, as OpenCode resolves it.
+- Agents outside The Directorate see no `directorate_*` tools except `directorate_configure`, `directorate_export`, and `directorate_export_list`, on every request kind (steps, compaction, generate), so their prompt-cache prefix stays the same. A call is denied with a pointer to the Liaison; a request that names no agent counts as the session's agent, as OpenCode resolves it.
 - Only the Liaison may dispatch Auditors, Seats, and Compliance. Those three agents are `hidden`, so other agents are not offered them.
 - The Liaison waits for its subagents with `directorate_wait`, inside its turn. Ending its turn to wait would hand the caller an unfinished review.
 
@@ -98,9 +98,45 @@ When OpenCode delivers a new ordinary user prompt after Ship's input, Ship pause
 
 If OpenCode installs a checkpoint that hides an automatic continuation or its origin after promotion, Ship pauses rather than sending fix instructions from a summary. Precomputing a summary alone does not pause Ship. Use `/directorate-ship resume` to reassess from the saved Directive; the old continuation is not needed.
 
-Between starts or resumes, Ship allows up to six reviews before requesting another and up to 30 automatic continuations. If a requested panel did not finish, start a new panel review: a single-model re-check cannot supply the missing Seat's review.
+Between starts or resumes, Ship allows up to six reviews before requesting another and up to 30 rounds (automatic continuations, plus the resumed step). If a requested panel did not finish, start a new panel review: a single-model re-check cannot supply the missing Seat's review.
 
 Prefer branch or local scope for fixes: a fixed commit cannot reflect edits, and a PR re-check reads its fetched head rather than the working tree.
+
+### The ship, as a state chart
+
+One calling session owns one ship loop at a time. Its state lives in OpenCode plugin storage (`ship:<sessionID>`); host events and the saved review dossier move it along. `/directorate-ship stop` (when no input is queued), `/directorate-ship forget <exact-pending-id>`, or deleting the session removes the loop from any eligible state.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Waiting: /directorate-ship [request]<br/>(admits kickoff prompt)
+    Waiting --> Active: exact inbox item delivered
+    Waiting --> Paused: prompt cancelled, admission failed,<br/>user prompt ahead of continuation,<br/>compaction, move, or reload
+
+    Active --> Active: turn succeeded while<br/>background subagents run
+    Active --> Deciding: turn succeeded<br/>(no background subagents left)
+    Active --> Paused: /directorate-ship pause, user prompt,<br/>execution failed/interrupted, compaction,<br/>wrong --scope, move, or reload
+
+    Deciding --> Waiting: next step admitted<br/>(review, resume, fix, re-check, or finish)
+    Deciding --> Paused: no progress, 6-review / 30-round limit,<br/>missing panel Seats, fixed commit,<br/>empty target, or read error
+    Deciding --> Complete: current, complete Directive with<br/>no findings or unverified leads
+
+    Paused --> Deciding: /directorate-ship resume<br/>(fresh allowance, no pending input)
+    Paused --> [*]: stop or forget, new /directorate-ship,<br/>or session deleted
+    Complete --> [*]: stop, new /directorate-ship,<br/>or session deleted
+
+    classDef wait fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
+    classDef work fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef decide fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef pause fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef done fill:#e0f2fe,stroke:#0284c7,stroke-width:3px,color:#0c4a6e
+
+    class Waiting wait
+    class Active work
+    class Deciding decide
+    class Paused pause
+    class Complete done
+```
 
 ## The review, as a state chart
 
@@ -159,7 +195,7 @@ stateDiagram-v2
 | Gate | Pushes back when | Resolve by |
 | --- | --- | --- |
 | Coverage | regions are unread | reading them with `directorate_diff`, or recording `directorate_coverage` dispositions |
-| Seats (Panel) | a Directorate Seat failed or never launched | relaunching a `directorate_seat` for it |
+| Seats (Panel) | a Directorate Seat failed, never launched, or finished with unread regions | continuing the partial Seat or relaunching a `directorate_seat` for it |
 | Active Personnel (Children) | Auditors, Seats, or Compliance are still running | `directorate_wait`, which returns as each one finishes |
 | Containment Drift (Freshness) | the code moved since the seal | `directorate_refresh` (allowed once; a move that is not refreshed makes the Directive stale) |
 | Unverified Dossier (Open entries) | findings are unverified | verdicts, mostly from `directorate_compliance` |
@@ -355,6 +391,7 @@ flowchart TB
         readTools["read-tools.ts<br/>diff · read · ls · grep · history · coverage"]
         ledgerTools["ledger-tools.ts<br/>add · verdict · list · note"]
         configure["configure.ts<br/>directorate_configure · settings RPC"]
+        exportTool["export.ts · archive.ts<br/>directorate_export · list · ZIP"]
     end
 
     subgraph domain["Review domain"]
@@ -375,7 +412,7 @@ flowchart TB
     end
 
     subgraph rules["Pure rules: no services"]
-        pure["model · errors · exclusions<br/>coverage · ledger · children · budget"]
+        pure["model · error · exclusions · request<br/>coverage · ledger · children · budget"]
     end
 
     node(["Node platform<br/>FileSystem · Path · Crypto · ChildProcessSpawner"])
@@ -397,7 +434,7 @@ flowchart TB
 
     class tuiPart,host,node hostC
     class index,ship flowC
-    class tool,readTools,ledgerTools,configure adaptC
+    class tool,readTools,ledgerTools,configure,exportTool adaptC
     class seal,report,browse,content,target,diff domainC
     class pure pureC
     class sessions,store,worktree,git,settings svcC
@@ -440,7 +477,7 @@ The OpenCode server uses the `opencode` CLI on its `PATH` to read session traces
 
 ```sh
 bun install --frozen-lockfile
-bun run check  # from the workspace root; builds the GUI, typechecks, and runs node --test
+bun run check  # from the workspace root; lints, checks formatting, builds the GUI, typechecks, and runs node --test
 ```
 
 - **Effect version:** `effect` is a peer dependency pinned to the version the OpenCode host ships (4.0.6). The plugin uses the host's runtime and never starts its own.
