@@ -117,19 +117,29 @@ export const isAgentId = Schema.is(AgentIdSchema);
 export const agentNamed = (name: string | undefined) =>
   isAgentId(name) ? agentOf(name) : undefined;
 
-/** The Auditor, Seat, or Compliance a name denotes: an agent the Liaison dispatches. */
-export const childNamed = (name: string | undefined) => {
+/** The Auditor, Seat, or Compliance a name denotes: an agent the Liaison dispatches, or undefined for any other name. */
+export const dispatchableNamed = (name: string | undefined) => {
   const agent = agentNamed(name);
 
   return agent && Liaison.dispatches.includes(agent.id) ? agent : undefined;
 };
 
-export const ActorSchema = Schema.Struct({
+/**
+ * Who acted: the agent and session of a tool call, decoded once at the edge (platform's `actor`). Stored in ledger.json
+ * entries, verdicts, and notes; the agent stays any string there, since other agents and older versions wrote them.
+ */
+export class Actor extends Schema.Class<
+  Actor,
+  { readonly brand: unique symbol }
+>("directorate/Actor")({
   agent: Schema.String,
   session: Schema.String,
-});
-
-export type Actor = typeof ActorSchema.Type;
+}) {
+  /** The Directorate agent that acted, or undefined for any other agent. */
+  get role() {
+    return agentNamed(this.agent);
+  }
+}
 
 /** "[header] <middle> · <agent's order>" */
 const phaseLine = (agent: Agent, phase: Phase, middle: string) =>

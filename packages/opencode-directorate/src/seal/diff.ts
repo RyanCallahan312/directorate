@@ -4,9 +4,8 @@ import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
 import { exclusionReason } from "../exclusions.ts";
 import { sha256 } from "../platform/hash.ts";
-import { invalid } from "../platform/stored.ts";
-import { Region } from "./region.ts";
-import type { FileEntry } from "./region.ts";
+import { Count, invalid } from "../platform/stored.ts";
+import { FileEntry, FileStatusSchema, Region } from "./region.ts";
 
 const REGION_MAX_PATCH_LINES = 400;
 
@@ -113,30 +112,58 @@ export const shown = (p: string) =>
     ? JSON.stringify(p)
     : p;
 
-interface Hunk {
-  readonly newStart: number;
-  readonly newLines: number;
-  readonly patchStart: number;
-  readonly patchEnd: number;
+/** A hunk of the assembled diff: where its new-side lines start, and where it sits in the diff text. */
+class Hunk extends Schema.Class<Hunk, { readonly brand: unique symbol }>(
+  "directorate/Hunk"
+)({
+  newLines: Count,
+  newStart: Count,
+  patchEnd: Count,
+  patchStart: Count,
   /** The line of this hunk's own `diff --git` header: a typechange's second section has its own. */
-  readonly sectionStart: number;
-}
+  sectionStart: Count,
+}) {}
 
 /** A file of the assembled diff: its entry's fields, and where it and its hunks sit in the diff text. */
-type ParsedFile = typeof FileEntry.Encoded & {
-  readonly hunks: readonly Hunk[];
-  readonly patchStart: number;
-  readonly patchEnd: number;
-};
+class ParsedFile extends Schema.Class<
+  ParsedFile,
+  { readonly brand: unique symbol }
+>("directorate/ParsedFile")({
+  ...FileEntry.fields,
+  hunks: Schema.Array(Hunk),
+  patchEnd: Count,
+  patchStart: Count,
+}) {
+  /** The file as the seal stores it. */
+  get entry() {
+    return FileEntry.make({
+      added: this.added,
+      excluded: this.excluded,
+      oldPath: this.oldPath,
+      path: this.path,
+      removed: this.removed,
+      status: this.status,
+    });
+  }
+}
 
-const STATUS = new Map<string, FileEntry["status"]>([
-  ["A", "added"],
-  ["C", "added"],
-  ["D", "deleted"],
-  ["M", "modified"],
-  ["R", "renamed"],
-  ["T", "modified"],
-]);
+/** The raw-record status letters git writes for a changed file, other than those it never writes for a diff. */
+const ChangeCodeSchema = Schema.Literals(["A", "C", "D", "M", "R", "T"]);
+
+const isChangeCode = Schema.is(ChangeCodeSchema);
+
+const STATUS = Schema.Record(ChangeCodeSchema, FileStatusSchema).make({
+  A: "added",
+  C: "added",
+  D: "deleted",
+  M: "modified",
+  R: "renamed",
+  T: "modified",
+});
+
+/** A raw record's status; any other letter reads as modified. */
+const statusOf = (code: string) =>
+  isChangeCode(code) ? STATUS[code] : "modified";
 
 const patchStats = (lines: readonly string[]) => {
   let added = 0;
@@ -167,7 +194,7 @@ const patchStats = (lines: readonly string[]) => {
 export const assemble = (pieces: readonly Piece[]) => {
   const out: string[] = [];
 
-  const files = pieces.map((piece): ParsedFile => {
+  const files = pieces.map((piece) => {
     const { added, binary, removed } = patchStats(piece.lines);
 
     const excluded =
@@ -226,14 +253,13 @@ export const assemble = (pieces: readonly Piece[]) => {
 
     const patchEnd = out.length;
 
-    const hunks = opened.map(({ next, ...h }) => ({
-      ...h,
-      patchEnd: (marks[next] ?? patchEnd + 1) - 1,
-    }));
+    const hunks = opened.map(({ next, ...h }) =>
+      Hunk.make({ ...h, patchEnd: (marks[next] ?? patchEnd + 1) - 1 })
+    );
 
-    const status = binary ? "binary" : (STATUS.get(piece.code) ?? "modified");
+    const status = binary ? "binary" : statusOf(piece.code);
 
-    return {
+    return ParsedFile.make({
       added,
       excluded,
       hunks,
@@ -243,7 +269,7 @@ export const assemble = (pieces: readonly Piece[]) => {
       path: piece.path,
       removed,
       status: status === "modified" && !hunks.length ? "mode" : status,
-    };
+    });
   });
 
   return { files, text: out.length ? `${out.join("\n")}\n` : "" };

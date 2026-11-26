@@ -15,7 +15,7 @@ import {
   locationKey,
   ProcessIdentity,
 } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { RecoveryWake, Sessions, Watchdog } from "../../seal/seal.ts";
 import { halted, shipped, waking, woken } from "./custody.ts";
@@ -67,7 +67,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
 ) {
   const host = yield* Host;
   const sessions = yield* Sessions;
-  const store = yield* Store;
+  const store = yield* Records;
   const { pid } = yield* ProcessIdentity;
 
   const myRepo = yield* (yield* Git)

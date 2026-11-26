@@ -4,7 +4,7 @@ import { Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
 import { Anchor } from "../../seal/region.ts";
-import { ActorSchema } from "../agents/agent.ts";
+import { Actor } from "../agents/agent.ts";
 
 const list = Schema.Array;
 const opt = Schema.optional;
@@ -78,7 +78,7 @@ export class Verdict extends Schema.Class<
   { readonly brand: unique symbol }
 >("directorate/Verdict")({
   at: Time,
-  by: ActorSchema,
+  by: Actor,
   evidence: list(Schema.String),
   of: opt(Schema.String),
   rationale: Schema.String,
@@ -113,7 +113,7 @@ export class Entry extends Schema.Class<
   /** As stored: any string, though new entries are filed under a lens of `LensSchema`. */
   lens: Schema.String,
   quote: Schema.String,
-  raisedBy: ActorSchema,
+  raisedBy: Actor,
   severity: SeveritySchema,
   staleReason: opt(Schema.String),
   status: EntryStatusSchema,
@@ -147,7 +147,7 @@ export class Note extends Schema.Class<Note, { readonly brand: unique symbol }>(
   "directorate/Note"
 )({
   at: Time,
-  by: ActorSchema,
+  by: Actor,
   kind: NoteKindSchema,
   text: Schema.String,
 }) {}

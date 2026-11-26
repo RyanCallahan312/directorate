@@ -1,9 +1,10 @@
 // /directorate-configure's dialog walk over one directorate.json, shared by the TUI part (tui.ts) and the GUI part (gui.ts): each
 // adapts its host's dialogs to Dialogs and binds the settings RPC (rpc.ts) to a location as Backend. The server checks
 // models and thinking levels and writes the file. The flow only orchestrates dialogs and the settings RPC.
-import { Data, Effect, Result } from "effect";
+import { Effect, Match, Result, Schema } from "effect";
 
 import {
+  DEFAULT_MODE,
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
   ReviewScopeSchema,
@@ -72,21 +73,22 @@ export interface Backend {
   }) => Effect.Effect<WriteResult, SettingsError>;
 }
 
-type Item =
-  | "mode"
-  | "review-scope"
-  | "panel"
-  | "seats"
-  | "budgets"
-  | "lenses"
-  | "clear"
-  | "save";
+/** The settings menu's items, in menu order. */
+const MenuItemSchema = Schema.Literals([
+  "review-scope",
+  "mode",
+  "panel",
+  "seats",
+  "budgets",
+  "lenses",
+  "clear",
+  "save",
+]);
 
-interface Choice {
-  readonly ref: string;
-  readonly name: string;
-  readonly variants: readonly string[];
-}
+type MenuItem = typeof MenuItemSchema.Type;
+
+/** A chat model a Directorate Seat can use, as the settings RPC lists it. */
+type Choice = SettingsView["models"][number];
 
 interface FlowContext {
   readonly base: Settings;
@@ -96,23 +98,23 @@ interface FlowContext {
   readonly scope: SettingsScope;
 }
 
-const MODE_HINT: Record<Mode, string> = {
+const MODE_HINT = Schema.Record(ModeSchema, Schema.String).make({
   "code-quality": "adds maintainability and design",
   default: "functionality and test coverage",
   full: "every applicable lens",
-};
+});
 
-const SCOPE_HINT: Record<ReviewScope, string> = {
+const SCOPE_HINT = Schema.Record(ReviewScopeSchema, Schema.String).make({
   branch: "branch commits beyond the default branch plus uncommitted changes",
   local: "uncommitted changes only",
   repository: "whole repository, including unchanged files",
-};
+});
 
-export class SettingsError extends Data.TaggedError(
-  "DirectorateSettingsError"
-)<{
-  readonly message: string;
-}> {}
+/** A dialog or the settings RPC failed; the walk shows its message in an alert. */
+export class SettingsError extends Schema.TaggedError<
+  SettingsError,
+  { readonly brand: unique symbol }
+>()("DirectorateSettingsError", { message: Schema.String }) {}
 
 const unset = (fallback: string) => `unset: ${fallback}`;
 
@@ -485,7 +487,7 @@ const editMode = Effect.fnUntraced(function* editMode(
         value: m,
       })),
       {
-        description: unset(ctx.base.mode ?? "default"),
+        description: unset(ctx.base.mode ?? DEFAULT_MODE),
         title: "Unset",
         value: "unset",
       },
@@ -542,76 +544,77 @@ const editPanel = Effect.fnUntraced(function* editPanel(
   };
 });
 
-const menuOptions = (
-  ctx: FlowContext,
-  draft: Settings,
-  changed: boolean
-): readonly Option<Item>[] => [
-  {
-    description:
-      draft.default_scope ??
-      unset(ctx.base.default_scope ?? DEFAULT_REVIEW_SCOPE),
-    title: "Default review scope",
-    value: "review-scope",
-  },
-  {
-    description: draft.mode ?? unset(ctx.base.mode ?? "default"),
-    title: "Default mode",
-    value: "mode",
-  },
-  {
-    description: panelDescription(ctx.base, draft),
-    title: "Panel by default",
-    value: "panel",
-  },
-  {
-    description:
-      draft.panel?.models?.map(seatRef).join(", ") ??
-      unset(seatsFallback(ctx.base)),
-    title: "Directorate Seats (panel models)",
-    value: "seats",
-  },
-  {
-    description: `${ModeSchema.literals
-      .map(
-        (m) =>
-          `${m} ${budgetOf(draft, m) ?? budgetOf(ctx.base, m) ?? DEFAULT_BUDGET[m]}`
-      )
-      .join(" · ")} min`,
-    title: "Time budgets",
-    value: "budgets",
-  },
-  {
-    description: lensesOff(ctx.base, draft).join(", ") || "none",
-    title: "Disabled lenses",
-    value: "lenses",
-  },
-  {
-    description: "unset every key; saving removes the file",
-    group: "File",
-    title: "Clear this file",
-    value: "clear",
-  },
-  {
-    description: ctx.dialog.path(ctx.now.files[ctx.scope] ?? ""),
-    group: "File",
-    title: changed ? "Save" : "Save (no changes)",
-    value: "save",
-  },
-];
+const menuOptions = (ctx: FlowContext, draft: Settings, changed: boolean) =>
+  [
+    {
+      description:
+        draft.default_scope ??
+        unset(ctx.base.default_scope ?? DEFAULT_REVIEW_SCOPE),
+      title: "Default review scope",
+      value: "review-scope",
+    },
+    {
+      description: draft.mode ?? unset(ctx.base.mode ?? DEFAULT_MODE),
+      title: "Default mode",
+      value: "mode",
+    },
+    {
+      description: panelDescription(ctx.base, draft),
+      title: "Panel by default",
+      value: "panel",
+    },
+    {
+      description:
+        draft.panel?.models?.map(seatRef).join(", ") ??
+        unset(seatsFallback(ctx.base)),
+      title: "Directorate Seats (panel models)",
+      value: "seats",
+    },
+    {
+      description: `${ModeSchema.literals
+        .map(
+          (m) =>
+            `${m} ${budgetOf(draft, m) ?? budgetOf(ctx.base, m) ?? DEFAULT_BUDGET[m]}`
+        )
+        .join(" · ")} min`,
+      title: "Time budgets",
+      value: "budgets",
+    },
+    {
+      description: lensesOff(ctx.base, draft).join(", ") || "none",
+      title: "Disabled lenses",
+      value: "lenses",
+    },
+    {
+      description: "unset every key; saving removes the file",
+      group: "File",
+      title: "Clear this file",
+      value: "clear",
+    },
+    {
+      description: ctx.dialog.path(ctx.now.files[ctx.scope] ?? ""),
+      group: "File",
+      title: changed ? "Save" : "Save (no changes)",
+      value: "save",
+    },
+  ] satisfies readonly Option<MenuItem>[];
 
-const MENU_ACTIONS: Record<
-  Exclude<Item, "save">,
-  (ctx: FlowContext, draft: Settings) => Effect.Effect<Settings, SettingsError>
-> = {
-  budgets: editBudgets,
-  clear: () => Effect.succeed({}),
-  lenses: editLenses,
-  mode: editMode,
-  panel: editPanel,
-  "review-scope": editReviewScope,
-  seats: editSeats,
-};
+/** The editor behind a menu item other than Save. */
+const menuAction = (item: Exclude<MenuItem, "save">) =>
+  Match.value(item).pipe(
+    Match.when("review-scope", () => editReviewScope),
+    Match.when("mode", () => editMode),
+    Match.when("panel", () => editPanel),
+    Match.when("seats", () => editSeats),
+    Match.when("budgets", () => editBudgets),
+    Match.when("lenses", () => editLenses),
+    Match.when(
+      "clear",
+      () => (_ctx: FlowContext, _draft: Settings) =>
+        Effect.succeed<Settings>({})
+    ),
+    Match.exhaustive
+  );
 
 const saveSettings = Effect.fn("Directorate.saveSettings")(
   function* saveSettings(ctx: FlowContext, draft: Settings) {
@@ -666,12 +669,12 @@ const runMenu = Effect.fnUntraced(function* runMenu(
   saved: Settings
 ) {
   let draft = saved;
-  let at: Item | undefined;
+  let at: MenuItem | undefined;
 
   while (true) {
     const changed = !sameSettings(draft, saved);
 
-    const item = yield* ctx.dialog.select<Item>({
+    const item = yield* ctx.dialog.select<MenuItem>({
       current: at,
       options: menuOptions(ctx, draft, changed),
       title: `The Directorate // ${ctx.scope === "global" ? "Global Charter" : "Local Jurisdiction"}${changed ? " (unsaved)" : ""}`,
@@ -695,7 +698,7 @@ const runMenu = Effect.fnUntraced(function* runMenu(
       continue;
     }
 
-    draft = normalizeSettings(yield* MENU_ACTIONS[item](ctx, draft));
+    draft = normalizeSettings(yield* menuAction(item)(ctx, draft));
   }
 });
 
@@ -712,6 +715,6 @@ export const configure = Effect.fn("Directorate.configure")(function* configure(
   }
 
   // What an unset key falls back to: the global file under a project's, then Directorate defaults.
-  const base: Settings = scope === "project" ? now.global : {};
+  const base = scope === "project" ? now.global : {};
   yield* runMenu({ base, dialog, directorate, now, scope }, now[scope]);
 });

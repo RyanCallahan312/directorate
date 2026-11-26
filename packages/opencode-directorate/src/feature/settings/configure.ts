@@ -5,10 +5,15 @@
 import { Effect, Schema } from "effect";
 
 import { ignore } from "../../platform/error.ts";
-import { Host, optional, str } from "../../platform/platform.ts";
+import { actor, Host, optional, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { agentNamed } from "../agents/agent.ts";
+import {
+  DEFAULT_MODE,
+  DEFAULT_REVIEW_SCOPE,
+  ModeSchema,
+} from "../../workflow/review/request.ts";
+import { DEFAULT_BUDGET } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
 import {
@@ -120,7 +125,7 @@ export const configureTool = (
     description:
       "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
     *execute(input, c) {
-      if (agentNamed(c.agent)) {
+      if (actor(c).role) {
         return yield* new SettingsRejected({
           message:
             "Directorate review agents cannot modify Directorate settings.",
@@ -170,7 +175,7 @@ export const configureTool = (
           now.project
         ),
         `Effective: ${describe(now.effective) ?? "Directorate defaults"}.`,
-        `Unset keys keep Directorate defaults: scope branch; mode default; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets 20, 30, 60 min (default, code-quality, full), half again for panels; no lenses disabled.`,
+        `Unset keys keep Directorate defaults: scope ${DEFAULT_REVIEW_SCOPE}; mode ${DEFAULT_MODE}; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets ${ModeSchema.literals.map((m) => DEFAULT_BUDGET[m]).join(", ")} min (${ModeSchema.literals.join(", ")}), half again for panels; no lenses disabled.`,
         `Lenses: ${LensSchema.literals.join(", ")}.`,
       ];
 

@@ -6,6 +6,6 @@ export { exportCommand, exportTools } from "./export-tools.ts";
 
 export { PAGE_SIZE } from "./export.ts";
 
-export { emptyLedger, Store } from "./repository.ts";
+export { emptyLedger, Records } from "./repository.ts";
 
 export { StateRoot } from "./state-root.ts";

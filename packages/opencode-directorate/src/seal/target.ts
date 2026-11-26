@@ -14,6 +14,20 @@ export const TargetKindSchema = Schema.Literals([
 
 export type TargetKind = typeof TargetKindSchema.Type;
 
+/** The kinds a target resolves to: auto picks one of the others. */
+export const ResolvedKindSchema = TargetKindSchema.pick([
+  "local",
+  "commit",
+  "range",
+  "pr",
+  "paths",
+]);
+
+/** What the review's post-image is: the working tree (snapshotted at sealing) or a commit. */
+export const PostImageSchema = Schema.Literals(["worktree", "commit"]);
+
+export type PostImage = typeof PostImageSchema.Type;
+
 /** What a review seals, as stored. The directorate_seal tool input declares its own keys with optionalKey: Schema.optional renders as anyOf-null for the model. */
 export class Target extends Schema.Class<
   Target,

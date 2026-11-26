@@ -4,7 +4,7 @@ import { Git, Host, command } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { ActiveSeal } from "./active-seal.ts";
 import { ExportFailed, writeArchive } from "./archive.ts";
-import { Store } from "./repository.ts";
+import { Records } from "./repository.ts";
 
 const TIMEOUT = 120_000;
 const SESSION_ID = /^ses[\w-]+$/u;
@@ -39,7 +39,7 @@ export const PAGE_SIZE = 50;
 
 export const listExportReviews = Effect.fn("Directorate.listExportReviews")(
   function* listExportReviews(sessionID: string, before: string | undefined) {
-    const store = yield* Store;
+    const store = yield* Records;
     const sessions = yield* ActiveSeal;
     const git = yield* Git;
 
@@ -118,7 +118,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
   id: string,
   staging: string
 ) {
-  const store = yield* Store;
+  const store = yield* Records;
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
 
@@ -195,7 +195,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
 export const exportReview = Effect.fn("Directorate.exportReview")(
   function* exportReview(id: string) {
     const host = yield* Host;
-    const store = yield* Store;
+    const store = yield* Records;
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* Path.Path;
     yield* store.load(id);

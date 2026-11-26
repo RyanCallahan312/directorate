@@ -12,7 +12,7 @@ import {
   strArr,
 } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import { SideSchema } from "../../seal/region.ts";
 import {
@@ -78,7 +78,7 @@ class NoteRefused extends Schema.TaggedError<
 
 export const ledgerTools = (
   tool: DefineTool<
-    Sessions | Store | Git | Host | FileSystem.FileSystem | Path.Path
+    Sessions | Records | Git | Host | FileSystem.FileSystem | Path.Path
   >
 ) => {
   tool({
@@ -114,7 +114,7 @@ export const ledgerTools = (
             const evidence = yield* checkEvidence(seal, input.evidence);
             const ledger = yield* review.ledger;
             // Seats operate under memetic isolation: never reveal other entries' titles or ids.
-            const near = by.agent === Seat.id ? [] : nearby(ledger, anchor);
+            const near = by.role === Seat ? [] : nearby(ledger, anchor);
 
             const entry = Entry.make({
               anchor,
@@ -327,7 +327,7 @@ export const ledgerTools = (
     description:
       "Show dossier (ledger) entries (optionally by status or ids; brief = one line each), with the seal's SHAs, coverage, and budget. Without a seal, lists recent seals for this repository so an interrupted review can be resumed (directorate_seal resume) or reported.",
     *execute(input, c) {
-      const store = yield* Store;
+      const store = yield* Records;
       const sessions = yield* Sessions;
 
       if (!input.seal) {
@@ -445,7 +445,7 @@ export const ledgerTools = (
             let { text } = input;
 
             if (input.kind === "answered") {
-              if (by.agent !== Liaison.id) {
+              if (by.role !== Liaison) {
                 return yield* new NoteRefused({
                   message: `Only ${Liaison.id} records an answered question.`,
                 });

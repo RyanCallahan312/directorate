@@ -41,6 +41,8 @@ export type { Body, DefineTool } from "./tool.ts";
 
 export { Worktree } from "./worktree.ts";
 
+export type { LiveEntry } from "./worktree.ts";
+
 const processLayer = Layer.unwrap(
   Effect.serviceOption(ChildProcessSpawner).pipe(
     Effect.map(

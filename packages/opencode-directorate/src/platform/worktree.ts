@@ -1,21 +1,58 @@
 // Directorate live working-tree access, under one path policy, and the signatures that tell whether it moved since the seal.
-import { Bytes, Context, Effect, FileSystem, Layer, Path } from "effect";
+import {
+  Bytes,
+  Context,
+  Effect,
+  FileSystem,
+  Layer,
+  Path,
+  Schema,
+} from "effect";
 import { Digest } from "effect/crypto";
 import type { PlatformError } from "effect/PlatformError";
 
 import { isSecret } from "../exclusions.ts";
 import { Git, UnreadableFile } from "./git.ts";
-import type { GitFailed } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { encodeUtf8 } from "./utf8.ts";
 
 const IO_CONCURRENCY = 16;
 
+/** What a working-tree path is: absent, a symlink, an executable or plain file, or a checked-out submodule. */
+export const EntryModeSchema = Schema.Literals([
+  "absent",
+  "link",
+  "exec",
+  "file",
+  "gitlink",
+]);
+
+export type EntryMode = typeof EntryModeSchema.Type;
+
+/** The git file mode of each kind of entry; an absent path diffs as a plain file. */
+const GIT_MODES = Schema.Record(EntryModeSchema, Schema.String).make({
+  absent: "100644",
+  exec: "100755",
+  file: "100644",
+  gitlink: "160000",
+  link: "120000",
+});
+
 /** A working-tree path as captured: its bytes (a symlink as its link text, a submodule as its commit) and mode, or absent. */
-interface LiveEntry {
-  readonly buf?: Uint8Array;
-  readonly mode: "absent" | "link" | "exec" | "file" | "gitlink";
+export class LiveEntry extends Schema.Class<
+  LiveEntry,
+  { readonly brand: unique symbol }
+>("directorate/LiveEntry")({
+  buf: Schema.optionalKey(Schema.Uint8Array),
+  mode: EntryModeSchema,
+}) {
+  /** The mode git records for it. */
+  get gitMode() {
+    return GIT_MODES[this.mode];
+  }
 }
+
+const absent = LiveEntry.make({ mode: "absent" });
 
 /** Missing is a fact about the worktree; any other filesystem error is not. */
 const orMissing = <A, R>(self: Effect.Effect<A, PlatformError, R>) =>
@@ -83,10 +120,7 @@ const make = Effect.gen(function* make() {
    * Unreadable files fail rather than read as deleted.
    */
   const entry = Effect.fn("Worktree.entry")(
-    function* entry(
-      repo: string,
-      path: string
-    ): Effect.fn.Return<LiveEntry, PlatformError | GitFailed | UnreadableFile> {
+    function* entry(repo: string, path: string) {
       const { abs, st } = yield* stat(repo, path);
 
       // An untracked nested repository is listed as `dir/`; only a tracked gitlink names its directory bare.
@@ -94,29 +128,32 @@ const make = Effect.gen(function* make() {
         const head = yield* submodule(abs);
 
         return head === undefined
-          ? { mode: "absent" }
-          : {
+          ? absent
+          : LiveEntry.make({
               buf: encodeUtf8(`Subproject commit ${head}\n`),
               mode: "gitlink",
-            };
+            });
       }
 
       if (st?.type === "SymbolicLink") {
         const link = yield* orMissing(fs.readLink(abs));
 
         return link === undefined
-          ? { mode: "absent" }
-          : { buf: encodeUtf8(`symlink -> ${link}\n`), mode: "link" };
+          ? absent
+          : LiveEntry.make({
+              buf: encodeUtf8(`symlink -> ${link}\n`),
+              mode: "link",
+            });
       }
 
       if (st?.type !== "File") {
-        return { mode: "absent" };
+        return absent;
       }
 
       const buf = yield* orMissing(fs.readFile(abs));
 
       if (buf === undefined) {
-        return { mode: "absent" };
+        return absent;
       }
 
       // Git for Windows retains modes in the index, including links checked out as text.
@@ -124,10 +161,10 @@ const make = Effect.gen(function* make() {
         paths.sep === "\\" ? yield* git.indexMode(repo, path) : undefined;
 
       if (indexed === "120000") {
-        return {
+        return LiveEntry.make({
           buf: Bytes.concat([encodeUtf8("symlink -> "), buf, encodeUtf8("\n")]),
           mode: "link",
-        };
+        });
       }
 
       // Each of the last three octal digits is odd when its execute bit is set.
@@ -136,7 +173,7 @@ const make = Effect.gen(function* make() {
           ? /[1357]/u.test(st.mode.toString(8).slice(-3))
           : indexed === "100755";
 
-      return { buf, mode: executable ? "exec" : "file" };
+      return LiveEntry.make({ buf, mode: executable ? "exec" : "file" });
     },
     (effect, _repo, path) =>
       effect.pipe(

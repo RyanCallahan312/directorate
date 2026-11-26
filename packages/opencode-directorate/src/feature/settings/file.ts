@@ -4,6 +4,7 @@
 import { Schema } from "effect";
 
 import {
+  DEFAULT_MODE,
   ModeSchema,
   ReviewScopeSchema,
 } from "../../workflow/review/request.ts";
@@ -136,7 +137,7 @@ export const resolve = (
     budgetMinutes?: number | undefined;
   }
 ) => {
-  const mode = input.mode ?? s.mode ?? "default";
+  const mode = input.mode ?? s.mode ?? DEFAULT_MODE;
 
   const defaultPanel =
     (input.panel ?? s.panel?.enabled)

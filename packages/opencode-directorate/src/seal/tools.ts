@@ -10,7 +10,7 @@ import {
   strArr,
 } from "../platform/platform.ts";
 import type { DefineTool, Git } from "../platform/platform.ts";
-import type { Store } from "../records/records.ts";
+import type { Records } from "../records/records.ts";
 import { NotInSeal } from "./content.ts";
 import {
   coverageSummary,
@@ -24,13 +24,14 @@ import { done, Sessions, ToolCall } from "./sessions.ts";
 import {
   grepSealed,
   history,
+  HistoryKindSchema,
   listFiles,
   readLines,
   renderRegions,
 } from "./views.ts";
 
 export const readTools = (
-  tool: DefineTool<Sessions | Store | Git | FileSystem.FileSystem | Path.Path>
+  tool: DefineTool<Sessions | Records | Git | FileSystem.FileSystem | Path.Path>
 ) => {
   tool({
     description:
@@ -204,7 +205,7 @@ export const readTools = (
     files: (input) => [input.path],
     input: Schema.Struct({
       end: optional(positiveInt),
-      kind: Schema.Literals(["log", "blame", "show"]),
+      kind: HistoryKindSchema,
       limit: optional(positiveInt.check(Schema.isLessThanOrEqualTo(200))),
       path: optional(RepoPath),
       rev: optional(str),

@@ -4,7 +4,7 @@
 import { Match, Schema } from "effect";
 
 import type { Anchor } from "../../seal/region.ts";
-import { agentNamed, Compliance, Liaison } from "../agents/agent.ts";
+import { Compliance, Liaison } from "../agents/agent.ts";
 import type { Actor, Agent } from "../agents/agent.ts";
 import {
   Entry,
@@ -109,7 +109,7 @@ const liaisonReachError = (entry: Entry, claim: VerdictClaim) => {
     return `${entry.id} is ${entry.status}. Only ${Compliance.id} may re-decide a decided entry.`;
   }
 
-  if (agentNamed(entry.raisedBy.agent) === Liaison && affirms(claim)) {
+  if (entry.raisedBy.role === Liaison && affirms(claim)) {
     return `${entry.id} was raised by ${Liaison.id}; only ${Compliance.id} may ${claim.verdict === "resolved" ? "resolve" : "confirm"} it.`;
   }
 
@@ -184,7 +184,7 @@ export const verdictError = (
   claim: VerdictClaim,
   ledger: Ledger
 ) => {
-  const agent = agentNamed(by.agent);
+  const agent = by.role;
 
   if (!recordsVerdicts(agent)) {
     return `Only ${Liaison.id} or ${Compliance.id} may record verdicts (you are ${by.agent}).`;

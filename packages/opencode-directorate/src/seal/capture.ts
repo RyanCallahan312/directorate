@@ -1,20 +1,13 @@
 // Directorate capture: a target's diff, snapshot, and regions captured into a seal's generation, and the drift check that
 // tells whether the sealed code moved since.
-import {
-  Bytes,
-  Effect,
-  FileSystem,
-  Match,
-  Path,
-  Predicate,
-  Schema,
-} from "effect";
+import { Bytes, Effect, FileSystem, Path, Predicate, Schema } from "effect";
 
 import { exclusionReason, isSecret, scopeOf } from "../exclusions.ts";
 import { sha256 } from "../platform/hash.ts";
 import { Git, Worktree } from "../platform/platform.ts";
+import type { LiveEntry } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
-import { Store } from "../records/records.ts";
+import { Records } from "../records/records.ts";
 import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
 import type { Piece } from "./diff.ts";
 import { endsFingerprint } from "./ends.ts";
@@ -68,21 +61,6 @@ export const settled =
 
 const binary = (buf: Uint8Array) => buf.subarray(0, 8000).includes(0);
 
-interface Captured {
-  text: string;
-  files: readonly FileEntry[];
-  regions: readonly Region[];
-}
-
-const gitFileMode = Match.type<
-  "absent" | "link" | "exec" | "file" | "gitlink"
->().pipe(
-  Match.when("gitlink", () => "160000"),
-  Match.when("link", () => "120000"),
-  Match.when("exec", () => "100755"),
-  Match.orElse(() => "100644")
-);
-
 const rewriteDiffHeader = (line: string, from: string, to: string): string => {
   if (line.startsWith("--- ")) {
     return `--- ${from}`;
@@ -117,22 +95,26 @@ const diffModeLines = (
 };
 
 /** A path's bytes and git mode on one side of a change. */
-interface Version {
-  readonly buf: Uint8Array;
-  readonly mode: string;
-}
-
-/** Whether two versions match; a base symlink's blob is its bare link text. */
-const sameVersion = (old: Version | undefined, now: Version | undefined) =>
-  old === undefined || now === undefined
-    ? old === now
-    : old.mode === now.mode &&
+class Version extends Schema.Class<Version, { readonly brand: unique symbol }>(
+  "directorate/Version"
+)({ buf: Schema.Uint8Array, mode: Schema.String }) {
+  /** Whether `now` matches this base version; a base symlink's blob is its bare link text. */
+  matches(now: Version) {
+    return (
+      this.mode === now.mode &&
       Bytes.Equivalence(
-        old.buf,
-        old.mode === "120000"
+        this.buf,
+        this.mode === "120000"
           ? now.buf.subarray("symlink -> ".length, -1)
           : now.buf
-      );
+      )
+    );
+  }
+}
+
+/** Whether two versions, either of which may be absent, match. */
+const sameVersion = (old: Version | undefined, now: Version | undefined) =>
+  old === undefined || now === undefined ? old === now : old.matches(now);
 
 /** A path's git mode at the base, without reading it, or undefined when the base has no such entry. */
 const baseMode = Effect.fnUntraced(function* baseMode(
@@ -164,7 +146,7 @@ const baseVersion = Effect.fnUntraced(function* baseVersion(
 
   return mode === undefined || buf === undefined
     ? undefined
-    : ({ buf, mode } satisfies Version);
+    : Version.make({ buf, mode });
 });
 
 /**
@@ -253,13 +235,10 @@ const versionPatch = Effect.fn("Directorate.versionPatch")(
 );
 
 /** A captured worktree entry as a version, or undefined when absent. */
-const liveVersion = (e: {
-  readonly buf?: Uint8Array;
-  readonly mode: Parameters<typeof gitFileMode>[0];
-}) =>
+const liveVersion = (e: LiveEntry) =>
   e.buf === undefined
     ? undefined
-    : ({ buf: e.buf, mode: gitFileMode(e.mode) } satisfies Version);
+    : Version.make({ buf: e.buf, mode: e.gitMode });
 
 /** An untracked file as an addition or a net diff when it replaces a staged deletion. */
 const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
@@ -461,7 +440,7 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
           })
         ),
       text: "",
-    } satisfies Captured;
+    };
   }
 );
 
@@ -546,17 +525,10 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   const regions = yield* buildRegions(files, text);
 
   return {
-    files: files.map(
-      ({
-        hunks: _hunks,
-        patchStart: _patchStart,
-        patchEnd: _patchEnd,
-        ...file
-      }) => FileEntry.make(file)
-    ),
+    files: files.map((f) => f.entry),
     regions,
     text,
-  } satisfies Captured;
+  };
 });
 
 /** The seal's next generation, re-pinned to ends that moved; capture fills it. */
@@ -580,7 +552,7 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
   scope: readonly string[] | undefined,
   beforeCapture?: () => Effect.Effect<void>
 ) {
-  const store = yield* Store;
+  const store = yield* Records;
   const wt = yield* Worktree;
   const top = seal.repo;
   const worktree = seal.postImage === "worktree";
@@ -624,7 +596,7 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
 
   const sigs = worktree ? Object.fromEntries(signed) : undefined;
 
-  const { text, files, regions }: Captured =
+  const { text, files, regions } =
     seal.target.kind === "paths"
       ? yield* capturePaths(top, scope, new Set(changed))
       : yield* captureDiff(seal, scope, hidden, sigs);

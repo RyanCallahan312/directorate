@@ -17,7 +17,7 @@ import {
   str,
 } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
@@ -171,7 +171,7 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
 ) {
   const host = yield* Host;
   const sessions = yield* Sessions;
-  const store = yield* Store;
+  const store = yield* Records;
   const settings = yield* SettingsStore;
   const { pid } = yield* ProcessIdentity;
 

@@ -14,18 +14,16 @@ import {
 } from "effect";
 
 import {
-  ActorSchema,
-  agentNamed,
+  Actor,
   budgetLine,
-  childNamed,
+  dispatchableNamed,
   Liaison,
 } from "../feature/agents/agent.ts";
-import type { Actor } from "../feature/agents/agent.ts";
 import { outstandingDispatches } from "../feature/dispatch/lifecycle.ts";
 import type { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
-import { ActiveSeal, Store } from "../records/records.ts";
+import { ActiveSeal, Records } from "../records/records.ts";
 import { budget } from "../workflow/review/window.ts";
 import type { Seal } from "./record.ts";
 
@@ -87,7 +85,7 @@ export class ToolCall extends Schema.TaggedClass<
   ToolCall,
   { readonly brand: unique symbol }
 >()("ToolCall", {
-  actor: ActorSchema,
+  actor: Actor,
   callers: Schema.Literals(["participants", "owner"]).pipe(
     Schema.withConstructorDefault(Effect.succeed("participants" as const))
   ),
@@ -137,7 +135,7 @@ export class AutoReport extends Schema.TaggedClass<
 export class Takeover extends Schema.TaggedClass<
   Takeover,
   { readonly brand: unique symbol }
->()("Takeover", { actor: ActorSchema }) {}
+>()("Takeover", { actor: Actor }) {}
 
 const WriterSchema = Schema.Union([
   ToolCall,
@@ -185,7 +183,7 @@ const participant = (s: Seal, sessionID: string) =>
 
 const make = Effect.gen(function* make() {
   const host = yield* Host;
-  const store = yield* Store;
+  const store = yield* Records;
   const catalog = yield* ToolCatalog;
   /**
    * session -> seal id, for the Liaison and the Auditors/Seats/Compliance it dispatched. A cache: the Liaison's
@@ -285,7 +283,7 @@ const make = Effect.gen(function* make() {
         seal = yield* loadActive(yield* recordedSeal(child.parentID));
 
         // After takeover the host's parent link is unchanged, but the former Liaison no longer records this seal.
-        if (!seal && childNamed(child.agent)) {
+        if (!seal && dispatchableNamed(child.agent)) {
           seal = (yield* store.list()).find(
             (s) =>
               !s.reportedAt && s.children.some((ch) => ch.session === sessionID)
@@ -605,7 +603,7 @@ export const done = Effect.fnUntraced(function* done(
   return {
     content: seal.reportedAt
       ? text
-      : `${text}\n\n${yield* budgetLine(agentNamed(by?.agent) ?? Liaison, seal.window)}`,
+      : `${text}\n\n${yield* budgetLine(by?.role ?? Liaison, seal.window)}`,
   };
 });
 
@@ -622,7 +620,7 @@ export const openReview = <A, E, R>(
     R
   >
 ) =>
-  Effect.flatMap(Effect.service(Store), (store) =>
+  Effect.flatMap(Effect.service(Records), (store) =>
     store.create(
       id,
       attempt.pipe(

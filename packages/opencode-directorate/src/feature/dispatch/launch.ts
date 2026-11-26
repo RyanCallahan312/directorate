@@ -4,9 +4,13 @@ import { DateTime, Effect, Option, Predicate, Schema } from "effect";
 
 import { ignore } from "../../platform/error.ts";
 import { adapter, Host } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
-import { childNamed, Liaison, Seat as SeatAgent } from "../agents/agent.ts";
+import {
+  dispatchableNamed,
+  Liaison,
+  Seat as SeatAgent,
+} from "../agents/agent.ts";
 import {
   Completed,
   DispatchSchema,
@@ -69,8 +73,8 @@ const subagentOutcome = (
 export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
   const host = yield* Host;
   const sessions = yield* Sessions;
-  const store = yield* Store;
-  const { hook } = yield* adapter<Sessions | Store>();
+  const store = yield* Records;
+  const { hook } = yield* adapter<Sessions | Records>();
 
   // ---------- Auditors, Seats, and Compliance ----------
   // Launching: registered before the child runs, so a fast child is never missed. A completed child calling tools again
@@ -81,7 +85,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       if (ev.tool !== "subagent") {
         const id = yield* sessions.boundTo(ev.sessionID);
 
-        if (!id || !childNamed(ev.agent)) {
+        if (!id || !dispatchableNamed(ev.agent)) {
           return;
         }
 
@@ -153,7 +157,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             agent: assignment.agent,
             call: ev.id,
             description: model
-              ? `${assignment.description ?? "Directorate Seat"} · ${seatName(model)}`
+              ? `${assignment.description ?? SeatAgent.title} · ${seatName(model)}`
               : assignment.description,
             model: model ?? assignment.model,
             prompt: assignment.prompt ?? "",

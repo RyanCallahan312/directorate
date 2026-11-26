@@ -1,18 +1,17 @@
 // Directorate targets: what a review compares (a base and a post-image), resolved from the user's target and re-resolved later
 // to tell whether the sealed code moved.
-import { Effect, Schema } from "effect";
+import { Effect, Match, Schema } from "effect";
 
 import { scopeOf } from "../exclusions.ts";
 import { sha256 } from "../platform/hash.ts";
 import { Git, Worktree } from "../platform/platform.ts";
-import type {
-  GitFailed,
-  MissingHistory,
-  UnreadableFile,
-} from "../platform/platform.ts";
 import type { Seal } from "./record.ts";
-import { Target } from "./target.ts";
-import type { TargetKind } from "./target.ts";
+import {
+  PostImageSchema,
+  ResolvedKindSchema,
+  Target,
+  TargetKindSchema,
+} from "./target.ts";
 
 /** A review target that cannot be resolved to two ends to compare. */
 export class InvalidTarget extends Schema.TaggedError<
@@ -26,16 +25,21 @@ export class FreshnessUnchecked extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("FreshnessUnchecked", { message: Schema.String }) {}
 
-export interface Ends {
-  readonly kind: Exclude<TargetKind, "auto">;
-  readonly description: string;
-  readonly baseSha: string;
-  readonly headSha: string;
-  readonly baseTip?: string;
-  readonly postImage: "worktree" | "commit";
-  readonly scope?: readonly string[] | undefined;
-  readonly target: Target;
-}
+const opt = Schema.optional;
+
+/** A target resolved to the two ends a review compares, and how it describes them. */
+class Ends extends Schema.Class<Ends, { readonly brand: unique symbol }>(
+  "directorate/Ends"
+)({
+  baseSha: Schema.String,
+  baseTip: opt(Schema.String),
+  description: Schema.String,
+  headSha: Schema.String,
+  kind: ResolvedKindSchema,
+  postImage: PostImageSchema,
+  scope: opt(Schema.Array(Schema.String)),
+  target: Target,
+}) {}
 
 const localEnds = Effect.fnUntraced(function* localEnds(
   repo: string,
@@ -44,7 +48,7 @@ const localEnds = Effect.fnUntraced(function* localEnds(
   const git = yield* Git;
   const head = yield* git.head(repo);
 
-  return {
+  return Ends.make({
     baseSha: head,
     description: `local changes (staged, unstaged, untracked) vs HEAD ${head.slice(0, 10)}`,
     headSha: head,
@@ -52,7 +56,7 @@ const localEnds = Effect.fnUntraced(function* localEnds(
     postImage: "worktree",
     scope: scopeOf(target.paths),
     target,
-  } satisfies Ends;
+  });
 });
 
 const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
@@ -102,14 +106,14 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   }
 
   if (ahead) {
-    return {
+    return Ends.make({
       baseSha: mb,
       description: `branch ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${def}${dirty ? " plus local changes" : ""} (merge-base ${mb.slice(0, 10)} → working tree)`,
       headSha: head,
       kind: "local",
       postImage: "worktree",
       target: Target.make({ kind: "local" }),
-    } satisfies Ends;
+    });
   }
 
   return yield* localEnds(repo, Target.make({ kind: "local" }));
@@ -131,139 +135,136 @@ const prMergeBase = (
     })
   );
 
+/** The target kinds that take paths: a scoped working tree, or whole files. */
+const takesPaths = Schema.is(TargetKindSchema.pick(["local", "paths"]));
+
 const rejectsPaths = (target: Target) =>
-  target.paths?.length && target.kind !== "local" && target.kind !== "paths";
+  target.paths?.length && !takesPaths(target.kind);
+
+const pathsEnds = Effect.fnUntraced(function* pathsEnds(
+  repo: string,
+  target: Target
+) {
+  const head = yield* (yield* Git).head(repo);
+  const scope = scopeOf(target.paths);
+
+  return Ends.make({
+    baseSha: head,
+    description: `files under ${(scope ?? ["the whole repository"]).join(", ")} at HEAD ${head.slice(0, 10)} plus working-tree edits`,
+    headSha: head,
+    kind: "paths",
+    postImage: "worktree",
+    scope,
+    target,
+  });
+});
+
+const commitEnds = Effect.fnUntraced(function* commitEnds(
+  repo: string,
+  target: Target
+) {
+  const git = yield* Git;
+  const c = yield* git.revParse(repo, target.commit || target.head || "HEAD");
+  const parent = yield* git.parentOf(repo, c);
+
+  return Ends.make({
+    baseSha: parent,
+    description: `commit ${c.slice(0, 10)}`,
+    headSha: c,
+    kind: "commit",
+    postImage: "commit",
+    target: Target.make({ ...target, commit: c }),
+  });
+});
+
+const rangeEnds = Effect.fnUntraced(function* rangeEnds(
+  repo: string,
+  target: Target
+) {
+  if (!target.base) {
+    return yield* new InvalidTarget({
+      message:
+        "range target needs base (and optional head, default HEAD); base may be @default",
+    });
+  }
+
+  const git = yield* Git;
+
+  const base =
+    target.base === "@default" ? yield* git.defaultBranch(repo) : target.base;
+
+  const h = yield* git.revParse(repo, target.head || "HEAD");
+  const b = yield* git.revParse(repo, base);
+
+  const mb = yield* git.mergeBase(repo, b, h, {
+    base,
+    head: target.head || "HEAD",
+  });
+
+  return Ends.make({
+    baseSha: mb,
+    description: `${base}...${target.head || "HEAD"} (merge-base ${mb.slice(0, 10)} → ${h.slice(0, 10)})`,
+    headSha: h,
+    kind: "range",
+    postImage: "commit",
+    target: Target.make({ ...target, base }),
+  });
+});
+
+const prEnds = Effect.fnUntraced(function* prEnds(
+  repo: string,
+  target: Target
+) {
+  if (!target.pr) {
+    return yield* new InvalidTarget({
+      message: "pr target needs pr (number or URL)",
+    });
+  }
+
+  const m = yield* (yield* Git).pr(repo, target.pr);
+
+  if (!m.headFetched) {
+    return yield* new InvalidTarget({
+      message: `Head commit ${m.headRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin pull/${m.number}/head\`, then seal again.`,
+    });
+  }
+
+  if (!m.baseFetched) {
+    return yield* new InvalidTarget({
+      message: `Base commit ${m.baseRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin ${m.baseRefName}\`, then seal again.`,
+    });
+  }
+
+  const mb = yield* prMergeBase(repo, m);
+
+  return Ends.make({
+    baseSha: mb,
+    baseTip: m.baseRefOid,
+    description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${mb.slice(0, 10)} → ${m.headRefOid.slice(0, 10)}) ${m.url}`,
+    headSha: m.headRefOid,
+    kind: "pr",
+    postImage: "commit",
+    target,
+  });
+});
 
 export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
-  function* resolveTarget(
-    repo: string,
-    target: Target
-  ): Effect.fn.Return<
-    Ends,
-    InvalidTarget | GitFailed | MissingHistory | UnreadableFile,
-    Git
-  > {
-    const git = yield* Git;
-
+  function* resolveTarget(repo: string, target: Target) {
     if (rejectsPaths(target)) {
       return yield* new InvalidTarget({
         message: `The ${target.kind} target does not support paths. Use local for scoped working-tree changes or paths for whole files.`,
       });
     }
 
-    switch (target.kind) {
-      case "auto": {
-        return yield* autoEnds(repo);
-      }
-
-      case "local": {
-        return yield* localEnds(repo, target);
-      }
-
-      case "paths": {
-        const head = yield* git.head(repo);
-        const scope = scopeOf(target.paths);
-
-        return {
-          baseSha: head,
-          description: `files under ${(scope ?? ["the whole repository"]).join(", ")} at HEAD ${head.slice(0, 10)} plus working-tree edits`,
-          headSha: head,
-          kind: "paths",
-          postImage: "worktree",
-          scope,
-          target,
-        };
-      }
-
-      case "commit": {
-        const c = yield* git.revParse(
-          repo,
-          target.commit || target.head || "HEAD"
-        );
-
-        const parent = yield* git.parentOf(repo, c);
-
-        return {
-          baseSha: parent,
-          description: `commit ${c.slice(0, 10)}`,
-          headSha: c,
-          kind: "commit",
-          postImage: "commit",
-          target: Target.make({ ...target, commit: c }),
-        };
-      }
-
-      case "range": {
-        if (!target.base) {
-          return yield* new InvalidTarget({
-            message:
-              "range target needs base (and optional head, default HEAD); base may be @default",
-          });
-        }
-
-        const base =
-          target.base === "@default"
-            ? yield* git.defaultBranch(repo)
-            : target.base;
-
-        const h = yield* git.revParse(repo, target.head || "HEAD");
-        const b = yield* git.revParse(repo, base);
-
-        const mb = yield* git.mergeBase(repo, b, h, {
-          base,
-          head: target.head || "HEAD",
-        });
-
-        return {
-          baseSha: mb,
-          description: `${base}...${target.head || "HEAD"} (merge-base ${mb.slice(0, 10)} → ${h.slice(0, 10)})`,
-          headSha: h,
-          kind: "range",
-          postImage: "commit",
-          target: Target.make({ ...target, base }),
-        };
-      }
-
-      case "pr": {
-        if (!target.pr) {
-          return yield* new InvalidTarget({
-            message: "pr target needs pr (number or URL)",
-          });
-        }
-
-        const m = yield* git.pr(repo, target.pr);
-
-        if (!m.headFetched) {
-          return yield* new InvalidTarget({
-            message: `Head commit ${m.headRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin pull/${m.number}/head\`, then seal again.`,
-          });
-        }
-
-        if (!m.baseFetched) {
-          return yield* new InvalidTarget({
-            message: `Base commit ${m.baseRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin ${m.baseRefName}\`, then seal again.`,
-          });
-        }
-
-        const mb = yield* prMergeBase(repo, m);
-
-        return {
-          baseSha: mb,
-          baseTip: m.baseRefOid,
-          description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${mb.slice(0, 10)} → ${m.headRefOid.slice(0, 10)}) ${m.url}`,
-          headSha: m.headRefOid,
-          kind: "pr",
-          postImage: "commit",
-          target,
-        };
-      }
-
-      default: {
-        return yield* new InvalidTarget({
-          message: `Unsupported review target: ${String(target.kind)}`,
-        });
-      }
-    }
+    return yield* Match.value(target.kind).pipe(
+      Match.when("auto", () => autoEnds(repo)),
+      Match.when("local", () => localEnds(repo, target)),
+      Match.when("paths", () => pathsEnds(repo, target)),
+      Match.when("commit", () => commitEnds(repo, target)),
+      Match.when("range", () => rangeEnds(repo, target)),
+      Match.when("pr", () => prEnds(repo, target)),
+      Match.exhaustive
+    );
   }
 );
 
@@ -279,13 +280,17 @@ export const endsFingerprint = (
     ? Worktree.use((wt) => wt.fingerprint(repo, e.baseSha, e.scope))
     : commitPrint(e.baseSha, e.headSha);
 
-export interface Current {
-  readonly fingerprint: string;
-  readonly baseSha: string;
-  readonly headSha: string;
-  readonly baseTip?: string;
-  readonly unfetched?: string;
-}
+/** A sealed target's ends as they are now, and their fingerprint; `unfetched` when the PR head moved out of reach. */
+export class Current extends Schema.Class<
+  Current,
+  { readonly brand: unique symbol }
+>("directorate/Current")({
+  baseSha: Schema.String,
+  baseTip: opt(Schema.String),
+  fingerprint: Schema.String,
+  headSha: Schema.String,
+  unfetched: opt(Schema.String),
+}) {}
 
 /** Current ends for a sealed target (re-resolving moving refs) and its fingerprint. */
 const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
@@ -294,7 +299,7 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
   const t = seal.target;
 
   if (seal.postImage === "worktree") {
-    return {
+    return Current.make({
       baseSha: seal.baseSha,
       fingerprint: yield* endsFingerprint(seal.repo, {
         baseSha: seal.baseSha,
@@ -303,20 +308,20 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
         scope: scopeOf(t.paths),
       }),
       headSha: seal.headSha,
-    } satisfies Current;
+    });
   }
 
   if (t.kind === "pr" && t.pr) {
     const m = yield* (yield* Git).pr(seal.repo, t.pr);
 
     if (!m.headFetched) {
-      return {
+      return Current.make({
         baseSha: seal.baseSha,
         baseTip: m.baseRefOid,
         fingerprint: yield* commitPrint("?", m.headRefOid),
         headSha: m.headRefOid,
         unfetched: `PR head moved to ${m.headRefOid.slice(0, 10)} (not fetched)`,
-      } satisfies Current;
+      });
     }
 
     // An unfetched base still verifies when neither end moved since sealing.
@@ -333,22 +338,22 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
       ? yield* prMergeBase(seal.repo, m)
       : seal.baseSha;
 
-    return {
+    return Current.make({
       baseSha,
       baseTip: m.baseRefOid,
       fingerprint: yield* commitPrint(baseSha, m.headRefOid),
       headSha: m.headRefOid,
-    } satisfies Current;
+    });
   }
 
   // A commit is fixed; a range re-resolves its refs.
   const e = t.kind === "range" ? yield* resolveEnds(seal.repo, t) : seal;
 
-  return {
+  return Current.make({
     baseSha: e.baseSha,
     fingerprint: yield* commitPrint(e.baseSha, e.headSha),
     headSha: e.headSha,
-  } satisfies Current;
+  });
 });
 
 /** The sealed target's current ends, bounded in time. */

@@ -1,16 +1,23 @@
 // Directorate coverage: which regions the Liaison and each reader have read, and the dispositions recorded for the rest.
+import { Schema } from "effect";
+
+import { Count } from "../platform/stored.ts";
 import type { Seal } from "./record.ts";
 import type { Disposition, Region } from "./region.ts";
 
 const CHUNK_MAX_LINES = 600;
 
 /** How a region was shown to a reader: complete, or where the next call continues. */
-export interface Shown {
-  id: string;
-  complete: boolean;
-  next: number;
-  missing?: boolean;
-}
+export class Shown extends Schema.Class<
+  Shown,
+  { readonly brand: unique symbol }
+>("directorate/Shown")({
+  complete: Schema.Boolean,
+  id: Schema.String,
+  /** Its content was unavailable at the seal: it is not counted as read. */
+  missing: Schema.optionalKey(Schema.Boolean),
+  next: Count,
+}) {}
 
 const regionSize = (r: Region) =>
   r.patchStart === 0

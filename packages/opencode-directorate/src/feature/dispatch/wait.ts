@@ -5,7 +5,7 @@ import type { FileSystem, Path } from "effect";
 
 import { actor, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, Sessions, ToolCall } from "../../seal/seal.ts";
 import { budget } from "../../workflow/review/window.ts";
@@ -18,13 +18,13 @@ import {
 import type { Dispatch } from "./lifecycle.ts";
 
 export const waitTool = (
-  tool: DefineTool<Sessions | Store | FileSystem.FileSystem | Path.Path>
+  tool: DefineTool<Sessions | Records | FileSystem.FileSystem | Path.Path>
 ) => {
   tool({
     description:
       "Wait, without ending your turn, until one of this review's Auditor, Seat, or Compliance runs finishes or the budget phase changes. Returns who finished, the entries and verdicts each recorded, and who is still running; their handoffs follow as subagent messages. Call it whenever you would otherwise end your turn while they run.",
     *execute(input, c) {
-      const store = yield* Store;
+      const store = yield* Records;
 
       const start = yield* (yield* Sessions).read(
         input.seal,

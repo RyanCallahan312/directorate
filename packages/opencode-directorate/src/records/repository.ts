@@ -334,9 +334,9 @@ const make = Effect.gen(function* make() {
   };
 });
 
-export class Store extends Context.Service<
-  Store,
+export class Records extends Context.Service<
+  Records,
   Effect.Success<typeof make>
 >()("directorate/Store") {
-  static readonly layer = Layer.effect(Store, make);
+  static readonly layer = Layer.effect(Records, make);
 }

@@ -7,7 +7,12 @@ import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
 import { budget } from "../../workflow/review/window.ts";
-import { agentNamed, budgetNotice, childNamed, Liaison } from "./agent.ts";
+import {
+  agentNamed,
+  budgetNotice,
+  dispatchableNamed,
+  Liaison,
+} from "./agent.ts";
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
 const LIAISON_ONLY =
@@ -75,7 +80,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
       const target = String(event.resources?.[0] ?? "");
 
       const child =
-        event.action === "subagent" ? childNamed(target) : undefined;
+        event.action === "subagent" ? dispatchableNamed(target) : undefined;
 
       const covered =
         event.action === "subagent"

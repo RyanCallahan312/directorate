@@ -19,17 +19,38 @@ import type { Ledger } from "../ledger/entry.ts";
 const list = Schema.Array;
 const opt = Schema.optional;
 
-/** Each gate remembers what it already pushed back on; it fires again only for something new. */
-const GatesSchema = Schema.Struct({
+/** The gates that remember each gap (by id) they pushed back on; Containment Drift remembers a fingerprint instead. */
+export const GapGateSchema = Schema.Literals([
+  "children",
+  "coverage",
+  "open",
+  "panel",
+]);
+
+export type GapGate = typeof GapGateSchema.Type;
+
+const gatesFields = {
   children: opt(orLegacyTrue(list(Schema.String), [])),
   coverage: opt(orLegacyTrue(list(Schema.String), [])),
   // A legacy `true` matched no fingerprint, so it decodes to one that matches none.
   freshness: opt(orLegacyTrue(Schema.String, "")),
   open: opt(orLegacyTrue(list(Schema.String), [])),
   panel: opt(list(Schema.String)),
-});
+} satisfies Record<GapGate | "freshness", Schema.Top>;
 
-export type Gates = typeof GatesSchema.Type;
+/** What the gates remember: a gap gate's ids, or Containment Drift's fingerprint. */
+export type Remembered = Partial<Schema.Struct.Type<typeof gatesFields>>;
+
+/** Each gate remembers what it already pushed back on; it fires again only for something new. */
+export class Gates extends Schema.Class<
+  Gates,
+  { readonly brand: unique symbol }
+>("directorate/Gates")(gatesFields) {
+  /** These gates, also remembering `remembered`. */
+  remembering(remembered: Remembered) {
+    return new Gates({ ...this, ...remembered });
+  }
+}
 
 /** A Directive's status: complete, partial (something went unreviewed or undecided), or stale (the code moved). */
 export const DirectiveStatusSchema = Schema.Literals([
@@ -40,37 +61,41 @@ export const DirectiveStatusSchema = Schema.Literals([
 
 export type DirectiveStatus = typeof DirectiveStatusSchema.Type;
 
-/** A filed Directive's status and the reasons for it. */
-const DirectiveSchema = Schema.Struct({
+/** A Directive's status and the reasons for it: assessed at filing, and stored on the reported seal. */
+export class Directive extends Schema.Class<
+  Directive,
+  { readonly brand: unique symbol }
+>("directorate/Directive")({
   reasons: list(Schema.String),
   status: DirectiveStatusSchema,
-});
-
-type Directive = typeof DirectiveSchema.Type;
+}) {}
 
 /** The Protocol & Directive field group of seal.json. */
 export const Protocol = Schema.Struct({
   autoReported: opt(Schema.Boolean),
   /** What the reported Directive stated, so a ship reads it from the seal; seals reported by older versions omit it. */
-  directive: opt(DirectiveSchema),
+  directive: opt(Directive),
   freshnessUnverified: opt(Schema.String),
-  gates: since(GatesSchema, {}),
+  gates: since(Gates, {}),
   reportedAt: opt(Time),
   staleFiles: opt(list(Schema.String)),
 });
 
-export interface Freshness {
-  stale?: readonly string[] | undefined;
-  unverified?: string | undefined;
-}
+/** What the freshness check at filing found: the files that changed since the seal, or why it could not tell. */
+export const FreshnessSchema = Schema.Struct({
+  stale: opt(list(Schema.String)),
+  unverified: opt(Schema.String),
+});
+
+export type Freshness = typeof FreshnessSchema.Type;
 
 /** A gate pushed back: it remembers what it pushed back on, so it fires again only for something new. */
-export const pushedBack = (seal: Seal, gates: Gates) =>
-  seal.withProtocol({ gates: { ...seal.gates, ...gates } });
+export const pushedBack = (seal: Seal, remembered: Remembered) =>
+  seal.withProtocol({ gates: seal.gates.remembering(remembered) });
 
 /** A refreshed seal: the gates start over and the drift is gone. */
 export const driftCleared = (seal: Seal) =>
-  seal.withProtocol({ gates: {}, staleFiles: undefined });
+  seal.withProtocol({ gates: Gates.make({}), staleFiles: undefined });
 
 /** What the freshness check at filing found. */
 export const freshnessChecked = (seal: Seal, fresh: Freshness) =>
@@ -92,42 +117,23 @@ export const directiveFiled = (
     reportedAt: at,
   });
 
-/** Status and reasons from everything except gates. */
-interface Assessment {
-  status: DirectiveStatus;
-  reasons: string[];
-}
+/** Stale when the code moved, whatever else went missing; otherwise partial when anything did. */
+const directiveStatus = (fresh: Freshness, partial: boolean) => {
+  if (fresh.stale) {
+    return "stale";
+  }
 
+  return partial ? "partial" : "complete";
+};
+
+/** The Directive from everything except gates: its status, and the reasons in the order they are read. */
 export const assess = (
   seal: Seal,
   ledger: Ledger,
   fresh: Freshness,
   phase: Phase
-): Assessment => {
-  const reasons: string[] = [];
-  let status: DirectiveStatus = "complete";
-
-  const partial = (why: string) => {
-    if (status === "complete") {
-      status = "partial";
-    }
-
-    reasons.push(why);
-  };
-
+) => {
   const cov = coverageSummary(seal);
-
-  if (cov.unread.length) {
-    partial(`${cov.unread.length} regions unread`);
-  }
-
-  if (cov.skipped.length) {
-    partial(`${cov.skipped.length} regions skipped`);
-  }
-
-  if (cov.skimmed.length) {
-    partial(`${cov.skimmed.length} regions only skimmed`);
-  }
 
   const secrets = seal.files.filter(
     (f) =>
@@ -136,52 +142,51 @@ export const assess = (
       (isSecret(f.path) || (f.oldPath !== undefined && isSecret(f.oldPath)))
   );
 
-  if (secrets.length) {
-    partial(
-      `${secrets.length} changed secret-like file${secrets.length === 1 ? " was" : "s were"} withheld and not reviewed`
-    );
-  }
-
   const leads = unresolved(ledger).length;
-
-  if (leads) {
-    partial(`${leads} leads unverified`);
-  }
-
-  if (
-    ledger.notes.some((n) => n.kind === "unanswered") ||
-    failedDispatches(seal, ledger).length ||
-    outstandingDispatches(seal).length
-  ) {
-    partial("some questions went unanswered");
-  }
-
   const seatless = missingSeats(seal);
 
-  if (seatless.length) {
-    partial(
-      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`
-    );
-  }
+  /** Each reason, and whether it makes the Directive partial. */
+  const found = [
+    [cov.unread.length > 0, `${cov.unread.length} regions unread`, true],
+    [cov.skipped.length > 0, `${cov.skipped.length} regions skipped`, true],
+    [
+      cov.skimmed.length > 0,
+      `${cov.skimmed.length} regions only skimmed`,
+      true,
+    ],
+    [
+      secrets.length > 0,
+      `${secrets.length} changed secret-like file${secrets.length === 1 ? " was" : "s were"} withheld and not reviewed`,
+      true,
+    ],
+    [leads > 0, `${leads} leads unverified`, true],
+    [
+      ledger.notes.some((n) => n.kind === "unanswered") ||
+        failedDispatches(seal, ledger).length > 0 ||
+        outstandingDispatches(seal).length > 0,
+      "some questions went unanswered",
+      true,
+    ],
+    [
+      seatless.length > 0,
+      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`,
+      true,
+    ],
+    [Boolean(fresh.unverified), "freshness could not be verified", true],
+    [
+      fresh.stale !== undefined,
+      `code changed after the seal (${fresh.stale?.length} ${fresh.stale?.length === 1 ? "change" : "changes"})`,
+      false,
+    ],
+    [phase === "locked", "time budget ran out", false],
+    [Boolean(seal.abandoned), "abandoned for a new review", true],
+  ] as const;
 
-  if (fresh.unverified) {
-    partial("freshness could not be verified");
-  }
-
-  if (fresh.stale) {
-    status = "stale";
-    reasons.push(
-      `code changed after the seal (${fresh.stale.length} ${fresh.stale.length === 1 ? "change" : "changes"})`
-    );
-  }
-
-  if (phase === "locked") {
-    reasons.push("time budget ran out");
-  }
-
-  if (seal.abandoned) {
-    partial("abandoned for a new review");
-  }
-
-  return { reasons, status };
+  return Directive.make({
+    reasons: found.flatMap(([holds, why]) => (holds ? [why] : [])),
+    status: directiveStatus(
+      fresh,
+      found.some(([holds, , partial]) => holds && partial)
+    ),
+  });
 };

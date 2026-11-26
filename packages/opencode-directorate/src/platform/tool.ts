@@ -13,8 +13,7 @@ import {
   Schema,
 } from "effect";
 
-import { Agent, agentNamed } from "../feature/agents/agent.ts";
-import type { Actor } from "../feature/agents/agent.ts";
+import { Actor, Agent, agentNamed } from "../feature/agents/agent.ts";
 import { recover } from "./error.ts";
 import { Host } from "./host.ts";
 
@@ -99,10 +98,9 @@ export const strArr = Schema.Array(str);
 export const optional = Schema.optionalKey;
 export const positiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
-export const actor = (c: Tool.Context): Actor => ({
-  agent: c.agent,
-  session: c.sessionID,
-});
+/** Who makes a tool call, decoded once from the host's tool context. */
+export const actor = (c: Tool.Context) =>
+  Actor.make({ agent: c.agent, session: c.sessionID });
 
 const toolError = (error: Error) =>
   error instanceof Tool.Error

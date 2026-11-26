@@ -25,8 +25,7 @@ import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { isSecret } from "../src/exclusions.ts";
-import { agentOf, budgetLine } from "../src/feature/agents/agent.ts";
-import type { Actor } from "../src/feature/agents/agent.ts";
+import { Actor, agentOf, budgetLine } from "../src/feature/agents/agent.ts";
 import {
   Completed,
   Failed,
@@ -47,7 +46,7 @@ import {
   Note,
   Verdict,
 } from "../src/feature/ledger/entry.ts";
-import { assess } from "../src/feature/report/directive.ts";
+import { assess, Gates } from "../src/feature/report/directive.ts";
 import { renderReport } from "../src/feature/report/render.ts";
 import { finalize } from "../src/feature/report/report.ts";
 import { SettingsStore } from "../src/feature/settings/settings.ts";
@@ -55,7 +54,7 @@ import { platformLayer } from "../src/index.ts";
 import type { Platform } from "../src/index.ts";
 import { command } from "../src/platform/command.ts";
 import { Git } from "../src/platform/git.ts";
-import { StateRoot, Store } from "../src/records/records.ts";
+import { StateRoot, Records } from "../src/records/records.ts";
 import {
   checkEvidence,
   checkQuote,
@@ -67,6 +66,7 @@ import {
   coverageSummary,
   dispose,
   markShown,
+  Shown,
   nextRegions,
 } from "../src/seal/coverage.ts";
 import { assemble, buildRegions, RawDiff } from "../src/seal/diff.ts";
@@ -133,7 +133,7 @@ const withGh = (script: string) => {
 };
 
 // The seal store, as the tests reach it.
-const store = Effect.service(Store);
+const store = Effect.service(Records);
 const diffFile = (s: Seal) => store.pipe(Effect.map((st) => st.diffFile(s)));
 
 const loadSeal = (id: string) =>
@@ -354,9 +354,13 @@ const makeExecutable = (dir: string, file: string) => {
   }
 };
 
-const scout = { agent: "directorate_auditor", session: "s-scout" };
-const lead = { agent: "directorate_liaison", session: "s-lead" };
-const refuter = { agent: "directorate_compliance", session: "s-ref" };
+const scout = Actor.make({ agent: "directorate_auditor", session: "s-scout" });
+const lead = Actor.make({ agent: "directorate_liaison", session: "s-lead" });
+
+const refuter = Actor.make({
+  agent: "directorate_compliance",
+  session: "s-ref",
+});
 
 const local = async (dir: string, mode: Mode = "default") =>
   await run(
@@ -1486,13 +1490,13 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
   );
   assert.deepEqual(
     loaded.gates,
-    { children: [], coverage: [], freshness: "", open: [] },
+    Gates.make({ children: [], coverage: [], freshness: "", open: [] }),
     "a legacy true gate matches nothing new"
   );
   await run(store.pipe(Effect.flatMap((st) => st.save(loaded))));
   assert.deepEqual(
     JSON.parse(readFileSync(file, "utf-8")).gates,
-    loaded.gates,
+    { ...loaded.gates },
     "saved in the current format"
   );
 
@@ -1516,7 +1520,7 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
   );
   unlinkSync(join(state, seal.id, "ledger.json"));
   await assert.rejects(
-    run(Store.use((st) => st.loadLedger(seal.id, { required: true }))),
+    run(Records.use((st) => st.loadLedger(seal.id, { required: true }))),
     /ledger .* missing/u
   );
 });
@@ -1739,7 +1743,7 @@ test("coverage: size-charged chunks, per-chunk line ranges, owner reads, explici
       [1200, 1200],
     ]
   );
-  const R1 = [{ complete: true, id: "R1", next: 0 }];
+  const R1 = [Shown.make({ complete: true, id: "R1", next: 0 })];
   const scouted = markShown(l, R1, { key: "s-scout", owner: false });
   assert.equal(
     coverageSummary(scouted).unread.length,
@@ -1788,7 +1792,7 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
   write(dir, "src/math.ts", `${MATH}// tail\n`);
   const seal = await local(dir);
   const { text, shown } = await run(renderRegions(seal, seal.regions));
-  assert.deepEqual(shown, [{ complete: true, id: "R1", next: 0 }]);
+  assert.deepEqual(shown, [Shown.make({ complete: true, id: "R1", next: 0 })]);
   assert.match(text, /^\s+4 \+\/\/ tail$/mu);
   assert.match(text, /^\s+2\s+2\s+return a \/ b$/mu);
 
@@ -2088,7 +2092,11 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
     extra: Partial<Verdict> = {}
   ) => verdictError(e, by, { evidence: ["a:1"], verdict, ...extra }, ledger);
 
-  const lead2 = { agent: "directorate_liaison", session: "s-other" };
+  const lead2 = Actor.make({
+    agent: "directorate_liaison",
+    session: "s-other",
+  });
+
   assert.equal(v(F1, lead, "confirmed"), undefined);
   assert.match(
     v(F1, lead, "confirmed", { severity: "important" }) ?? "",
@@ -2227,7 +2235,7 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
     description: "d",
     files: [],
     fingerprint: "f",
-    gates: {},
+    gates: Gates.make({}),
     gen: 0,
     headSha: "head",
     id: "x",
@@ -3157,7 +3165,7 @@ test("interrupting a mutation releases its lock", async () => {
   await run(
     Effect.gen(function* interruptLock() {
       const locked = yield* Deferred.make<boolean>();
-      const st = yield* Store;
+      const st = yield* Records;
 
       const first = yield* st
         .withLock(
@@ -3246,8 +3254,8 @@ test("concurrent takeovers of an orphaned mutation lock admit one writer at a ti
 
   await run(
     Effect.gen(function* takeOvers() {
-      const st = yield* Store.pipe(
-        Effect.provide(Layer.fresh(Store.layer)),
+      const st = yield* Records.pipe(
+        Effect.provide(Layer.fresh(Records.layer)),
         Effect.provideService(FileSystem.FileSystem, yield* slowRenames)
       );
 
@@ -3281,8 +3289,8 @@ test("mutation lock excludes a separate process", async () => {
         `
     import { Effect } from "effect"
     import { platformLayer } from "./src/index.ts"
-    import { Store } from "./src/records/records.ts"
-    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Store), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
+    import { Records } from "./src/records/records.ts"
+    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Records), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
       Effect.timeoutOrElse({ duration: ${ms}, orElse: () => Effect.succeed("waiting") }),
       Effect.provide(platformLayer),
     )))
@@ -3727,7 +3735,7 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     description: "d",
     files: [],
     fingerprint: "f",
-    gates: {},
+    gates: Gates.make({}),
     gen: 0,
     headSha: "head",
     id: "directorate-20260101000000-bbbbbb",

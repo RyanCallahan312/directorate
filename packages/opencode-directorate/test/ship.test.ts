@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { DateTime } from "effect";
 
-import { Seat } from "../src/feature/agents/agent.ts";
+import { Actor, Seat } from "../src/feature/agents/agent.ts";
 import { Completed } from "../src/feature/dispatch/lifecycle.ts";
 import {
   Carried,
@@ -11,6 +11,7 @@ import {
   Ledger,
   Verdict,
 } from "../src/feature/ledger/entry.ts";
+import { Directive, Gates } from "../src/feature/report/directive.ts";
 import { Seal } from "../src/seal/record.ts";
 import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
 import { Target } from "../src/seal/target.ts";
@@ -33,7 +34,7 @@ const seal = Seal.make({
   deadline: DateTime.makeUnsafe(20 * 60_000),
   deleted: [],
   description: "working tree changes",
-  directive: { reasons: [], status: "complete" },
+  directive: Directive.make({ reasons: [], status: "complete" }),
   files: [
     FileEntry.make({
       added: 1,
@@ -43,7 +44,7 @@ const seal = Seal.make({
     }),
   ],
   fingerprint: "original",
-  gates: {},
+  gates: Gates.make({}),
   gen: 0,
   headSha: "head",
   id: "directorate-example",
@@ -84,7 +85,7 @@ const entry = (id: string, overrides: Partial<Entry> = {}) =>
     kind: "defect",
     lens: "correctness",
     quote: "return value",
-    raisedBy: { agent: seal.owner, session: seal.ownerSession },
+    raisedBy: Actor.make({ agent: seal.owner, session: seal.ownerSession }),
     severity: "minor",
     status: "confirmed",
     title: `Title for ${id}`,
@@ -259,7 +260,10 @@ test("missing panel Seats require a new panel review even with drift or confirme
 
   const panelSeal = Seal.make({
     ...seal,
-    directive: { reasons: ["a Seat never launched"], status: "partial" },
+    directive: Directive.make({
+      reasons: ["a Seat never launched"],
+      status: "partial",
+    }),
     panel: [model],
   });
 
@@ -435,8 +439,8 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
   });
 
   for (const directive of [
-    { reasons: ["2 regions unread"], status: "partial" },
-    { reasons: ["freshness uncertain"], status: "stale" },
+    Directive.make({ reasons: ["2 regions unread"], status: "partial" }),
+    Directive.make({ reasons: ["freshness uncertain"], status: "stale" }),
     undefined,
     seal.directive,
   ] as const) {
@@ -489,7 +493,10 @@ test("only complete and fresh reports without confirmed findings or unresolved l
   for (const status of ["stale", "partial"] as const) {
     const incomplete = decideShip(state, {
       ...reported,
-      seal: Seal.make({ ...seal, directive: { reasons: [], status } }),
+      seal: Seal.make({
+        ...seal,
+        directive: Directive.make({ reasons: [], status }),
+      }),
     });
 
     assert.equal(incomplete.step, "finish");

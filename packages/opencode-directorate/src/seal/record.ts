@@ -6,7 +6,7 @@ import { Schema } from "effect";
 
 import { DispatchFromStored } from "../feature/dispatch/lifecycle.ts";
 import type { Dispatch } from "../feature/dispatch/lifecycle.ts";
-import { Protocol } from "../feature/report/directive.ts";
+import { Gates, Protocol } from "../feature/report/directive.ts";
 import { Count, since, sortedFields } from "../platform/stored.ts";
 import { Custody } from "../workflow/review/custody.ts";
 import { ModeSchema } from "../workflow/review/request.ts";
@@ -16,7 +16,7 @@ import {
   windowCheck,
 } from "../workflow/review/window.ts";
 import { FileEntry, Region } from "./region.ts";
-import { Target } from "./target.ts";
+import { PostImageSchema, Target } from "./target.ts";
 
 const list = Schema.Array;
 const opt = Schema.optional;
@@ -37,7 +37,7 @@ export const Containment = Schema.Struct({
   mode: ModeSchema,
   /** A panel review's Directorate Seats: one model per seat. */
   panel: opt(list(Schema.String)),
-  postImage: Schema.Literals(["worktree", "commit"]),
+  postImage: PostImageSchema,
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
   recheckOf: opt(Schema.String),
@@ -87,7 +87,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
       deleted: [],
       files: [],
       fingerprint: "",
-      gates: {},
+      gates: Gates.make({}),
       gen: 0,
       refreshes: 0,
       regions: [],

@@ -1,11 +1,11 @@
 // Directorate views of a seal: diff regions with line numbers, file reads, search, listings, and history, each paged to fit one
 // tool result.
-import { Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 
 import { inScope, isSecret, scopeOf } from "../exclusions.ts";
 import { Git } from "../platform/platform.ts";
 import { encodeUtf8 } from "../platform/utf8.ts";
-import { Store } from "../records/records.ts";
+import { Records } from "../records/records.ts";
 import {
   inDependencyDir,
   installed,
@@ -16,7 +16,7 @@ import {
   sealedFile,
   Withheld,
 } from "./content.ts";
-import type { Shown } from "./coverage.ts";
+import { Shown } from "./coverage.ts";
 import type { Seal } from "./record.ts";
 import type { Region, Side } from "./region.ts";
 
@@ -226,9 +226,9 @@ export const renderRegions = Effect.fn("Directorate.renderRegions")(
     regions: readonly Region[],
     reader = "owner"
   ) {
-    const lines = (yield* (yield* Store).readDiff(seal)).split("\n");
+    const lines = (yield* (yield* Records).readDiff(seal)).split("\n");
     const parts: string[] = [];
-    const shown: Shown[] = [];
+    const shown = Array.of<Shown>();
     const page = outputPage();
 
     for (const r of regions) {
@@ -247,7 +247,9 @@ export const renderRegions = Effect.fn("Directorate.renderRegions")(
 
         page.take(note);
         parts.push(`${title}\n${note}`);
-        shown.push({ complete: false, id: r.id, missing: true, next: 0 });
+        shown.push(
+          Shown.make({ complete: false, id: r.id, missing: true, next: 0 })
+        );
         continue;
       }
 
@@ -274,7 +276,7 @@ export const renderRegions = Effect.fn("Directorate.renderRegions")(
       parts.push(
         `${title}${from ? ` (continued from body line ${from + 1})` : ""}\n${out.join("\n")}${complete ? "" : `\n[${r.id} continues: ${body.length - i} more lines; call directorate_diff again]`}`
       );
-      shown.push({ complete, id: r.id, next: complete ? 0 : i });
+      shown.push(Shown.make({ complete, id: r.id, next: complete ? 0 : i }));
 
       if (!complete) {
         break;
@@ -609,10 +611,15 @@ const historyShow = Effect.fnUntraced(function* historyShow(
     .join("\n");
 });
 
+/** What directorate_history shows: a log, a blame, or one commit. */
+export const HistoryKindSchema = Schema.Literals(["log", "blame", "show"]);
+
+export type HistoryKind = typeof HistoryKindSchema.Type;
+
 export const history = Effect.fn("Directorate.history")(function* history(
   seal: Seal,
   input: {
-    kind: "log" | "blame" | "show";
+    kind: HistoryKind;
     path?: string;
     rev?: string;
     start?: number;
@@ -653,39 +660,43 @@ export const history = Effect.fn("Directorate.history")(function* history(
     return "(no committed history)";
   }
 
-  let out: string;
-
-  if (input.kind === "log") {
-    out = yield* git.run(
-      seal.repo,
-      [
-        "log",
-        "--no-color",
-        "--no-ext-diff",
-        "--date=short",
-        "--format=%h %ad %an %s",
-        `-n${Math.min(input.limit ?? 30, 200)}`,
-        rev,
-        "--",
-        ...(path ? [path] : []),
-      ],
-      [0, 128]
-    );
-  } else if (input.kind === "blame") {
+  const blame = () => {
     if (!path) {
-      return yield* new InvalidRead({ message: "blame needs path" });
+      return Effect.fail(new InvalidRead({ message: "blame needs path" }));
     }
 
     const s = input.start ?? 1;
     const e = input.end ?? s + 80;
-    out = yield* git.run(
+
+    return git.run(
       seal.repo,
       ["blame", "--date=short", `-L${s},${e}`, rev, "--", path],
       [0, 128]
     );
-  } else {
-    out = yield* historyShow(seal.repo, rev, input.rev, path);
-  }
+  };
+
+  const out = yield* Match.value(input.kind).pipe(
+    Match.when("log", () =>
+      git.run(
+        seal.repo,
+        [
+          "log",
+          "--no-color",
+          "--no-ext-diff",
+          "--date=short",
+          "--format=%h %ad %an %s",
+          `-n${Math.min(input.limit ?? 30, 200)}`,
+          rev,
+          "--",
+          ...(path ? [path] : []),
+        ],
+        [0, 128]
+      )
+    ),
+    Match.when("blame", blame),
+    Match.when("show", () => historyShow(seal.repo, rev, input.rev, path)),
+    Match.exhaustive
+  );
 
   const lines = out
     .replace(/\n$/u, "")

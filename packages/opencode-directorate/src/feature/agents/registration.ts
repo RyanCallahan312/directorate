@@ -1,5 +1,5 @@
 import { Agent, Skill } from "@opencode/plugin/effect";
-import { Data, Effect, FileSystem, Path, Schema } from "effect";
+import { Effect, FileSystem, Path, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
 import { Host } from "../../platform/platform.ts";
@@ -20,9 +20,11 @@ const SkillFrontmatter = Schema.Struct({
   name: Skill.Name,
 });
 
-class MissingFrontmatter extends Data.TaggedError("MissingFrontmatter")<{
-  readonly message: string;
-}> {}
+/** A bundled agent or skill file without its YAML frontmatter. */
+class MissingFrontmatter extends Schema.TaggedError<
+  MissingFrontmatter,
+  { readonly brand: unique symbol }
+>()("MissingFrontmatter", { message: Schema.String }) {}
 
 const readMarkdown = Effect.fn("Directorate.readMarkdown")(
   function* readMarkdown(url: URL) {

@@ -4,7 +4,7 @@ import { Clock, DateTime, Effect, Result, Schema } from "effect";
 
 import { actor, optional, str } from "../../platform/platform.ts";
 import type { DefineTool, Host } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
   AutoReport,
@@ -21,11 +21,12 @@ import { Liaison } from "../agents/agent.ts";
 import type { Ledger } from "../ledger/entry.ts";
 import {
   assess,
+  Directive,
   directiveFiled,
   freshnessChecked,
   pushedBack,
 } from "./directive.ts";
-import type { Freshness } from "./directive.ts";
+import type { Freshness, Remembered } from "./directive.ts";
 import {
   coverageGate,
   dossierGate,
@@ -117,7 +118,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
 
   const reported = directiveFiled(
     assessed,
-    { reasons, status },
+    Directive.make({ reasons, status }),
     yield* DateTime.now,
     opts.auto
   );
@@ -133,7 +134,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
   filed: (sealId: string) => void,
   recovered: (seal: Seal, md: string) => Effect.Effect<void, never, Host>
 ) {
-  const store = yield* Store;
+  const store = yield* Records;
   const sessions = yield* Sessions;
 
   /** Reported, without the Liaison: abandoned for a new review, or past the deadline and its grace period. */
@@ -217,7 +218,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
               const { phase } = yield* budget(seal.window);
 
               /** The gate's gaps are remembered on the seal; the Liaison reads why, and calling again proceeds. */
-              const pushBack = (gates: Seal["gates"], message: string) => ({
+              const pushBack = (gates: Remembered, message: string) => ({
                 out: Result.fail(new ProtocolHold({ message })),
                 seal: pushedBack(seal, gates),
               });

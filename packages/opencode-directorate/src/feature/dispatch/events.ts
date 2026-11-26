@@ -6,11 +6,11 @@ import { DateTime, Effect, Schedule, Stream } from "effect";
 
 import { ignore, recover } from "../../platform/error.ts";
 import { activity, createdAt, Host } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
 import { halted } from "../../workflow/review/custody.ts";
-import { childNamed } from "../agents/agent.ts";
+import { dispatchableNamed } from "../agents/agent.ts";
 import {
   claimed,
   Completed,
@@ -161,7 +161,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
   ) {
     const host = yield* Host;
     const sessions = yield* Sessions;
-    const store = yield* Store;
+    const store = yield* Records;
 
     // Running: a child's session is created by the subagent tool before it runs; link it to its launch now, so every later
     // event for it finds the review.
@@ -171,7 +171,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
       agent: string,
       title: string | undefined
     ) {
-      if (!childNamed(agent)) {
+      if (!dispatchableNamed(agent)) {
         return;
       }
 

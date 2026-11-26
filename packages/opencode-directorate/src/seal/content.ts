@@ -5,7 +5,7 @@ import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "../exclusions.ts";
 import type { Entry } from "../feature/ledger/entry.ts";
 import { Git } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
-import { Store } from "../records/records.ts";
+import { Records } from "../records/records.ts";
 import type { Seal } from "./record.ts";
 import { Anchor } from "./region.ts";
 import type { Side } from "./region.ts";
@@ -50,7 +50,7 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
     return;
   }
 
-  const snap = yield* (yield* Store).readSnapshot(seal, p);
+  const snap = yield* (yield* Records).readSnapshot(seal, p);
 
   if (snap !== undefined) {
     return snap;

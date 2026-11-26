@@ -27,7 +27,7 @@ import {
   exportCommand,
   exportTools,
   StateRoot,
-  Store,
+  Records,
 } from "./records/records.ts";
 import type { ActiveSeal } from "./records/records.ts";
 import { readTools, sealLayer } from "./seal/seal.ts";
@@ -89,7 +89,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
 /** Directorate review services on the Node platform: the one layer the plugin entry and the tests build. */
 export const platformLayer = Layer.mergeAll(
-  Store.layer,
+  Records.layer,
   Worktree.layer,
   SettingsStore.layer,
   ToolCatalog.layer

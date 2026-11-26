@@ -38,7 +38,7 @@ import {
   turns,
 } from "../../platform/platform.ts";
 import type { Activity, Worktree } from "../../platform/platform.ts";
-import { Store } from "../../records/records.ts";
+import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
   currentFingerprint,
@@ -396,7 +396,7 @@ export const registerShip = Effect.fn("Ship.register")(
   function* registerShip() {
     const host = yield* Host;
     const git = yield* Git;
-    const store = yield* Store;
+    const store = yield* Records;
     const sessions = yield* Sessions;
     const services = yield* Effect.context<Git | Worktree | Digest.Digest>();
     const random = yield* SecureRandom.SecureRandom;

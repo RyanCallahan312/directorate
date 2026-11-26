@@ -1,7 +1,10 @@
-import { coverageSummary } from "../../seal/coverage.ts";
 // The Directive as markdown: rendered from verified dossier entries only.
+import { Match, Schema } from "effect";
+
+import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import type { Region } from "../../seal/region.ts";
+import { Seat as SeatAgent } from "../agents/agent.ts";
 import {
   actorName,
   failedDispatches,
@@ -19,14 +22,15 @@ import {
   resolvedTarget,
   unresolved,
 } from "../ledger/decide.ts";
+import { SeveritySchema } from "../ledger/entry.ts";
 import type { Entry, Ledger, Severity } from "../ledger/entry.ts";
 import type { DirectiveStatus } from "./directive.ts";
 
-const SEV_LABEL: Record<Severity, string> = {
+const SEV_LABEL = Schema.Record(SeveritySchema, Schema.String).make({
   blocking: "Blocking",
   important: "Important",
   minor: "Minor",
-};
+});
 
 /** For each confirmed entry, the panel seats that raised it or a duplicate of it. */
 const seatsRaising = (seal: Seal, ledger: Ledger) => {
@@ -49,11 +53,11 @@ const seatsRaising = (seal: Seal, ledger: Ledger) => {
   return { raised, seatOf, seats };
 };
 
-const verdicts: Record<Severity, string> = {
+const verdicts = Schema.Record(SeveritySchema, Schema.String).make({
   blocking: "<Hold/Blocking — Do Not Merge>",
   important: "<Changes Required/Remediation Needed>",
   minor: "<Minor Revisions/Tolerated with Notes>",
-};
+});
 
 const directiveVerdict = (
   top: Severity | undefined,
@@ -150,15 +154,23 @@ const outsideContainment = (
   }
 
   for (const s of seatless) {
-    let explanation = "never launched";
+    const explanation = Match.value(s.status).pipe(
+      Match.when(
+        "partial",
+        () => `${s.unread} of ${seal.regions.length} regions unread`
+      ),
+      Match.when("failed", () => "its review failed"),
+      Match.whenOr(
+        "not launched",
+        "launching",
+        "running",
+        "completed",
+        () => "never launched"
+      ),
+      Match.exhaustive
+    );
 
-    if (s.status === "partial") {
-      explanation = `${s.unread} of ${seal.regions.length} regions unread`;
-    } else if (s.status === "failed") {
-      explanation = "its review failed";
-    }
-
-    nr.push(`- Directorate Seat ${seatName(s.model)}: ${explanation}`);
+    nr.push(`- ${SeatAgent.title} ${seatName(s.model)}: ${explanation}`);
   }
 
   for (const n of ledger.notes.filter(
@@ -182,10 +194,10 @@ const outsideContainment = (
   return nr;
 };
 
-interface Finding {
-  e: Entry;
-  sev: Severity;
-}
+/** A confirmed entry and the severity it was confirmed at. */
+const finding = (e: Entry) => ({ e, sev: currentSeverity(e) });
+
+type Finding = ReturnType<typeof finding>;
 
 type Panel = ReturnType<typeof seatsRaising>;
 
@@ -377,7 +389,7 @@ export const renderReport = (input: {
 
   const confirmed = ledger.entries
     .filter((e) => e.status === "confirmed")
-    .map((e) => ({ e, sev: currentSeverity(e) }))
+    .map(finding)
     .toSorted(findingOrder);
 
   const leads = unresolved(ledger);

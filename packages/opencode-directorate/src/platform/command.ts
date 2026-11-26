@@ -1,13 +1,19 @@
-import { Bytes, Data, Effect, Stream } from "effect";
+import { Bytes, Effect, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { decodeUtf8 } from "./utf8.ts";
 
-class CommandError extends Data.TaggedError("DirectorateCommandError")<{
-  message: string;
-  code?: number | "NotFound";
-  stdout?: Uint8Array;
-}> {}
+/** A command failed to run or exited nonzero: its exit code (NotFound when it is not installed) and what it printed. */
+class CommandError extends Schema.TaggedError<
+  CommandError,
+  { readonly brand: unique symbol }
+>()("DirectorateCommandError", {
+  code: Schema.optionalKey(
+    Schema.Union([Schema.Int, Schema.Literal("NotFound")])
+  ),
+  message: Schema.String,
+  stdout: Schema.optionalKey(Schema.Uint8Array),
+}) {}
 
 // The process runner for git and gh, shaped like OpenCode's own AppProcess.run (packages/util/src/process.ts), which
 // external plugins are not given. ChildProcessSpawner.string would drop the exit code and the bytes, and has no bound;

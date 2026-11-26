@@ -8,6 +8,9 @@ export const ModeSchema = Schema.Literals(["default", "code-quality", "full"]);
 
 export type Mode = typeof ModeSchema.Type;
 
+/** The mode of a review when neither the request nor directorate.json names one. */
+export const DEFAULT_MODE = "default" satisfies Mode;
+
 export const ReviewScopeSchema = Schema.Literals([
   "branch",
   "local",

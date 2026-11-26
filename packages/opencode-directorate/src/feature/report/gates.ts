@@ -1,5 +1,7 @@
 // The five protocol gates as pure specifications over the seal and its dossier: what each finds missing before the
 // Directive is filed, and the protocol hold it reads to the Liaison. directorate_report applies them in this order.
+import { Schema } from "effect";
+
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import type { Phase } from "../../workflow/review/window.ts";
@@ -10,19 +12,20 @@ import {
 } from "../dispatch/lifecycle.ts";
 import { currentSeverity, unresolved } from "../ledger/decide.ts";
 import type { Ledger } from "../ledger/entry.ts";
-import type { Gates } from "./directive.ts";
-
-/** The gates that remember each gap (by id) they pushed back on; Containment Drift remembers a fingerprint instead. */
-type GapGate = Exclude<keyof Gates, "freshness">;
-
-const hold = (key: GapGate, ids: readonly string[], message: string) => ({
-  ids,
-  key,
-  message,
-});
+import { GapGateSchema } from "./directive.ts";
+import type { GapGate } from "./directive.ts";
 
 /** A gap gate's finding: the gaps it sees now, under the key it remembers them by, and its protocol hold. */
-export type Hold = ReturnType<typeof hold>;
+export class Hold extends Schema.Class<Hold, { readonly brand: unique symbol }>(
+  "directorate/Hold"
+)({
+  ids: Schema.Array(Schema.String),
+  key: GapGateSchema,
+  message: Schema.String,
+}) {}
+
+const hold = (key: GapGate, ids: readonly string[], message: string) =>
+  Hold.make({ ids, key, message });
 
 /** Coverage: every region is read or disposed. */
 export const coverageGate = (seal: Seal) => {

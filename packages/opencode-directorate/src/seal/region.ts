@@ -18,7 +18,7 @@ export const DispositionSchema = Schema.Literals([
 
 export type Disposition = typeof DispositionSchema.Type;
 
-const FileStatus = Schema.Literals([
+export const FileStatusSchema = Schema.Literals([
   "added",
   "modified",
   "deleted",
@@ -27,6 +27,8 @@ const FileStatus = Schema.Literals([
   "mode",
   "unchanged",
 ]);
+
+export type FileStatus = typeof FileStatusSchema.Type;
 
 /** A chunk of the sealed diff (or of a whole file, for a paths target): its geometry, and who read or disposed of it. */
 export class Region extends Schema.Class<
@@ -109,7 +111,7 @@ export class FileEntry extends Schema.Class<
   oldPath: opt(Schema.String),
   path: Schema.String,
   removed: Count,
-  status: FileStatus,
+  status: FileStatusSchema,
 }) {}
 
 /** Where an entry points: a line span on one side of the sealed code. Stored in ledger.json entries. */

@@ -7,7 +7,7 @@ import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
   Auditor,
-  childNamed,
+  dispatchableNamed,
   Compliance,
   Seat as SeatAgent,
 } from "../agents/agent.ts";
@@ -160,7 +160,7 @@ export const DispatchFromStored = StoredDispatch.pipe(
 
 /** The agent a dispatch runs, or undefined for a name no Directorate version dispatches today. */
 export const dispatchedAgent = (d: Pick<Dispatch, "agent">) =>
-  childNamed(d.agent);
+  dispatchableNamed(d.agent);
 
 export const outstandingDispatches = (seal: Seal) =>
   seal.children.filter(isOutstanding);
@@ -191,12 +191,21 @@ export const actorName = (seal: Seal, a: Actor) => {
   return c ? dispatchName(c) : a.agent;
 };
 
+/** A panel seat's status as the report shows it: a dispatch's, partial, or not launched. */
+export const SeatStatusSchema = Schema.Literals([
+  ...DispatchStatusSchema.literals,
+  "partial",
+  "not launched",
+]);
+
+export type SeatStatus = typeof SeatStatusSchema.Type;
+
 /** A seat's status as the report shows it: completed, partial (a run completed but did not read everything), or its latest run's. */
 const seatStatus = (
   done: boolean,
   partial: boolean,
   latest: Dispatch | undefined
-) => {
+): SeatStatus => {
   if (done) {
     return "completed";
   }
