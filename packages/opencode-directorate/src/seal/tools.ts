@@ -1,5 +1,5 @@
 // Directorate reading tools: how the Liaison, Auditors, Seats, and Compliance read the sealed code, and how the Liaison accounts for what it did not.
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
 import {
@@ -9,8 +9,8 @@ import {
   str,
   strArr,
 } from "../platform/platform.ts";
-import type { DefineTool, Git, ToolCatalog } from "../platform/platform.ts";
-import { Store } from "../records/records.ts";
+import type { DefineTool, Git } from "../platform/platform.ts";
+import type { Store } from "../records/records.ts";
 import { NotInSeal } from "./content.ts";
 import {
   coverageSummary,
@@ -20,7 +20,7 @@ import {
 } from "./coverage.ts";
 import { DispositionSchema, SideSchema } from "./region.ts";
 import { RepoPath, RepoScope } from "./repo-path.ts";
-import { done, locked, mutate, Sessions, unlocked } from "./sessions.ts";
+import { done, Sessions, ToolCall } from "./sessions.ts";
 import {
   grepSealed,
   history,
@@ -30,86 +30,93 @@ import {
 } from "./views.ts";
 
 export const readTools = (
-  tool: DefineTool<
-    Sessions | Store | Git | ToolCatalog | FileSystem.FileSystem | Path.Path
-  >
+  tool: DefineTool<Sessions | Store | Git | FileSystem.FileSystem | Path.Path>
 ) => {
   tool({
     description:
       "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
     *execute(input, c) {
-      return yield* locked<
-        { content: string },
-        Store | Git | ToolCatalog | FileSystem.FileSystem | Path.Path
-      >(c, input.seal, function* execute(seal) {
-        // A step that began before lockdown must not record reads after it; a reported seal stays readable.
-        yield* unlocked(seal, c, "directorate_diff");
-        const a = actor(c);
-        const owner = a.session === seal.ownerSession;
-        const reader = owner ? "owner" : a.session;
+      const a = actor(c);
 
-        const { picked, omitted } = nextRegions(seal, {
-          file: input.file,
-          ids: input.regions,
-          owner,
-          reader,
-        });
+      // A step that began before lockdown must not record reads after it; a reported seal stays readable.
+      return yield* (yield* Sessions).mutate(
+        input.seal,
+        ToolCall.make({
+          actor: a,
+          reported: "shown",
+          tool: "directorate_diff",
+        }),
+        ({ seal }) =>
+          Effect.gen(function* execute() {
+            const owner = a.session === seal.ownerSession;
+            const reader = owner ? "owner" : a.session;
 
-        if (!picked.length) {
-          return yield* done(
-            seal,
-            input.regions?.length || input.file
-              ? "No matching regions."
-              : "All regions have been read.",
-            a.agent
-          );
-        }
+            const { picked, omitted } = nextRegions(seal, {
+              file: input.file,
+              ids: input.regions,
+              owner,
+              reader,
+            });
 
-        const { text, shown } = yield* renderRegions(seal, picked, reader);
+            if (!picked.length) {
+              return {
+                out: yield* done(
+                  seal,
+                  input.regions?.length || input.file
+                    ? "No matching regions."
+                    : "All regions have been read.",
+                  a
+                ),
+              };
+            }
 
-        const read = seal.reportedAt
-          ? seal
-          : markShown(seal, shown, { key: reader, owner });
+            const { text, shown } = yield* renderRegions(seal, picked, reader);
 
-        if (read !== seal) {
-          yield* (yield* Store).save(read);
-        }
+            const read = seal.reportedAt
+              ? seal
+              : markShown(seal, shown, { key: reader, owner });
 
-        const cov = coverageSummary(read);
+            const cov = coverageSummary(read);
 
-        const notShown = [
-          ...omitted,
-          ...picked.slice(shown.length).map((r) => r.id),
-        ];
+            const notShown = [
+              ...omitted,
+              ...picked.slice(shown.length).map((r) => r.id),
+            ];
 
-        const head = `[seal ${seal.id} · base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree"} · columns: old line, new line]`;
+            const head = `[seal ${seal.id} · base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree"} · columns: old line, new line]`;
 
-        const tail = [
-          owner
-            ? `[coverage ${cov.read}/${cov.total}${
-                cov.unread.length
-                  ? ` · next unread: ${cov.unread
-                      .slice(0, 8)
-                      .map((r) => r.id)
-                      .join(" ")}`
-                  : " · all regions read"
-              }]`
-            : `[shown ${shown
-                .map((s) => {
-                  const progress = s.complete ? "" : " (partial; call again)";
+            const tail = [
+              owner
+                ? `[coverage ${cov.read}/${cov.total}${
+                    cov.unread.length
+                      ? ` · next unread: ${cov.unread
+                          .slice(0, 8)
+                          .map((r) => r.id)
+                          .join(" ")}`
+                      : " · all regions read"
+                  }]`
+                : `[shown ${shown
+                    .map((s) => {
+                      const progress = s.complete
+                        ? ""
+                        : " (partial; call again)";
 
-                  return `${s.id}${s.missing ? " (unavailable)" : progress}`;
-                })
-                .join(" ")}]`,
-          notShown.length
-            ? `[not shown yet: ${notShown.slice(0, 40).join(" ")}${notShown.length > 40 ? ` and ${notShown.length - 40} more` : ""}; request them next]`
-            : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
+                      return `${s.id}${s.missing ? " (unavailable)" : progress}`;
+                    })
+                    .join(" ")}]`,
+              notShown.length
+                ? `[not shown yet: ${notShown.slice(0, 40).join(" ")}${notShown.length > 40 ? ` and ${notShown.length - 40} more` : ""}; request them next]`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n");
 
-        return yield* done(read, `${head}\n${text}\n\n${tail}`, a.agent);
-      });
+            return {
+              out: yield* done(read, `${head}\n${text}\n\n${tail}`, a),
+              seal: read === seal ? undefined : read,
+            };
+          })
+      );
     },
     input: Schema.Struct({
       file: optional(RepoPath),
@@ -134,7 +141,7 @@ export const readTools = (
           input.start,
           input.end
         ),
-        c.agent
+        actor(c)
       );
     },
     files: (input) => [input.path],
@@ -154,7 +161,7 @@ export const readTools = (
     *execute(input, c) {
       const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
 
-      return yield* done(seal, yield* listFiles(seal, input.dir), c.agent);
+      return yield* done(seal, yield* listFiles(seal, input.dir), actor(c));
     },
     input: Schema.Struct({ dir: optional(RepoScope), seal: str }),
     name: "directorate_ls",
@@ -173,7 +180,7 @@ export const readTools = (
           ignoreCase: input.ignore_case,
           paths: input.paths,
         }),
-        c.agent
+        actor(c)
       );
     },
     input: Schema.Struct({
@@ -192,7 +199,7 @@ export const readTools = (
     *execute(input, c) {
       const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
 
-      return yield* done(seal, yield* history(seal, input), c.agent);
+      return yield* done(seal, yield* history(seal, input), actor(c));
     },
     files: (input) => [input.path],
     input: Schema.Struct({
@@ -211,37 +218,42 @@ export const readTools = (
     description:
       "Record a disposition with a reason for regions you did not read through directorate_diff: reviewed (an Auditor or Seat read it and you assessed it), skimmed, or skipped. Skimmed and skipped regions make the report partial and are listed under Outside Containment (Not Reviewed).",
     *execute(input, c) {
-      return yield* mutate(
-        c,
+      return yield* (yield* Sessions).mutate(
         input.seal,
-        "directorate_coverage",
-        function* execute(seal) {
-          const unknown = input.regions.filter(
-            (id) => !seal.regions.some((r) => r.id === id)
-          );
+        ToolCall.make({
+          actor: actor(c),
+          callers: "owner",
+          tool: "directorate_coverage",
+        }),
+        ({ seal }) =>
+          Effect.gen(function* execute() {
+            const unknown = input.regions.filter(
+              (id) => !seal.regions.some((r) => r.id === id)
+            );
 
-          if (unknown.length) {
-            return yield* new NotInSeal({
-              message: `Unknown regions: ${unknown.join(", ")}`,
-            });
-          }
+            if (unknown.length) {
+              return yield* new NotInSeal({
+                message: `Unknown regions: ${unknown.join(", ")}`,
+              });
+            }
 
-          const { seal: next, coerced } = dispose(
-            seal,
-            input.regions,
-            input.disposition,
-            input.note
-          );
+            const { seal: next, coerced } = dispose(
+              seal,
+              input.regions,
+              input.disposition,
+              input.note
+            );
 
-          yield* (yield* Store).save(next);
-          const cov = coverageSummary(next);
+            const cov = coverageSummary(next);
 
-          return yield* done(
-            next,
-            `Recorded ${input.disposition} for ${input.regions.length} regions.${coerced.length ? ` ${coerced.join(" ")} recorded as skimmed: nobody read them through directorate_diff.` : ""} Read ${cov.read}/${cov.total}.`
-          );
-        },
-        true
+            return {
+              out: yield* done(
+                next,
+                `Recorded ${input.disposition} for ${input.regions.length} regions.${coerced.length ? ` ${coerced.join(" ")} recorded as skimmed: nobody read them through directorate_diff.` : ""} Read ${cov.read}/${cov.total}.`
+              ),
+              seal: next,
+            };
+          })
       );
     },
     input: Schema.Struct({

@@ -23,13 +23,17 @@ export type { Current } from "./ends.ts";
 export { LineRef, RepoPath, RepoScope } from "./repo-path.ts";
 
 export {
+  AutoReport,
   done,
-  locked,
-  mutate,
+  openReview,
+  RecoveryWake,
   sealLayer,
+  HostEvent,
   Sessions,
-  unlocked,
-  writable,
+  ShipLink,
+  Takeover,
+  ToolCall,
+  Watchdog,
 } from "./sessions.ts";
 
 export { readTools } from "./tools.ts";

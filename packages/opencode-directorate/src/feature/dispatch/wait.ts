@@ -3,12 +3,11 @@
 import { DateTime, Effect, Schedule, Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
-import { str } from "../../platform/platform.ts";
+import { actor, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import { done, locked, writable } from "../../seal/seal.ts";
-import type { Sessions } from "../../seal/seal.ts";
+import { done, Sessions, ToolCall } from "../../seal/seal.ts";
 import { budget } from "../../workflow/review/window.ts";
 import { childName, childOutstanding, perSession } from "./lifecycle.ts";
 import type { Child } from "./lifecycle.ts";
@@ -22,11 +21,16 @@ export const waitTool = (
     *execute(input, c) {
       const store = yield* Store;
 
-      const start = yield* locked(c, input.seal, function* start(seal) {
-        yield* writable(seal, c, "directorate_wait", true);
-
-        return seal;
-      });
+      const start = yield* (yield* Sessions).read(
+        input.seal,
+        ToolCall.make({
+          actor: actor(c),
+          callers: "owner",
+          lockdown: "exempt",
+          tool: "directorate_wait",
+        }),
+        Effect.succeed
+      );
 
       const { phase } = yield* budget(start.window);
       const waiting = childOutstanding(start);

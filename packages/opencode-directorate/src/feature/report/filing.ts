@@ -2,17 +2,17 @@
 // reviews. Either way the report is rendered and saved once, and the seal is reported from then on.
 import { Clock, DateTime, Effect, Result, Schema } from "effect";
 
-import { optional, str } from "../../platform/platform.ts";
+import { actor, optional, str } from "../../platform/platform.ts";
 import type { DefineTool, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
+  AutoReport,
   changedSinceSeal,
   currentFingerprint,
   FreshnessUnchecked,
-  locked,
   Sessions,
-  writable,
+  ToolCall,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
 import { abandoned, AbandonRefused } from "../../workflow/review/custody.ts";
@@ -79,8 +79,8 @@ const freshness = (seal: Seal, cur: CurrentCheck) =>
   });
 
 /**
- * Renders and saves the report; the seal is reported from then on. Caller holds the seal's lock. `cur` is the freshness
- * check the caller already ran, if any.
+ * Renders the report and the reported seal, for the door to save together; the seal is reported from then on. `cur` is
+ * the freshness check the caller already ran, if any.
  */
 export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
   seal: Seal,
@@ -122,8 +122,6 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     opts.auto
   );
 
-  yield* (yield* Store).publish(reported, md);
-
   return { md, seal: reported };
 });
 
@@ -144,14 +142,9 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
     reason: string,
     abandonedBy?: string
   ) {
-    const saved = yield* store.withLock(
-      id,
-      Effect.gen(function* saved() {
-        const seal = yield* store.load(id);
-
-        if (seal.reportedAt) {
-          return;
-        }
+    const saved = yield* sessions.mutate(id, AutoReport.make({}), (review) =>
+      Effect.gen(function* fileUnattended() {
+        const { seal } = review;
 
         if (abandonedBy && seal.ownerSession !== abandonedBy) {
           return yield* new AbandonRefused({ seal: id });
@@ -162,14 +155,16 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
           (yield* Clock.currentTimeMillis) <
             DateTime.toEpochMillis(seal.deadline) + GRACE_MS
         ) {
-          return;
+          return { out: undefined };
         }
 
-        return yield* finalize(
+        const directive = yield* finalize(
           abandonedBy ? abandoned(seal) : seal,
-          yield* store.loadLedger(id),
+          yield* review.ledger,
           { auto: true, extraReasons: [reason] }
         );
+
+        return { out: directive, report: directive.md, seal: directive.seal };
       })
     );
 
@@ -195,65 +190,95 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
       description:
         "Issue the final Directorate Directive. Protocol gates push back once for each new gap (unread regions, missing Seats, subagents still running, containment drift, unverified entries); calling again proceeds and records the gap. Renders the directive from the dossier: only verified entries become findings. Output the returned markdown verbatim.",
       *execute(input, c) {
-        const { md, seal: reported } = yield* locked(
-          c,
+        const filing = yield* sessions.mutate(
           input.seal,
-          function* issueDirective(seal) {
-            // A reported seal shows its saved report to anyone allowed to ask.
-            if (seal.reportedAt) {
-              return { md: yield* store.readReport(seal.id), seal: undefined };
-            }
+          ToolCall.make({
+            actor: actor(c),
+            callers: "owner",
+            lockdown: "exempt",
+            reported: "shown",
+            tool: "directorate_report",
+          }),
+          (review) =>
+            Effect.gen(function* issueDirective() {
+              const { seal } = review;
 
-            yield* writable(seal, c, "directorate_report", true);
-            const ledger = yield* store.loadLedger(seal.id);
-            const { phase } = yield* budget(seal.window);
+              // A reported seal shows its saved report to anyone allowed to ask.
+              if (seal.reportedAt) {
+                return {
+                  out: Result.succeed({
+                    md: yield* store.readReport(seal.id),
+                    seal: undefined,
+                  }),
+                };
+              }
 
-            const pushBack = (gates: Seal["gates"], message: string) =>
-              store
-                .save(pushedBack(seal, gates))
-                .pipe(
-                  Effect.andThen(Effect.fail(new ProtocolHold({ message })))
-                );
+              const ledger = yield* review.ledger;
+              const { phase } = yield* budget(seal.window);
 
-            /** A gate pushes back once for each new id it has not already pushed back on. */
-            const once = (gate: Hold) => {
-              const remembered = pushesBack(seal, phase, gate);
+              /** The gate's gaps are remembered on the seal; the Liaison reads why, and calling again proceeds. */
+              const pushBack = (gates: Seal["gates"], message: string) => ({
+                out: Result.fail(new ProtocolHold({ message })),
+                seal: pushedBack(seal, gates),
+              });
 
-              return remembered
-                ? pushBack(remembered, gate.message)
-                : Effect.void;
-            };
+              /** A gate pushes back once for each new id it has not already pushed back on. */
+              const once = (gate: Hold) => {
+                const remembered = pushesBack(seal, phase, gate);
 
-            yield* once(coverageGate(seal));
-            yield* once(seatsGate(seal, phase));
-            yield* once(personnelGate(seal));
-            const cur = yield* Effect.result(currentFingerprint(seal));
+                return remembered
+                  ? pushBack(remembered, gate.message)
+                  : undefined;
+              };
 
-            const drift = Result.isSuccess(cur)
-              ? driftGate(
-                  seal,
-                  phase,
-                  cur.success.fingerprint,
-                  cur.success.unfetched
-                )
-              : undefined;
+              const held =
+                once(coverageGate(seal)) ??
+                once(seatsGate(seal, phase)) ??
+                once(personnelGate(seal));
 
-            if (Result.isSuccess(cur) && drift) {
-              return yield* pushBack(
-                { freshness: cur.success.fingerprint },
-                drift
-              );
-            }
+              if (held) {
+                return held;
+              }
 
-            yield* once(dossierGate(ledger));
+              const cur = yield* Effect.result(currentFingerprint(seal));
 
-            return yield* finalize(seal, ledger, {
-              approach: input.approach,
-              cur,
-              synthesis: input.synthesis,
-            });
-          }
+              const drift = Result.isSuccess(cur)
+                ? driftGate(
+                    seal,
+                    phase,
+                    cur.success.fingerprint,
+                    cur.success.unfetched
+                  )
+                : undefined;
+
+              if (Result.isSuccess(cur) && drift) {
+                return pushBack({ freshness: cur.success.fingerprint }, drift);
+              }
+
+              const dossierHeld = once(dossierGate(ledger));
+
+              if (dossierHeld) {
+                return dossierHeld;
+              }
+
+              const reported = yield* finalize(seal, ledger, {
+                approach: input.approach,
+                cur,
+                synthesis: input.synthesis,
+              });
+
+              return {
+                out: Result.succeed(reported),
+                report: reported.md,
+                seal: reported.seal,
+              };
+            })
         );
+
+        const { md, seal: reported } = yield* Effect.fromResult<
+          { md: string; seal: Seal | undefined },
+          ProtocolHold
+        >(filing);
 
         if (reported) {
           filed(reported.id);

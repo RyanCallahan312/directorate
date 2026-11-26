@@ -16,11 +16,17 @@ import {
   ProcessIdentity,
   str,
 } from "../../platform/platform.ts";
-import type { DefineTool, ToolCatalog } from "../../platform/platform.ts";
+import type { DefineTool } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
-import { done, mutate, RepoScope, Sessions } from "../../seal/seal.ts";
+import {
+  done,
+  RepoScope,
+  Sessions,
+  Takeover,
+  ToolCall,
+} from "../../seal/seal.ts";
 import { TargetKindSchema } from "../../seal/target.ts";
 import { AbandonRefused, resumedBy } from "./custody.ts";
 import {
@@ -149,7 +155,6 @@ export type AutoReport = Effect.Success<
 
 type SealServices =
   | Sessions
-  | ToolCatalog
   | Effect.Services<ReturnType<typeof createSeal>>
   | Effect.Services<ReturnType<typeof recheckSeal>>
   | Effect.Services<ReturnType<typeof refreshSeal>>
@@ -261,43 +266,46 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
             if (input.resume) {
               const { resume } = input;
 
-              const { seal, previousOwner } = yield* store.withLock(
+              const { seal, previousOwner } = yield* sessions.mutate(
                 resume,
-                Effect.gen(function* openContainment() {
-                  const s = yield* store.load(resume);
+                Takeover.make({ actor: a }),
+                (review) =>
+                  Effect.gen(function* openContainment() {
+                    const s = review.seal;
 
-                  if (s.reportedAt) {
-                    return yield* new ReviewConflict({
-                      message: `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`,
-                    });
-                  }
+                    if (s.reportedAt) {
+                      return yield* new ReviewConflict({
+                        message: `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`,
+                      });
+                    }
 
-                  // A spent budget gets more time (Window.takeover), unless the caller names a budget.
-                  const now = yield* DateTime.now;
-                  const { window } = s;
-                  const { phase } = yield* budget(window);
+                    // A spent budget gets more time (Window.takeover), unless the caller names a budget.
+                    const now = yield* DateTime.now;
+                    const { window } = s;
+                    const { phase } = yield* budget(window);
 
-                  const takeover =
-                    s.ownerSession === a.session || phase === "normal"
-                      ? undefined
-                      : window.takeover(now);
+                    const takeover =
+                      s.ownerSession === a.session || phase === "normal"
+                        ? undefined
+                        : window.takeover(now);
 
-                  const restart =
-                    input.budget_minutes === undefined
-                      ? takeover
-                      : Window.open(now, input.budget_minutes);
+                    const restart =
+                      input.budget_minutes === undefined
+                        ? takeover
+                        : Window.open(now, input.budget_minutes);
 
-                  const resumed = resumedBy(s, a, pid, now);
+                    const resumed = resumedBy(s, a, pid, now);
 
-                  const updated =
-                    restart === undefined
-                      ? resumed
-                      : restarted(resumed, restart);
+                    const updated =
+                      restart === undefined
+                        ? resumed
+                        : restarted(resumed, restart);
 
-                  yield* store.save(updated);
-
-                  return { previousOwner: s.ownerSession, seal: updated };
-                })
+                    return {
+                      out: { previousOwner: s.ownerSession, seal: updated },
+                      seal: updated,
+                    };
+                  })
               );
 
               yield* abandonPrior;
@@ -442,33 +450,44 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
       description:
         "After directorate_report's freshness gate (Containment Drift): re-pin the target once and re-capture it (diff, snapshot, regions); regions whose content is unchanged keep their read receipts, and entries whose anchor or evidence changed reopen for re-verification.",
       *execute(input, c) {
-        return yield* mutate(
-          c,
+        return yield* sessions.mutate(
           input.seal,
-          "directorate_refresh",
-          function* execute(seal) {
-            if (seal.refreshes >= 1) {
-              return yield* new ReviewConflict({
-                message:
-                  "This seal was already re-contained once. Call directorate_report; it marks the directive stale if the artifact moved again.",
-              });
-            }
+          ToolCall.make({
+            actor: actor(c),
+            callers: "owner",
+            tool: "directorate_refresh",
+          }),
+          (review) =>
+            Effect.gen(function* execute() {
+              const { seal } = review;
 
-            const r = yield* refreshSeal(
-              seal,
-              yield* store.loadLedger(seal.id)
-            );
+              if (seal.refreshes >= 1) {
+                return yield* new ReviewConflict({
+                  message:
+                    "This seal was already re-contained once. Call directorate_report; it marks the directive stale if the artifact moved again.",
+                });
+              }
 
-            if (r.seal === seal) {
-              return yield* done(seal, "No drift detected since containment.");
-            }
+              const r = yield* refreshSeal(seal, yield* review.ledger);
 
-            return yield* done(
-              r.seal,
-              `Re-contained. Changed: ${r.files.join(", ") || "none"}. Regions to read: ${r.newRegions.map((x) => x.id).join(" ") || "none"}. Reopened for re-verification: ${r.reopened.join(" ") || "none"}.`
-            );
-          },
-          true
+              if (r.seal === seal) {
+                return {
+                  out: yield* done(
+                    seal,
+                    "No drift detected since containment."
+                  ),
+                };
+              }
+
+              return {
+                ledger: r.ledger,
+                out: yield* done(
+                  r.seal,
+                  `Re-contained. Changed: ${r.files.join(", ") || "none"}. Regions to read: ${r.newRegions.map((x) => x.id).join(" ") || "none"}. Reopened for re-verification: ${r.reopened.join(" ") || "none"}.`
+                ),
+                seal: r.seal,
+              };
+            })
         );
       },
       input: Schema.Struct({ seal: str }),

@@ -248,18 +248,19 @@ A review is one aggregate: the `Seal` root plus its `Ledger`, guarded by one `mu
 
 ```ts
 // seal/sessions.ts (shape)
-mutate(sealId, actor, tool, transition) =>
-  records.withLock(sealId, (review) => {
-    closedOnceReported(review.seal); // root invariants hold for every write
-    ownerOnly(review.seal, actor, tool);
-    lockdown(review.seal, actor, tool); // Agent × Window × ToolCatalog
-    const [next, out] = transition(review); // one owner's transition
-    saveIfChanged(next);
+mutate(sealId, writer, transition) =>
+  records.withLock(sealId, () => {
+    const seal = load(sealId); // a participating tool caller is bound to it on the way
+    admit(seal, writer); // reported: refused, skipped, or shown; open: owner-only, lockdown (Agent × Window × ToolCatalog)
+    const { out, seal, ledger, report } = transition({ seal, ledger, checkpoint }); // one owner's transition
+    saveIfChanged(seal, ledger, report); // nothing on a reported seal, but the ship link's stamp
     return out;
   });
+read(sealId, toolCall, body); // the same guards under the lock; writes nothing
+openReview(id, attempt); // a new review: its first seal and ledger, written together
 ```
 
-The root enforces what is true of every write: a reported seal accepts nothing; owner-only tools need the sealing session; once locked, only the tools that declare the caller's agent run. The transition belongs to the owner of the field group it changes, and rebuilds only that group.
+The writer says who writes, and so which guards apply. A tool call (`ToolCall`: its actor, the tool, owner-only or not) is refused once the seal is reported (a tool that shows a reported seal reads it and saves nothing), needs the sealing session for owner-only tools, and, once the budget locks, runs only if the tool declares the caller's agent. The other writers are named for what they are (`HostEvent`, `Watchdog`, `RecoveryWake`, `AutoReport`, `Takeover`, `ShipLink`) and leave a reported seal alone, except the ship link, stamped right after sealing. The transition belongs to the owner of the field group it changes, rebuilds only that group, and returns the next seal or ledger rather than saving it.
 
 Nothing lints this. Transitions live in their owner's modules, `Seal.make` and `new Seal` appear only in `seal/` and in owners' transition functions, and review keeps it that way.
 

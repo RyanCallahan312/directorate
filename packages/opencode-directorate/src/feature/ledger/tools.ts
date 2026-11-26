@@ -11,7 +11,7 @@ import {
   str,
   strArr,
 } from "../../platform/platform.ts";
-import type { DefineTool, ToolCatalog } from "../../platform/platform.ts";
+import type { DefineTool } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import { SideSchema } from "../../seal/region.ts";
@@ -21,7 +21,7 @@ import {
   checkEvidence,
   checkQuote,
   done,
-  mutate,
+  ToolCall,
 } from "../../seal/seal.ts";
 import { Auditor, Compliance, Liaison, Seat } from "../agents/agent.ts";
 import {
@@ -76,83 +76,77 @@ class NoteRefused extends Schema.TaggedError<
 
 export const ledgerTools = (
   tool: DefineTool<
-    | Sessions
-    | Store
-    | Git
-    | Host
-    | ToolCatalog
-    | FileSystem.FileSystem
-    | Path.Path
+    Sessions | Store | Git | Host | FileSystem.FileSystem | Path.Path
   >
 ) => {
   tool({
     description:
       "File a candidate finding to the dossier the moment you find it. The quote must contain at least one complete line (8+ non-space characters) of the code at the anchor on the sealed side; the anchor snaps to the nearest place it is. Evidence is path:line refs you read. Entries stay unverified until a different session clears them.",
     *execute(input, c) {
-      return yield* mutate(
-        c,
+      const by = actor(c);
+
+      return yield* (yield* Sessions).mutate(
         input.seal,
-        "directorate_ledger_add",
-        function* execute(seal) {
-          const store = yield* Store;
+        ToolCall.make({ actor: by, tool: "directorate_ledger_add" }),
+        (review) =>
+          Effect.gen(function* execute() {
+            const { seal } = review;
 
-          if (seal.lensesOff?.includes(input.lens)) {
-            return yield* new EntryRejected({
-              reason: `the ${input.lens} lens is disabled for this review (directorate.json). File it under the lens it also fits, or leave it.`,
-            });
-          }
+            if (seal.lensesOff?.includes(input.lens)) {
+              return yield* new EntryRejected({
+                reason: `the ${input.lens} lens is disabled for this review (directorate.json). File it under the lens it also fits, or leave it.`,
+              });
+            }
 
-          const raw = {
-            endLine: input.line,
-            line: input.line,
-            path: input.path,
-            side: input.side ?? "new",
-          };
+            const raw = {
+              endLine: input.line,
+              line: input.line,
+              path: input.path,
+              side: input.side ?? "new",
+            };
 
-          const anchor = yield* checkQuote(seal, raw, input.quote).pipe(
-            Effect.mapError((e) => new EntryRejected({ reason: e.message }))
-          );
+            const anchor = yield* checkQuote(seal, raw, input.quote).pipe(
+              Effect.mapError((e) => new EntryRejected({ reason: e.message }))
+            );
 
-          const evidence = yield* checkEvidence(seal, input.evidence);
-          const ledger = yield* store.loadLedger(seal.id);
-          // Seats operate under memetic isolation: never reveal other entries' titles or ids.
-          const near = c.agent === Seat.id ? [] : nearby(ledger, anchor);
+            const evidence = yield* checkEvidence(seal, input.evidence);
+            const ledger = yield* review.ledger;
+            // Seats operate under memetic isolation: never reveal other entries' titles or ids.
+            const near = by.agent === Seat.id ? [] : nearby(ledger, anchor);
 
-          const entry: Entry = {
-            anchor,
-            brief: input.brief,
-            consequence: input.consequence,
-            createdAt: yield* DateTime.now,
-            evidence,
-            fix: input.fix,
-            id: `F${ledger.entries.length + 1}`,
-            kind: input.kind,
-            lens: input.lens,
-            quote: input.quote,
-            raisedBy: actor(c),
-            severity: input.severity,
-            status: "open",
-            title: input.title,
-            trigger: input.trigger,
-            verdicts: [],
-          };
+            const entry: Entry = {
+              anchor,
+              brief: input.brief,
+              consequence: input.consequence,
+              createdAt: yield* DateTime.now,
+              evidence,
+              fix: input.fix,
+              id: `F${ledger.entries.length + 1}`,
+              kind: input.kind,
+              lens: input.lens,
+              quote: input.quote,
+              raisedBy: by,
+              severity: input.severity,
+              status: "open",
+              title: input.title,
+              trigger: input.trigger,
+              verdicts: [],
+            };
 
-          yield* store.saveLedger(seal.id, {
-            ...ledger,
-            entries: [...ledger.entries, entry],
-          });
+            const moved =
+              anchor.line === raw.line
+                ? ""
+                : ` Anchor moved to line ${anchor.line}, where the quote is.`;
 
-          const moved =
-            anchor.line === raw.line
-              ? ""
-              : ` Anchor moved to line ${anchor.line}, where the quote is.`;
-
-          return yield* done(
-            seal,
-            `Recorded ${entry.id} (open).${moved}${near.length ? ` Nearby entries: ${near.map((e) => `${e.id} "${e.title}" (${e.status})`).join("; ")}. If it is the same root cause, say so in your handoff.` : ""}`,
-            c.agent
-          );
-        }
+            return {
+              ledger: { ...ledger, entries: [...ledger.entries, entry] },
+              out: yield* done(
+                seal,
+                `Recorded ${entry.id} (open).${moved}${near.length ? ` Nearby entries: ${near.map((e) => `${e.id} "${e.title}" (${e.status})`).join("; ")}. If it is the same root cause, say so in your handoff.` : ""}`,
+                by
+              ),
+            };
+          })
       );
     },
     input: Schema.Struct({
@@ -211,96 +205,97 @@ export const ledgerTools = (
     description:
       "Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), duplicate (of an open or confirmed entry), or, in a re-check, resolved (a finding carried from the earlier review no longer holds; evidence = the lines that fix it). directorate_liaison decides only minor entries raised by others and may withdraw its own open entries; directorate_compliance decides everything else, including every carried verified finding, and may re-decide. Refuting or resolving an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.",
     *execute(input, c) {
-      return yield* mutate(
-        c,
+      const by = actor(c);
+
+      return yield* (yield* Sessions).mutate(
         input.seal,
-        "directorate_ledger_verdict",
-        function* execute(seal) {
-          const store = yield* Store;
-          const ledger = yield* store.loadLedger(seal.id);
-          const entry = ledger.entries.find((e) => e.id === input.id);
+        ToolCall.make({ actor: by, tool: "directorate_ledger_verdict" }),
+        (review) =>
+          Effect.gen(function* execute() {
+            const { seal } = review;
+            const ledger = yield* review.ledger;
+            const entry = ledger.entries.find((e) => e.id === input.id);
 
-          if (!entry) {
-            return yield* new NoEntry({ id: input.id });
-          }
+            if (!entry) {
+              return yield* new NoEntry({ id: input.id });
+            }
 
-          const by = actor(c);
+            const err = verdictError(
+              entry,
+              by,
+              {
+                evidence: input.evidence,
+                of: input.of,
+                severity: input.severity,
+                verdict: input.verdict,
+              },
+              ledger
+            );
 
-          const err = verdictError(
-            entry,
-            by,
-            {
-              evidence: input.evidence,
-              of: input.of,
-              severity: input.severity,
-              verdict: input.verdict,
-            },
-            ledger
-          );
+            if (err) {
+              return yield* new VerdictRefused({ message: err });
+            }
 
-          if (err) {
-            return yield* new VerdictRefused({ message: err });
-          }
+            const evidence = yield* checkEvidence(seal, input.evidence);
 
-          const evidence = yield* checkEvidence(seal, input.evidence);
+            // A confirmation pins the entry to the sealed code, re-anchored if the verdict names a new place.
+            const want =
+              input.path || input.line || input.side
+                ? {
+                    endLine: input.line ?? entry.anchor.endLine,
+                    line: input.line ?? entry.anchor.line,
+                    path: input.path ?? entry.anchor.path,
+                    side: input.side ?? entry.anchor.side,
+                  }
+                : entry.anchor;
 
-          // A confirmation pins the entry to the sealed code, re-anchored if the verdict names a new place.
-          const want =
-            input.path || input.line || input.side
-              ? {
-                  endLine: input.line ?? entry.anchor.endLine,
-                  line: input.line ?? entry.anchor.line,
-                  path: input.path ?? entry.anchor.path,
-                  side: input.side ?? entry.anchor.side,
-                }
-              : entry.anchor;
+            const quote = input.quote ?? entry.quote;
 
-          const quote = input.quote ?? entry.quote;
-
-          const anchored =
-            input.verdict === "confirmed"
-              ? {
-                  anchor: yield* checkQuote(seal, want, quote).pipe(
-                    Effect.mapError(
-                      (e) =>
-                        new VerdictRefused({
-                          message: `Cannot confirm: the anchor does not match the sealed code (${e.message}). Re-anchor with path/line/quote, or refute.`,
-                        })
-                    )
-                  ),
-                  quote,
-                }
-              : {};
-
-          const verdict = {
-            at: yield* DateTime.now,
-            by,
-            evidence,
-            of: input.of,
-            rationale: input.rationale,
-            severity:
+            const anchored =
               input.verdict === "confirmed"
-                ? (input.severity ?? currentSeverity(entry))
-                : undefined,
-            verdict: input.verdict,
-          };
+                ? {
+                    anchor: yield* checkQuote(seal, want, quote).pipe(
+                      Effect.mapError(
+                        (e) =>
+                          new VerdictRefused({
+                            message: `Cannot confirm: the anchor does not match the sealed code (${e.message}). Re-anchor with path/line/quote, or refute.`,
+                          })
+                      )
+                    ),
+                    quote,
+                  }
+                : {};
 
-          const { ledger: next, reopened } = decide(ledger, {
-            ...entry,
-            ...anchored,
-            staleReason: undefined,
-            status: input.verdict,
-            verdicts: [...entry.verdicts, verdict],
-          });
+            const verdict = {
+              at: yield* DateTime.now,
+              by,
+              evidence,
+              of: input.of,
+              rationale: input.rationale,
+              severity:
+                input.verdict === "confirmed"
+                  ? (input.severity ?? currentSeverity(entry))
+                  : undefined,
+              verdict: input.verdict,
+            };
 
-          yield* store.saveLedger(seal.id, next);
+            const { ledger: next, reopened } = decide(ledger, {
+              ...entry,
+              ...anchored,
+              staleReason: undefined,
+              status: input.verdict,
+              verdicts: [...entry.verdicts, verdict],
+            });
 
-          return yield* done(
-            seal,
-            `${entry.id} → ${input.verdict}.${reopened.length ? ` Reopened its duplicates: ${reopened.join(" ")}.` : ""} ${unresolved(next).length} entries still unresolved.`,
-            by.agent
-          );
-        }
+            return {
+              ledger: next,
+              out: yield* done(
+                seal,
+                `${entry.id} → ${input.verdict}.${reopened.length ? ` Reopened its duplicates: ${reopened.join(" ")}.` : ""} ${unresolved(next).length} entries still unresolved.`,
+                by
+              ),
+            };
+          })
       );
     },
     input: Schema.Struct({
@@ -422,7 +417,7 @@ export const ledgerTools = (
       return yield* done(
         seal,
         `${head}\n\n${rows.join(input.brief ? "\n" : "\n\n") || "No entries."}`,
-        c.agent
+        actor(c)
       );
     },
     input: Schema.Struct({
@@ -439,52 +434,50 @@ export const ledgerTools = (
     description:
       "Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial. directorate_liaison only: kind answered, with text = a failed Auditor's question: line verbatim, records that you answered it yourself, so it no longer counts as unanswered.",
     *execute(input, c) {
-      return yield* mutate(
-        c,
+      const by = actor(c);
+
+      return yield* (yield* Sessions).mutate(
         input.seal,
-        "directorate_note",
-        function* execute(seal) {
-          const store = yield* Store;
-          const ledger = yield* store.loadLedger(seal.id);
-          let { text } = input;
+        ToolCall.make({ actor: by, tool: "directorate_note" }),
+        (review) =>
+          Effect.gen(function* execute() {
+            const { seal } = review;
+            const ledger = yield* review.ledger;
+            let { text } = input;
 
-          if (input.kind === "answered") {
-            if (c.agent !== Liaison.id) {
-              return yield* new NoteRefused({
-                message: `Only ${Liaison.id} records an answered question.`,
-              });
+            if (input.kind === "answered") {
+              if (by.agent !== Liaison.id) {
+                return yield* new NoteRefused({
+                  message: `Only ${Liaison.id} records an answered question.`,
+                });
+              }
+
+              text = questionText(input.text);
+
+              const failed = childFailures(seal, ledger)
+                .filter((x) => x.agent === Auditor.id)
+                .map(childQuestion);
+
+              if (!failed.includes(text)) {
+                return yield* new NoteRefused({
+                  message: failed.length
+                    ? `No failed Auditor asked "${text}". Pass one of these question lines verbatim: ${failed.map((q) => `"${q}"`).join("; ")}.`
+                    : "No failed Auditor question is unanswered.",
+                });
+              }
             }
 
-            text = questionText(input.text);
-
-            const failed = childFailures(seal, ledger)
-              .filter((x) => x.agent === Auditor.id)
-              .map(childQuestion);
-
-            if (!failed.includes(text)) {
-              return yield* new NoteRefused({
-                message: failed.length
-                  ? `No failed Auditor asked "${text}". Pass one of these question lines verbatim: ${failed.map((q) => `"${q}"`).join("; ")}.`
-                  : "No failed Auditor question is unanswered.",
-              });
-            }
-          }
-
-          yield* store.saveLedger(seal.id, {
-            ...ledger,
-            notes: [
-              ...ledger.notes,
-              {
-                at: yield* DateTime.now,
-                by: actor(c),
-                kind: input.kind,
-                text,
+            return {
+              ledger: {
+                ...ledger,
+                notes: [
+                  ...ledger.notes,
+                  { at: yield* DateTime.now, by, kind: input.kind, text },
+                ],
               },
-            ],
-          });
-
-          return yield* done(seal, `Noted (${input.kind}).`, c.agent);
-        }
+              out: yield* done(seal, `Noted (${input.kind}).`, by),
+            };
+          })
       );
     },
     input: Schema.Struct({ kind: NoteKind, seal: str, text: str }),

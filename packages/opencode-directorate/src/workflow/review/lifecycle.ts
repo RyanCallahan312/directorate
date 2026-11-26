@@ -11,7 +11,7 @@ import { reopen, unresolved } from "../../feature/ledger/decide.ts";
 import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
-import { emptyLedger, Store } from "../../records/records.ts";
+import { emptyLedger } from "../../records/records.ts";
 import { carryMarks } from "../../seal/coverage.ts";
 import { Seal } from "../../seal/record.ts";
 import type { Region } from "../../seal/region.ts";
@@ -21,6 +21,7 @@ import {
   currentFingerprint,
   depsOf,
   inDependencyDir,
+  openReview,
   readable,
   repinned,
   resolveEnds,
@@ -83,7 +84,6 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     lensesOff?: readonly string[] | undefined;
     beforeCapture?: () => Effect.Effect<void>;
   }) {
-    const store = yield* Store;
     const top = yield* (yield* Git).root(input.repo);
     const host = yield* hostDirectory;
     const { pid } = yield* ProcessIdentity;
@@ -98,7 +98,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     );
 
     // Each attempt re-resolves the ends, then captures; files changing mid-capture retry the whole attempt.
-    return yield* store.create(
+    return yield* openReview(
       id,
       Effect.gen(function* attempt() {
         const ends = yield* resolveEnds(top, Target.make(input.target));
@@ -126,9 +126,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
           input.beforeCapture
         );
 
-        yield* store.saveBoth(seal, emptyLedger);
-
-        return seal;
+        return { ledger: emptyLedger, out: seal, seal };
       }).pipe(
         settled(
           "Files kept changing while sealing (3 attempts). Wait until edits stop, then seal again."
@@ -172,7 +170,7 @@ interface RefreshResult {
 
 /**
  * Re-pins a moved target into the seal's next generation. Regions whose content did not change keep their read receipts
- * and dispositions; entries whose anchor or evidence changed reopen. Both are saved, and returned.
+ * and dispositions; entries whose anchor or evidence changed reopen. Both are returned, for the door to save.
  */
 export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
   function* refreshSeal(
@@ -251,7 +249,6 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     });
 
     const nextLedger = { ...ledger, entries };
-    yield* (yield* Store).saveBoth(next, nextLedger);
 
     return {
       files: [...changed],
@@ -294,7 +291,6 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
   }) {
     const { prior } = input;
     yield* recheckable(prior);
-    const store = yield* Store;
     const host = yield* hostDirectory;
     const { pid } = yield* ProcessIdentity;
     const createdAt = yield* DateTime.now;
@@ -309,7 +305,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
         )
     );
 
-    return yield* store.create(
+    return yield* openReview(
       id,
       Effect.gen(function* attempt() {
         // A worktree seal keeps its base (committed fixes are not a new change) but records the HEAD it now sits on;
@@ -435,23 +431,26 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
         });
 
         const ledger: Ledger = { entries, notes: [] };
-        yield* store.saveBoth(seal, ledger);
 
         return {
-          files: [...changed],
-          kept,
           ledger,
-          reopened,
+          out: {
+            files: [...changed],
+            kept,
+            ledger,
+            reopened,
+            seal,
+            // Explicit notes, and Auditor questions the earlier review left without an answer.
+            unanswered: [
+              ...new Set([
+                ...input.ledger.notes
+                  .filter((n) => n.kind === "unanswered")
+                  .map((n) => n.text),
+                ...unansweredQuestions(prior, input.ledger),
+              ]),
+            ],
+          },
           seal,
-          // Explicit notes, and Auditor questions the earlier review left without an answer.
-          unanswered: [
-            ...new Set([
-              ...input.ledger.notes
-                .filter((n) => n.kind === "unanswered")
-                .map((n) => n.text),
-              ...unansweredQuestions(prior, input.ledger),
-            ]),
-          ],
         };
       }).pipe(
         settled(

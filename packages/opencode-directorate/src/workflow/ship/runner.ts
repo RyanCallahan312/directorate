@@ -40,7 +40,12 @@ import {
 import type { Activity, Worktree } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import { currentFingerprint, FreshnessUnchecked } from "../../seal/seal.ts";
+import {
+  currentFingerprint,
+  FreshnessUnchecked,
+  Sessions,
+  ShipLink,
+} from "../../seal/seal.ts";
 import { shipped } from "../review/custody.ts";
 import { parseRequest, reviewRequest } from "../review/request.ts";
 import type { ReviewScope } from "../review/request.ts";
@@ -392,6 +397,7 @@ export const registerShip = Effect.fn("Ship.register")(
     const host = yield* Host;
     const git = yield* Git;
     const store = yield* Store;
+    const sessions = yield* Sessions;
     const services = yield* Effect.context<Git | Worktree | Digest.Digest>();
     const random = yield* SecureRandom.SecureRandom;
     const uuid = random.uuidV4();
@@ -530,10 +536,10 @@ export const registerShip = Effect.fn("Ship.register")(
           }
 
           // The seal names its ship first, so the review stays the ship's even once this record is stopped or replaced.
-          yield* store.withLock(
-            seal.id,
-            Effect.gen(function* own() {
-              yield* store.save(shipped(yield* store.load(seal.id), state.id));
+          yield* sessions.mutate(seal.id, ShipLink.make({}), (review) =>
+            Effect.succeed({
+              out: undefined,
+              seal: shipped(review.seal, state.id),
             })
           );
           yield* write(parentID, {

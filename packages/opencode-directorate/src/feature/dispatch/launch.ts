@@ -5,7 +5,7 @@ import { DateTime, Effect, Option, Predicate, Schema } from "effect";
 import { ignore } from "../../platform/error.ts";
 import { adapter, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
-import { Sessions } from "../../seal/seal.ts";
+import { HostEvent, Sessions } from "../../seal/seal.ts";
 import { childNamed, Liaison, Seat } from "../agents/agent.ts";
 import {
   followUpPrompt,
@@ -66,7 +66,9 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
         }
 
         yield* sessions
-          .update(id, (s) => resumed(s, ev.sessionID))
+          .mutate(id, HostEvent.make({}), ({ seal: s }) =>
+            Effect.succeed({ out: undefined, seal: resumed(s, ev.sessionID) })
+          )
           .pipe(
             ignore(`could not mark ${ev.sessionID} running in ${id}`, "Warn")
           );
@@ -90,7 +92,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       // Assign seats under the seal lock so parallel launches take different models.
       let launch: Child | undefined;
       yield* sessions
-        .update(seal.id, (s) => {
+        .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           // A follow-up continues a child session: a new run of it, keeping the seat it was launched for.
           const prior = assignment.sessionID
             ? s.children.findLast((c) => c.session === assignment.sessionID)
@@ -109,7 +111,10 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
               status: "launching",
             };
 
-            return launched(s, launch);
+            return Effect.succeed({
+              out: undefined,
+              seal: launched(s, launch),
+            });
           }
 
           const model =
@@ -129,7 +134,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             status: "launching",
           };
 
-          return launched(s, launch);
+          return Effect.succeed({ out: undefined, seal: launched(s, launch) });
         })
         .pipe(
           ignore(`could not register ${assignment.agent} in ${seal.id}`, "Warn")
@@ -228,23 +233,29 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       const endedAt = yield* DateTime.now;
       let child: string | undefined;
       yield* sessions
-        .update(seal.id, (s) => {
+        .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           const launch = s.children.find((x) => x.call === ev.id);
 
           // Not an Auditor, Seat, or Compliance of this review.
           if (!launch) {
-            return;
+            return Effect.succeed({ out: undefined });
           }
 
           // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
           // registered, so there is no child, and no failure to report.
           if (ev.status === "error" && launch.status === "launching") {
-            return withdrawn(s, launch);
+            return Effect.succeed({
+              out: undefined,
+              seal: withdrawn(s, launch),
+            });
           }
 
           child = meta.sessionID ?? launch.session;
 
-          return returned(s, ev.id, meta.sessionID, outcome, endedAt);
+          return Effect.succeed({
+            out: undefined,
+            seal: returned(s, ev.id, meta.sessionID, outcome, endedAt),
+          });
         })
         .pipe(ignore(`could not record subagent result in ${seal.id}`, "Warn"));
 

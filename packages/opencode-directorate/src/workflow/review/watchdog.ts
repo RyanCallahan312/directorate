@@ -17,7 +17,7 @@ import {
 } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import { Sessions } from "../../seal/seal.ts";
+import { RecoveryWake, Sessions, Watchdog } from "../../seal/seal.ts";
 import { halted, shipped, waking, woken } from "./custody.ts";
 import { interruptedReview } from "./interrupted.ts";
 import type { AutoReport } from "./tools.ts";
@@ -133,10 +133,9 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
         return;
       }
 
-      yield* store.withLock(
-        seal.id,
+      yield* sessions.mutate(seal.id, RecoveryWake.make({}), (review) =>
         Effect.gen(function* resumeOwner() {
-          const current = yield* store.load(seal.id);
+          const current = review.seal;
 
           if (
             !recoverable(current) ||
@@ -144,13 +143,13 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
             (yield* foreign(current.pid)) ||
             (yield* stalledOwner) !== sessionID
           ) {
-            return;
+            return { out: undefined };
           }
 
           const messages = yield* host.session.context({ sessionID });
 
           if (interruptedReview(current, messages)) {
-            return yield* store.save(halted(current));
+            return { out: undefined, seal: halted(current) };
           }
 
           const prior =
@@ -170,7 +169,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
             prior?.admitted &&
             (!delivered || timeOfWake(prior) >= loadedAt)
           ) {
-            return;
+            return { out: undefined };
           }
 
           const retry = prior?.admitted ? undefined : prior;
@@ -183,7 +182,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
           // The intent is saved before the wake, and the wake's ID is reused until its admission is saved: the host
           // keeps the first admission of an ID, so neither a lost wake nor a lost acknowledgement repeats or drops it.
           if (!retry) {
-            yield* store.save(waking(current, pid, recovery));
+            yield* review.checkpoint(waking(current, pid, recovery));
           }
 
           if (!delivered || !retry) {
@@ -195,8 +194,11 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
             });
           }
 
-          yield* store.save(woken(current, pid, recovery, yield* DateTime.now));
-        }).pipe(Effect.uninterruptible)
+          return {
+            out: undefined,
+            seal: woken(current, pid, recovery, yield* DateTime.now),
+          };
+        })
       );
     }
   );
@@ -241,10 +243,17 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
 
                 if (shipID) {
                   // Older seals stored membership only on the Ship. Retain it even if Ship is stopped later.
-                  return yield* sessions.update(seal.id, (current) =>
-                    current.ship === undefined
-                      ? shipped(current, shipID)
-                      : undefined
+                  return yield* sessions.mutate(
+                    seal.id,
+                    Watchdog.make({}),
+                    ({ seal: current }) =>
+                      Effect.succeed({
+                        out: undefined,
+                        seal:
+                          current.ship === undefined
+                            ? shipped(current, shipID)
+                            : undefined,
+                      })
                   );
                 }
 

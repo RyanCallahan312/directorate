@@ -1,7 +1,6 @@
 // Directorate sessions: which seal each OpenCode session works on, the host operations on those sessions, and the door
-// every tool change to an open seal goes through.
+// every write to a review (its seal and its ledger) goes through.
 import { Session } from "@opencode/schema/session";
-import type { Tool } from "@opencode/schema/tool";
 import {
   Context,
   Effect,
@@ -15,15 +14,17 @@ import {
 } from "effect";
 
 import {
+  ActorSchema,
   agentNamed,
   budgetLine,
   childNamed,
   Liaison,
 } from "../feature/agents/agent.ts";
+import type { Actor } from "../feature/agents/agent.ts";
 import { childOutstanding } from "../feature/dispatch/lifecycle.ts";
+import type { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
-import type { Body } from "../platform/platform.ts";
 import { ActiveSeal, Store } from "../records/records.ts";
 import { budget } from "../workflow/review/window.ts";
 import type { Seal } from "./record.ts";
@@ -71,6 +72,110 @@ export class Lockdown extends Schema.TaggedError<
   }
 }
 
+// ---------- writers ----------
+// Who writes to a review decides which of the root's guards apply. Guards apply to an open seal. A reported seal accepts
+// no change from any writer but the ship link; each meets it in its own way: refused, left alone silently, or shown
+// read-only.
+
+/**
+ * A tool call by `actor`. On an open seal, owner-only tools (`callers: "owner"`) need the session that sealed it, and once
+ * the budget locks only the tools the ToolCatalog says the caller's agent keeps still run (unless `lockdown: "exempt"`).
+ * A reported seal refuses it (SealReported), or, for a tool that shows a reported seal (`reported: "shown"`), lets it read
+ * the seal while saving nothing.
+ */
+export class ToolCall extends Schema.TaggedClass<
+  ToolCall,
+  { readonly brand: unique symbol }
+>()("ToolCall", {
+  actor: ActorSchema,
+  callers: Schema.Literals(["participants", "owner"]).pipe(
+    Schema.withConstructorDefault(Effect.succeed("participants" as const))
+  ),
+  lockdown: Schema.Literals(["catalog", "exempt"]).pipe(
+    Schema.withConstructorDefault(Effect.succeed("catalog" as const))
+  ),
+  reported: Schema.Literals(["refused", "shown"]).pipe(
+    Schema.withConstructorDefault(Effect.succeed("refused" as const))
+  ),
+  tool: Schema.String,
+}) {}
+
+/** The ordered session-event consumer, and runs settled after a reload: a reported seal is left alone, silently. */
+export class HostEvent extends Schema.TaggedClass<
+  HostEvent,
+  { readonly brand: unique symbol }
+>()("HostEvent", {}) {}
+
+/** The watchdog's sweep, stamping a ship on an older seal: a reported seal is left alone, silently. */
+export class Watchdog extends Schema.TaggedClass<
+  Watchdog,
+  { readonly brand: unique symbol }
+>()("Watchdog", {}) {}
+
+/**
+ * The watchdog waking a stalled Liaison: a reported seal is left alone, silently, and once the seal is loaded nothing
+ * interrupts the change, so a wake is never sent without its intent and acknowledgement around it.
+ */
+export class RecoveryWake extends Schema.TaggedClass<
+  RecoveryWake,
+  { readonly brand: unique symbol }
+>()("RecoveryWake", {}) {}
+
+/** Ship stamping its id on the seal it was handed at sealing: written whatever the seal's state. */
+export class ShipLink extends Schema.TaggedClass<
+  ShipLink,
+  { readonly brand: unique symbol }
+>()("ShipLink", {}) {}
+
+/** Filing the Directive without the Liaison, for an abandoned or expired review: a reported seal is left alone, silently. */
+export class AutoReport extends Schema.TaggedClass<
+  AutoReport,
+  { readonly brand: unique symbol }
+>()("AutoReport", {}) {}
+
+/** `actor` resuming or taking over a review: its transition refuses a reported seal itself, which saves nothing. */
+export class Takeover extends Schema.TaggedClass<
+  Takeover,
+  { readonly brand: unique symbol }
+>()("Takeover", { actor: ActorSchema }) {}
+
+const WriterSchema = Schema.Union([
+  ToolCall,
+  HostEvent,
+  Watchdog,
+  RecoveryWake,
+  ShipLink,
+  AutoReport,
+  Takeover,
+]).pipe(Schema.toTaggedUnion("_tag"));
+
+type Writer = typeof WriterSchema.Type;
+
+/** Writers that leave a reported seal alone: the door returns nothing for them then. */
+type Quiet = HostEvent | Watchdog | RecoveryWake | AutoReport;
+
+/**
+ * What a transition hands the door: its output, and the seal and ledger it rebuilt (absent: unchanged, nothing written).
+ * Filing the Directive hands its report instead of a ledger: the report and the reported seal are written together.
+ */
+type Revision<A> =
+  | {
+      readonly out: A;
+      readonly seal?: Seal | undefined;
+      readonly ledger?: Ledger | undefined;
+      readonly report?: undefined;
+    }
+  | {
+      readonly out: A;
+      readonly seal: Seal;
+      readonly report: string;
+      readonly ledger?: undefined;
+    };
+
+/** How a writer that leaves a reported seal alone is admitted. */
+const quietly = (seal: Seal) =>
+  Effect.succeed(seal.reportedAt ? ("skip" as const) : ("write" as const));
+
 /** A host session id, or none for anything else (hook events are typed loosely). */
 const asSessionID = Schema.decodeUnknownOption(Session.ID);
 
@@ -81,6 +186,7 @@ const participant = (s: Seal, sessionID: string) =>
 const make = Effect.gen(function* make() {
   const host = yield* Host;
   const store = yield* Store;
+  const catalog = yield* ToolCatalog;
   /**
    * session -> seal id, for the Liaison and the Auditors/Seats/Compliance it dispatched. A cache: the Liaison's
    * `directorate-seal` instruction entry is the durable record, and a child reaches it through its parent session.
@@ -224,6 +330,169 @@ const make = Effect.gen(function* make() {
       .remove({ key: SEAL_ENTRY, sessionID: Session.ID.make(sessionID) })
       .pipe(ignore("could not clear seal instructions"));
 
+  // ---------- the door ----------
+
+  /** A tool call's guards: what a reported seal does to it, then owner-only, then lockdown. */
+  const called = Effect.fnUntraced(function* called(
+    seal: Seal,
+    call: ToolCall
+  ) {
+    if (seal.reportedAt) {
+      if (call.reported === "shown") {
+        return "read" as const;
+      }
+
+      return yield* new SealReported({
+        autoReported: seal.autoReported === true,
+        seal: seal.id,
+      });
+    }
+
+    if (call.callers === "owner" && seal.ownerSession !== call.actor.session) {
+      return yield* new NotOwner({ seal: seal.id, tool: call.tool });
+    }
+
+    // A model step that began before the deadline still sees the tools stripped at lockdown, and the lock may have been
+    // held past it: check under the seal's lock.
+    if (
+      call.lockdown === "catalog" &&
+      !(yield* catalog.keeps(call.actor.agent, call.tool)) &&
+      (yield* budget(seal.window)).phase === "locked"
+    ) {
+      return yield* new Lockdown({
+        agent: call.actor.agent,
+        seal: seal.id,
+        tool: call.tool,
+      });
+    }
+
+    return "write" as const;
+  });
+
+  /**
+   * Whether `writer` may change `seal`: "write" runs the transition and saves what it hands back, "read" runs it on a
+   * reported seal and saves nothing, "skip" leaves a reported seal alone without running it.
+   */
+  const admit = (seal: Seal, writer: Writer) =>
+    WriterSchema.match(writer, {
+      AutoReport: () => quietly(seal),
+      HostEvent: () => quietly(seal),
+      RecoveryWake: () => quietly(seal),
+      ShipLink: () => Effect.succeed("write" as const),
+      Takeover: () =>
+        Effect.succeed(
+          seal.reportedAt ? ("read" as const) : ("write" as const)
+        ),
+      ToolCall: (call) => called(seal, call),
+      Watchdog: () => quietly(seal),
+    });
+
+  /** Writes what a revision changed: the report with its seal, the ledger before the seal, or either alone. */
+  const persist = (sealId: string, revision: Revision<unknown>) => {
+    if (revision.report !== undefined) {
+      return store.publish(revision.seal, revision.report);
+    }
+
+    if (revision.seal && revision.ledger) {
+      return store.saveBoth(revision.seal, revision.ledger);
+    }
+
+    if (revision.ledger) {
+      return store.saveLedger(sealId, revision.ledger);
+    }
+
+    return revision.seal ? store.save(revision.seal) : Effect.void;
+  };
+
+  /** The seal under its lock: a tool caller that participates in it is bound to it on the way. */
+  const loaded = (sealId: string, writer: Writer) =>
+    WriterSchema.isAnyOf(["ToolCall"])(writer)
+      ? sealFor(writer.actor.session, sealId)
+      : store.load(sealId);
+
+  /** What the door itself may fail with, besides the transition's own failures. */
+  type DoorError =
+    | Effect.Error<ReturnType<typeof store.withLock<never, never, never>>>
+    | Effect.Error<ReturnType<typeof loaded>>
+    | Effect.Error<ReturnType<typeof admit>>
+    | Effect.Error<ReturnType<typeof persist>>;
+
+  /** The review a transition reads: the seal as loaded, its ledger when asked for, and a write-ahead save. */
+  const reviewOf = (
+    seal: Seal,
+    save: (
+      revision: Revision<undefined>
+    ) => Effect.Effect<void, Effect.Error<ReturnType<typeof persist>>>
+  ) => ({
+    /** Saves `next` now, before an outside effect the transition goes on to cause; the door still saves the result. */
+    checkpoint: (next: Seal) => save({ out: undefined, seal: next }),
+    ledger: store.loadLedger(seal.id),
+    seal,
+  });
+
+  type Review = ReturnType<typeof reviewOf>;
+
+  /**
+   * The one door: under the seal's cross-process lock it loads the review, applies the guards `writer` is subject to,
+   * runs `transition`, saves what it changed, and returns its output. Writers that leave a reported seal alone get
+   * nothing back from one.
+   */
+  function mutate<T extends Revision<unknown>, E, R>(
+    sealId: string,
+    writer: Quiet,
+    transition: (review: Review) => Effect.Effect<T, E, R>
+  ): Effect.Effect<T["out"] | undefined, DoorError | E, R>;
+  function mutate<T extends Revision<unknown>, E, R>(
+    sealId: string,
+    writer: Writer,
+    transition: (review: Review) => Effect.Effect<T, E, R>
+  ): Effect.Effect<T["out"], DoorError | E, R>;
+  function mutate<T extends Revision<unknown>, E, R>(
+    sealId: string,
+    writer: Writer,
+    transition: (review: Review) => Effect.Effect<T, E, R>
+  ) {
+    const body = Effect.gen(function* review() {
+      const seal = yield* loaded(sealId, writer);
+      const admitted = yield* admit(seal, writer);
+
+      if (admitted === "skip") {
+        return;
+      }
+
+      const save = (revision: Revision<unknown>) =>
+        admitted === "write" ? persist(sealId, revision) : Effect.void;
+
+      const revision = yield* transition(reviewOf(seal, save));
+      yield* save(revision);
+
+      return revision.out;
+    });
+
+    return store.withLock(
+      sealId,
+      WriterSchema.isAnyOf(["RecoveryWake"])(writer)
+        ? Effect.uninterruptible(body)
+        : body
+    );
+  }
+
+  /** Runs `read` on the seal under its lock, after the guards `call` is subject to; it writes nothing. */
+  const read = <A, E, R>(
+    sealId: string,
+    call: ToolCall,
+    body: (seal: Seal) => Effect.Effect<A, E, R>
+  ) =>
+    store.withLock(
+      sealId,
+      Effect.gen(function* readLocked() {
+        const seal = yield* sealFor(call.actor.session, sealId);
+        yield* called(seal, call);
+
+        return yield* body(seal);
+      })
+    );
+
   return {
     active,
     /** The session's agent, as the host falls back to when a permission request names none. */
@@ -276,13 +545,7 @@ const make = Effect.gen(function* make() {
             )
         )
       ),
-    /** Runs body under the seal's cross-process lock, on a freshly loaded seal. */
-    locked: <A, E, R>(
-      sessionID: string,
-      sealId: string,
-      body: (seal: Seal) => Effect.Effect<A, E, R>
-    ) =>
-      store.withLock(sealId, Effect.flatMap(sealFor(sessionID, sealId), body)),
+    mutate,
     /** Tells the seal's owner session something without starting a turn. */
     notify: (seal: Seal, text: string) =>
       host.session
@@ -292,6 +555,7 @@ const make = Effect.gen(function* make() {
           text,
         })
         .pipe(ignore(`could not notify the owner of ${seal.id}`, "Warn")),
+    read,
     record,
     recordedSeal,
     sealFor,
@@ -314,19 +578,6 @@ const make = Effect.gen(function* make() {
 
       yield* record(seal.ownerSession, seal);
     }),
-    /** Changes an open seal under its lock; `change` returns undefined when nothing changed, and only changes are written. */
-    update: (id: string, change: (s: Seal) => Seal | undefined) =>
-      store.withLock(
-        id,
-        Effect.gen(function* update() {
-          const s = yield* store.load(id);
-          const next = s.reportedAt ? undefined : change(s);
-
-          if (next) {
-            yield* store.save(next);
-          }
-        })
-      ),
   };
 });
 
@@ -349,77 +600,35 @@ export const sealLayer = Layer.effect(
 export const done = Effect.fnUntraced(function* done(
   seal: Seal,
   text: string,
-  agent?: string
+  by?: Actor
 ) {
   return {
     content: seal.reportedAt
       ? text
-      : `${text}\n\n${yield* budgetLine(agentNamed(agent) ?? Liaison, seal.window)}`,
+      : `${text}\n\n${yield* budgetLine(agentNamed(by?.agent) ?? Liaison, seal.window)}`,
   };
 });
 
-/** A reported seal accepts no changes; an owner-only tool also needs the session that sealed it. */
-export const writable = (
-  seal: Seal,
-  c: Tool.Context,
-  name: string,
-  ownerOnly = false
-) => {
-  if (seal.reportedAt) {
-    return Effect.fail(
-      new SealReported({
-        autoReported: seal.autoReported === true,
-        seal: seal.id,
-      })
-    );
-  }
-
-  return ownerOnly && seal.ownerSession !== c.sessionID
-    ? Effect.fail(new NotOwner({ seal: seal.id, tool: name }))
-    : Effect.void;
-};
-
-/** Runs body under the seal's lock, on a freshly loaded seal. */
-export const locked = <A, R>(
-  c: Tool.Context,
-  sealId: string,
-  body: Body<[seal: Seal], A, R>
-) =>
-  Effect.flatMap(Effect.service(Sessions), (sessions) =>
-    sessions.locked(c.sessionID, sealId, (seal) => Effect.gen(() => body(seal)))
-  );
-
 /**
- * Once an open seal's budget locks, only the caller's locked tools run: a model step that began before the deadline still
- * sees the tools stripped at lockdown, and the lock may have been held past it. Check under the seal's lock.
+ * Opens review `id`, the door's sibling for a review that does not exist yet: `attempt` captures into the new seal's
+ * directory and hands back the first seal and ledger, written together. If it fails before they are, the directory goes.
+ * It needs no host session, so a review opens wherever capture runs.
  */
-export const unlocked = Effect.fnUntraced(function* unlocked(
-  seal: Seal,
-  c: Tool.Context,
-  name: string
-) {
-  const catalog = yield* ToolCatalog;
-
-  if (
-    !seal.reportedAt &&
-    !(yield* catalog.keeps(c.agent, name)) &&
-    (yield* budget(seal.window)).phase === "locked"
-  ) {
-    return yield* new Lockdown({ agent: c.agent, seal: seal.id, tool: name });
-  }
-});
-
-/** A change to an open seal, under its lock; once the budget locks, only the caller's locked tools run. */
-export const mutate = <A, R>(
-  c: Tool.Context,
-  sealId: string,
-  name: string,
-  body: Body<[seal: Seal], A, R>,
-  ownerOnly = false
+export const openReview = <A, E, R>(
+  id: string,
+  attempt: Effect.Effect<
+    { readonly seal: Seal; readonly ledger: Ledger; readonly out: A },
+    E,
+    R
+  >
 ) =>
-  locked<A, R | ToolCatalog>(c, sealId, function* mutateSeal(seal) {
-    yield* writable(seal, c, name, ownerOnly);
-    yield* unlocked(seal, c, name);
-
-    return yield* body(seal);
-  });
+  Effect.flatMap(Effect.service(Store), (store) =>
+    store.create(
+      id,
+      attempt.pipe(
+        Effect.flatMap((opened) =>
+          store.saveBoth(opened.seal, opened.ledger).pipe(Effect.as(opened.out))
+        )
+      )
+    )
+  );

@@ -8,7 +8,7 @@ import { ignore, recover } from "../../platform/error.ts";
 import { activity, createdAt, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import { Sessions } from "../../seal/seal.ts";
+import { HostEvent, Sessions } from "../../seal/seal.ts";
 import { halted } from "../../workflow/review/custody.ts";
 import { childNamed } from "../agents/agent.ts";
 import {
@@ -113,18 +113,20 @@ export const settleChildren = Effect.fn("Directorate.settleChildren")(
         : [];
 
       // The session's last outcome is not proof of how an exact follow-up ended.
-      yield* sessions.update(seal.id, (s) => {
+      yield* sessions.mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
         const followed = recoverFollowUps(s, session, messages);
 
-        return (
-          finished(
-            followed ?? s,
-            session,
-            completed ? "completed" : "failed",
-            endedAt,
-            "initial"
-          ) ?? followed
-        );
+        return Effect.succeed({
+          out: undefined,
+          seal:
+            finished(
+              followed ?? s,
+              session,
+              completed ? "completed" : "failed",
+              endedAt,
+              "initial"
+            ) ?? followed,
+        });
       });
     }
   }
@@ -202,13 +204,13 @@ export const consumeSessionEvents = Effect.fnUntraced(
 
       let linked = false;
       yield* sessions
-        .update(seal.id, (s) => {
+        .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           const next = claimed(s, sessionID, agent, title);
           linked =
             next !== undefined ||
             s.children.some((c) => c.session === sessionID);
 
-          return next;
+          return Effect.succeed({ out: undefined, seal: next });
         })
         .pipe(
           ignore(`could not link ${agent} ${sessionID} to ${seal.id}`, "Warn")
@@ -232,7 +234,9 @@ export const consumeSessionEvents = Effect.fnUntraced(
       }
 
       yield* sessions
-        .update(id, change)
+        .mutate(id, HostEvent.make({}), ({ seal }) =>
+          Effect.succeed({ out: undefined, seal: change(seal) })
+        )
         .pipe(ignore(`could not update ${sessionID} in ${id}`, "Warn"));
     });
 

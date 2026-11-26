@@ -2334,7 +2334,16 @@ test("worktree refresh: new generation, @@-aligned regions, removed '--' lines i
   write(dir, "src/guard.ts", "export const ok = false\n");
   write(dir, "q.sql", "select 2;\n-- keep me\n");
   unlinkSync(join(dir, "src/gone.ts"));
-  const r = await run(refreshSeal(seal, ledger));
+
+  // refreshSeal re-captures; the door saves what it hands back.
+  const r = await run(
+    refreshSeal(seal, ledger).pipe(
+      Effect.tap((next) =>
+        store.pipe(Effect.flatMap((st) => st.saveBoth(next.seal, next.ledger)))
+      )
+    )
+  );
+
   assert.deepEqual(r.files.toSorted(), [
     "q.sql",
     "src/gone.ts",
@@ -2414,7 +2423,16 @@ test("range: base moved to head is stale; refresh rebuilds the empty target diff
   };
 
   const s0 = await run(loadSeal(seal.id));
-  const { md } = await run(finalize(s0, ledger, {}));
+
+  // finalize renders; the door publishes what it hands back.
+  const { md } = await run(
+    finalize(s0, ledger, {}).pipe(
+      Effect.tap((filed) =>
+        store.pipe(Effect.flatMap((st) => st.publish(filed.seal, filed.md)))
+      )
+    )
+  );
+
   assert.match(md, /status: \*\*stale\*\*/u);
   const reported = await run(loadSeal(seal.id));
   const directive = present(reported.directive);
