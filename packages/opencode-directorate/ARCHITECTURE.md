@@ -31,20 +31,20 @@ src/
 │   ├── records.ts          entry: Records, ActiveSeal port, export tools
 │   ├── repository.ts · locks.ts · retention.ts · state-root.ts
 │   ├── active-seal.ts      the ActiveSeal port
-│   └── export.ts · archive.ts
+│   └── export.ts · export-tools.ts · archive.ts
 ├── seal/                   Containment: the Review aggregate root
 │   ├── seal.ts             entry: Sessions, read tools, capture
 │   ├── record.ts* · target.ts* · region.ts* · coverage.ts*
 │   ├── sessions.ts         session ↔ seal bindings + the door
 │   └── capture.ts · ends.ts · diff.ts · content.ts · views.ts · tools.ts · repo-path.ts
 ├── feature/
-│   ├── agents/             agents.ts · agent.ts* · registration.ts
-│   ├── dispatch/           dispatch.ts · lifecycle.ts* · seat.ts* · events.ts
+│   ├── agents/             agents.ts · agent.ts* · registration.ts · access.ts
+│   ├── dispatch/           dispatch.ts · lifecycle.ts* · seat.ts* · events.ts · launch.ts · wait.ts
 │   ├── ledger/             ledger.ts · entry.ts* · decide.ts* · tools.ts
-│   ├── report/             report.ts · directive.ts* · render.ts*
-│   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts* · store.ts · configure.ts
+│   ├── report/             report.ts · directive.ts* · gates.ts* · render.ts* · filing.ts
+│   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts* · store.ts · configure.ts · prefix.ts
 └── workflow/
-    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts
+    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts · tools.ts · command.ts · prefix.ts · watchdog.ts
     └── ship/               ship.ts · state.ts* · step.ts* · runner.ts
 ```
 

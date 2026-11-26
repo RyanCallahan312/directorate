@@ -20,6 +20,9 @@ export const DEFAULT_BUDGET: Record<Mode, number> = {
 
 export const PANEL_BUDGET_FACTOR = 1.5;
 
+/** How long after the deadline the watchdog waits for the Liaison's own report. */
+export const GRACE_MS = 120_000;
+
 /** The Window field group of seal.json. */
 export const StoredWindow = Schema.Struct({
   budgetMinutes: Schema.Finite,

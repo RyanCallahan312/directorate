@@ -1,5 +1,8 @@
 // Ship owns the persisted loop; the next action is decided from the review dossier, never the model's reply.
-import type { CommandInvocation } from "@opencode/plugin/effect/command";
+import type {
+  CommandDefinition,
+  CommandInvocation,
+} from "@opencode/plugin/effect/command";
 import type {
   SessionContext,
   SessionIdle,
@@ -22,6 +25,7 @@ import { SecureRandom } from "effect/crypto";
 import type { Digest } from "effect/crypto";
 
 import { REVIEWER, ROLE_SET } from "../../feature/agents/agent.ts";
+import type { SessionEvent } from "../../feature/dispatch/dispatch.ts";
 import { failure, recover } from "../../platform/error.ts";
 import {
   activity,
@@ -1537,18 +1541,73 @@ export const registerShip = Effect.fn("Ship.register")(
         })
       ).pipe(recover("could not pause ship after moving session"));
 
+    /** The ship loop's share of each session event dispatch consumes, heard before the review's runs take theirs. */
+    const sessionEvent = (event: SessionEvent) => {
+      const { sessionID } = event.data;
+
+      if (event.type === "session.deleted") {
+        return remove(sessionID);
+      }
+
+      if (event.type === "session.moved") {
+        return moved(sessionID, event.data.location);
+      }
+
+      // OpenCode restores suspended executions and jobs after shutdown.
+      if (
+        event.type === "session.execution.interrupted" &&
+        event.data.reason === "shutdown"
+      ) {
+        return Effect.void;
+      }
+
+      if (event.type === "session.inbox.enqueued") {
+        return inboxEnqueued(sessionID, event.data.inboxID, event.data.item);
+      }
+
+      if (
+        event.type === "session.inbox.delivered" ||
+        event.type === "session.inbox.cancelled"
+      ) {
+        return inboxSettled(
+          sessionID,
+          event.data.inboxID,
+          event.type === "session.inbox.delivered",
+          event.created
+        );
+      }
+
+      if (event.type === "session.created" || event.type === "session.idle") {
+        return Effect.void;
+      }
+
+      let reason: string | undefined;
+
+      if (event.type === "session.execution.failed") {
+        reason = `The session failed: ${event.data.error.message}`;
+      } else if (event.type === "session.execution.interrupted") {
+        reason =
+          event.data.reason === "user"
+            ? "Interrupted by the user."
+            : `The session was interrupted (${event.data.reason}).`;
+      }
+
+      return executionSettled(sessionID, event.created, reason);
+    };
+
     yield* host.session.hook("experimental.idle", idle);
     yield* host.session.hook("context", renderPlan);
 
     return {
-      execute,
-      executionSettled,
-      inboxEnqueued,
-      inboxSettled,
-      moved,
+      command: {
+        description:
+          "Review, fix, and re-check until the Directive is clean [request, --scope branch|local|repository] | status | pause | resume | stop | forget <pending-id>",
+        execute,
+        name: "directorate-ship",
+      } satisfies CommandDefinition,
       recoverShips,
-      remove,
       sealed,
+      sessionEvent,
     };
   }
 );

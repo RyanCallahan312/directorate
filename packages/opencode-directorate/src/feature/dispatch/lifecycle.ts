@@ -46,6 +46,11 @@ export const childOutstanding = (seal: Seal) =>
     (c) => c.status === "running" || c.status === "launching"
   );
 
+/** One per child session (its latest run), since a follow-up joined to a running child shares its session. */
+export const perSession = (runs: readonly Child[]) => [
+  ...new Map(runs.map((x) => [x.session ?? x.call, x])).values(),
+];
+
 export const childQuestion = (c: Pick<Child, "prompt">) =>
   c.prompt
     .split("\n")
