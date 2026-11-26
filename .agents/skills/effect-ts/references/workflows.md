@@ -37,7 +37,7 @@ storage requirement against installed 4.1.2 source.
 - Do not use random request IDs as an idempotency key or claim external effects
   are exactly once.
 - Do not put deployment-specific sharding or message storage in workflow domain
-  logic; read [clustering.md](./clustering.md) when cluster wiring is required.
+  logic; keep cluster wiring in deployment Layers (see the clustering branch).
 
 Pinned starting points:
 

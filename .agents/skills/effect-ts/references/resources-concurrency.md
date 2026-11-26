@@ -1,8 +1,8 @@
 # Resources and Concurrency
 
 Read this when using `Scope`, resource acquisition, fibers, synchronization,
-transactional state, or concurrent collections. Read [scheduling](./scheduling.md)
-for retry, repeat, and time policy.
+transactional state, or concurrent collections. Use the scheduling branch for
+retry, repeat, and time policy.
 
 ## Ownership
 

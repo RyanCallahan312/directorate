@@ -5,7 +5,7 @@ below from the repository root, not from this reference directory.
 
 ## Verify the Target
 
-- Root development dependency: `effect@4.1.2`, pinned for skill checks.
+- Target release: `effect@4.1.2`.
 - Source root: `node_modules/effect/src/`.
 - Documentation index: installed `effect/AGENTS.md`; examples: `effect/ai-docs/src/`.
 - Public exports: installed `effect/package.json`; declarations: `effect/dist/`.

@@ -16,7 +16,7 @@ import { Context, Effect, Layer } from "effect"
 
 class UserRepository extends Context.Service<UserRepository, {
   readonly find: (id: string) => Effect.Effect<{ readonly id: string }>
-}>()("directorate/example/UserRepository") {
+}>()("app/UserRepository") {
   static readonly layer = Layer.succeed(
     UserRepository,
     UserRepository.of({
@@ -30,7 +30,7 @@ class UserRepository extends Context.Service<UserRepository, {
 
 Name service classes after the domain capability. Follow the package's relative
 `.ts` imports rather than self-referential module namespaces or incidental barrel
-imports. Do not add `export * as Domain from "./domain.js"`, TypeScript
+imports. Do not add `export * as Domain from "./domain.ts"`, TypeScript
 `namespace` declarations, or a barrel that re-imports its own leaf; use direct,
 intentional named exports instead.
 
@@ -68,7 +68,7 @@ import { Context, Effect, Layer } from "effect"
 
 class Database extends Context.Service<Database, {
   readonly query: (sql: string) => Effect.Effect<ReadonlyArray<unknown>>
-}>()("directorate/example/Database") {}
+}>()("app/Database") {}
 
 declare const openDatabase: Effect.Effect<Database["Service"]>
 declare const closeDatabase: (

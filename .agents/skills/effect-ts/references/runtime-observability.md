@@ -5,10 +5,11 @@ telemetry. Effects run at boundaries, never from domain logic or services.
 
 ## Choose
 
-- Use `BunRuntime.runMain(program)` for a Bun process program only when a
-  compatible `@effect/platform-bun` package is installed (it is not currently).
-- Use `BunRuntime.runMain(Layer.launch(AppLive))` for a long-running Layer
-  application whose scope should live for the process.
+- Use `BunRuntime.runMain(program)` (`@effect/platform-bun`) or
+  `NodeRuntime.runMain(program)` (`@effect/platform-node`) for a process
+  entrypoint—verify the matching platform package is installed first.
+- Use `BunRuntime.runMain(Layer.launch(AppLive))` (or `NodeRuntime.runMain`)
+  for a long-running Layer application whose scope should live for the process.
 - Use one `ManagedRuntime.make(AppLive)` for repeated framework callbacks;
   execute requests through it and dispose it during framework shutdown.
 - Use a matching runtime runner only at a small Promise, callback, test, script,
@@ -37,8 +38,8 @@ telemetry. Effects run at boundaries, never from domain logic or services.
   disposal.
 - Do not impose application tracing or runtime ownership on library consumers.
 
-Use `effect/observability` for built-in Otlp modules. `@effect/opentelemetry`
-is not installed here; do not assume its exporter Layers are available. Verify
+Use `effect/observability` for built-in Otlp modules. Verify
+`@effect/opentelemetry` is installed before using its exporter Layers, and check
 existing application setup before introducing a second telemetry pipeline.
 
 Pinned starting points:

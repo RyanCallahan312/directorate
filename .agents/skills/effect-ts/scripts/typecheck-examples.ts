@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import {
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -10,17 +11,42 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { $ } from "bun";
 import * as ts from "typescript/unstable/ast";
 
+const findNodeModules = (starts: ReadonlyArray<string>, requiredPath: string) => {
+  for (const start of starts) {
+    let dir = resolve(start);
+    while (true) {
+      const candidate = join(dir, "node_modules");
+      if (existsSync(join(candidate, requiredPath))) {
+        return candidate;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+  }
+  throw new Error(
+    `typecheck-examples: could not locate node_modules/${requiredPath} from ${starts.join(", ")}`
+  );
+};
+
 const defaultSkillRoot = resolve(import.meta.dir, "..");
 const skillRoot = resolve(Bun.env.EFFECT_SKILL_ROOT ?? defaultSkillRoot);
-const repoRoot = resolve(defaultSkillRoot, "../../..");
-const effectModules = join(repoRoot, "node_modules");
+const compilerRel =
+  process.platform === "win32" ? ".bin/tsc.exe" : ".bin/tsc";
+const effectModules = findNodeModules(
+  [defaultSkillRoot, process.cwd()],
+  "effect/package.json"
+);
+const workspaceRoot = dirname(effectModules);
 const compiler = join(
-  repoRoot,
-  process.platform === "win32" ? "node_modules/.bin/tsc.exe" : "node_modules/.bin/tsc"
+  findNodeModules([workspaceRoot, process.cwd()], compilerRel),
+  compilerRel
 );
 const fence = /^\s*(`{3,}|~{3,})(ts|tsx|typescript|mts)(?:\s+.*)?$/i;
 const suppression = /@ts-(?:ignore|nocheck|expect-error)|@effect-diagnostics/;
@@ -119,8 +145,7 @@ if (examples.length === 0) {
   throw new Error("typecheck-examples: no TypeScript examples found");
 }
 
-const lockfile = Bun.JSONC.parse(await Bun.file(join(repoRoot, "bun.lock")).text());
-const expectedEffectVersion = lockfile.packages.effect[0].replace(/^effect@/, "");
+const expectedEffectVersion = Bun.env.EFFECT_EXPECTED_VERSION ?? "4.1.2";
 const installedEffectPackage = await Bun.file(
   join(effectModules, "effect/package.json")
 ).json();
@@ -145,8 +170,24 @@ try {
       path,
       JSON.stringify(
         {
-          extends: join(repoRoot, "tsconfig.base.json"),
           compilerOptions: {
+            target: "ES2022",
+            lib: ["ES2022"],
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            moduleDetection: "force",
+            verbatimModuleSyntax: true,
+            allowJs: false,
+            rewriteRelativeImportExtensions: true,
+            erasableSyntaxOnly: true,
+            strict: true,
+            exactOptionalPropertyTypes: true,
+            noUncheckedIndexedAccess: true,
+            noImplicitOverride: true,
+            noFallthroughCasesInSwitch: true,
+            skipLibCheck: true,
+            noErrorTruncation: true,
+            forceConsistentCasingInFileNames: true,
             composite: false,
             incremental: false,
             noEmit: true,
@@ -155,6 +196,13 @@ try {
             noUnusedParameters: false,
             jsx: "preserve",
             types: [],
+            plugins: [
+              {
+                name: "@effect/language-service",
+                namespaceImportPackages: ["effect", "@effect/*"],
+                allowedUnstableApis: ["effect/process"],
+              },
+            ],
           },
           files,
         },
@@ -175,7 +223,7 @@ try {
     'import { Effect } from "effect"\nEffect.succeed(1)\n'
   );
   const sentinel = await $`${compiler} --project ${sentinelConfig}`
-    .cwd(repoRoot)
+    .cwd(workspaceRoot)
     .nothrow()
     .quiet();
   if (
@@ -195,7 +243,7 @@ try {
       const config = join(directory, `tsconfig-${index}.json`);
       writeTsconfig(config, [source]);
       return await $`${compiler} --project ${config}`
-        .cwd(repoRoot)
+        .cwd(workspaceRoot)
         .nothrow();
     })
   );

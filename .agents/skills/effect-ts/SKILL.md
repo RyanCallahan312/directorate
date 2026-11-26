@@ -1,15 +1,15 @@
 ---
 name: effect-ts
-description: Write and review Effect 4 code using Schema, Effect, Context.Service, Layer, Config, Schedule, Cache, Stream, HTTP, SQL, workflows, clusters, testing, and runtime boundaries. Targets the installed Effect release. Do not use for non-Effect TypeScript.
+description: Write, refactor, and review Effect 4.1.2 TypeScript code—schemas, services, layers, streams, fibers, schedules, caching, config, platform I/O, HTTP, SQL, workflows, clusters, and tests—avoiding stale v3/beta APIs. Do not use for Effect v3 codebases, non-Effect TypeScript, or unrelated UI/build/linter configuration.
+license: MIT
+metadata:
+  upstream: "kitlangton/skills@30dee8607214c893dd89f6eee65c669ef3dce8c9"
 ---
 
 # Effect v4
 
-Use installed Effect 4 patterns and this repository's conventions.
+Use installed Effect 4 patterns and the target repository's conventions.
 Established package guidance still takes precedence unless the task changes it.
-
-Adapted from Kit Langton's MIT-licensed `kitlangton/skills` Effect skill at
-commit `30dee8607214c893dd89f6eee65c669ef3dce8c9`.
 
 ## Source Rule
 
@@ -21,10 +21,13 @@ Before guessing about an unfamiliar or unstable API, read in this order:
    `ai-docs/src/` examples.
 4. Source and declarations in that installed package (`src/` and `dist/`).
 
-The root development dependency pins `effect@4.1.2` for skill validation.
-Check the target workspace's installed version before changing version-sensitive
-code. Prefer installed source over public docs or upstream main. Do not reuse
-beta APIs or assume optional `@effect/*` integrations are installed.
+This skill targets `effect@4.1.2`. Check the target workspace's installed
+version before changing version-sensitive code. Prefer installed source over
+public docs or upstream main. Do not reuse v3/beta APIs (such as catchAll,
+either, Layer.scoped, Context.Tag, TaggedErrorClass, Config.string,
+Schedule.both/take, or unstable subpaths—see
+[Installed Version](./references/installed-version.md)) or assume optional
+`@effect/*` integrations are installed.
 
 ## Branch Chooser
 
@@ -42,13 +45,14 @@ change crosses concerns.
 | Scope, resources, fibers, synchronization, bounded concurrency | [Resources and Concurrency](./references/resources-concurrency.md) |
 | Streams, event sources, pagination, backpressure, consumers | [Streams](./references/streams.md) |
 | Promises, callbacks, events, async iterables, native streams | [Foreign APIs](./references/foreign-apis.md) |
+| `FileSystem`, `Path`, child processes, encoding, platform Layers | [Platform I/O](./references/platform.md) |
 | Effect tests, virtual time, service doubles, synchronization | [Testing](./references/testing.md) |
 | Effect SQL, Postgres, or Effect-native Drizzle | [SQL](./references/sql.md) |
 | Outgoing HTTP and provider adapters | [HTTP](./references/http.md) |
-| Bun entrypoints, `ManagedRuntime`, shutdown, telemetry | [Runtime and Observability](./references/runtime-observability.md) |
+| Bun/Node entrypoints, `ManagedRuntime`, shutdown, telemetry | [Runtime and Observability](./references/runtime-observability.md) |
 | Durable workflows and activities | [Workflows](./references/workflows.md) |
 | Entities, sharding, cluster transport and storage | [Clustering](./references/clustering.md) |
-| AI, RPC, HTTP API, OpenAPI, other unstable modules | [Specialized Modules](./references/specialized.md) |
+| AI, CLI, GraphQL, RPC, HTTP API, OpenAPI, other specialized modules | [Specialized Modules](./references/specialized.md) |
 
 ## Core Defaults
 
@@ -87,14 +91,9 @@ change crosses concerns.
 | Unknown payload | `Schema.decodeUnknownEffect` |
 | Trusted construction | `schema.make` |
 | Fallible Effect construction | `schema.makeEffect` |
-| Existing value | `Effect.succeed` |
-| Non-throwing synchronous work | `Effect.sync` |
-| Throwing synchronous API | `Effect.try` |
 | Promise API | `Effect.tryPromise` with immediate error normalization |
 | One callback result | `Effect.callback` |
-| Many time-ordered values | `Stream` |
 | Runtime settings | `Config`, installed with `ConfigProvider` at a boundary |
-| Retry or polling policy | `Schedule` |
 | Keyed TTL lookup dedupe | `Cache` |
 | One memoized Effect | `Effect.cached` / `cachedWithTTL` |
 
@@ -144,13 +143,12 @@ change crosses concerns.
   `TestClock` can synchronize deterministically.
 - Do not hand-roll TTL/in-flight caches when `Cache` fits.
 
-## Validate Skill Changes
+## Error Recovery
 
-Run these from the repository root after editing this skill:
-
-```sh
-bun .agents/skills/effect-ts/scripts/check-links.ts
-bun .agents/skills/effect-ts/scripts/verify-apis.ts
-bun .agents/skills/effect-ts/scripts/typecheck-examples.ts
-bun test ./.agents/skills/effect-ts/scripts/scripts.test.ts
-```
+| Failure | Fix |
+|---|---|
+| Missing or renamed Effect API (v3/beta name) | Read [Installed Version](./references/installed-version.md) and check `node_modules/effect/src/` before retrying. |
+| `Schema.make` type/runtime mismatch | Module-level `Schema.make` builds a schema from an AST; construct values with `MyClass.make(...)`, `new MyClass(...)`, or `.makeEffect(...)`. |
+| Scoped resource closes before service use | Remove inner `Effect.scoped` inside `Layer.effect`; the layer already owns the `Scope`. |
+| `TestClock` test hangs on sleep or retry | Fork the waiting effect (`Effect.forkChild`) before calling `TestClock.adjust`. |
+| Effect language-service suggestion (`schemaNumber`, `schemaClassMissingBrand`, `floatingEffect`, unstable API) | Read `tsc --noEmit` output (suggestions exit `0`), use `Schema.Finite` / brand / yield the effect, or allowlist intentional unstable subpaths in `tsconfig.json`. |

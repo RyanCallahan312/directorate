@@ -1,12 +1,15 @@
 # Specialized Protocol Modules
 
-Read this only for Effect AI, RPC, HTTP API, or OpenAPI. This is a retrieval
-router, not an API reference: verify each module against installed 4.1.2 source.
+Read this only for Effect AI, CLI, GraphQL, RPC, HTTP API, or OpenAPI. This is a
+retrieval router, not an API reference: verify each module against installed
+4.1.2 source.
 
 ## Choose
 
 | Need | Retrieve first |
 | --- | --- |
+| CLI commands, arguments, and flags | installed `effect/ai-docs/src/70_cli/` and `src/cli/`; public import `effect/cli` |
+| GraphQL clients, queries, and batching | installed `effect/ai-docs/src/52_graphql/` and `src/graphql/`; public import `effect/graphql` |
 | RPC protocol, client, server, transport | installed `effect/src/rpc/`; public import `effect/rpc` |
 | HTTP API endpoint contracts | installed `effect/src/http-api/` and `ai-docs/src/51_http-server/`; public import `effect/http-api` |
 | OpenAPI generation | installed `effect/src/http-api/OpenApi.ts`; verify separate generator packages only if installed |
