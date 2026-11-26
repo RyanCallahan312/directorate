@@ -4,8 +4,8 @@ import { Digest } from "effect/crypto";
 import type { PlatformError } from "effect/PlatformError";
 
 import { isSecret } from "../exclusions.ts";
-import { ReviewError } from "./error.ts";
-import { Git } from "./git.ts";
+import { Git, UnreadableFile } from "./git.ts";
+import type { GitFailed } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { encodeUtf8 } from "./utf8.ts";
 
@@ -25,8 +25,7 @@ const orMissing = <A, R>(self: Effect.Effect<A, PlatformError, R>) =>
 
 const unreadable = (path: string) =>
   Effect.mapError(
-    (e: PlatformError) =>
-      new ReviewError({ message: `Cannot read ${path}: ${e.message}` })
+    (e: PlatformError) => new UnreadableFile({ path, reason: e.message })
   );
 
 const make = Effect.gen(function* make() {
@@ -87,7 +86,7 @@ const make = Effect.gen(function* make() {
     function* entry(
       repo: string,
       path: string
-    ): Effect.fn.Return<LiveEntry, PlatformError | ReviewError> {
+    ): Effect.fn.Return<LiveEntry, PlatformError | GitFailed | UnreadableFile> {
       const { abs, st } = yield* stat(repo, path);
 
       // An untracked nested repository is listed as `dir/`; only a tracked gitlink names its directory bare.
@@ -142,10 +141,7 @@ const make = Effect.gen(function* make() {
     (effect, _repo, path) =>
       effect.pipe(
         Effect.mapError(
-          (cause) =>
-            new ReviewError({
-              message: `Cannot read ${path}: ${cause.message}`,
-            })
+          (cause) => new UnreadableFile({ path, reason: cause.message })
         )
       )
   );

@@ -11,7 +11,6 @@ import {
   Schema,
 } from "effect";
 
-import { failure } from "../../platform/error.ts";
 import { Git } from "../../platform/platform.ts";
 import {
   isUnset,
@@ -21,6 +20,32 @@ import {
   SettingsJson,
 } from "./file.ts";
 import type { Settings, SettingsScope as Scope } from "./file.ts";
+
+/** A settings file that cannot be found, read, decoded, or written. */
+export class SettingsUnavailable extends Schema.TaggedError<
+  SettingsUnavailable,
+  { readonly brand: unique symbol }
+>()("SettingsUnavailable", { message: Schema.String }) {}
+
+/** Another writer holds the settings lock. */
+export class SettingsBusy extends Schema.TaggedError<
+  SettingsBusy,
+  { readonly brand: unique symbol }
+>()("SettingsBusy", { lock: Schema.String }) {
+  override get message() {
+    return `Settings are busy. Retry the save; if all writers have stopped, remove the lock directory at ${this.lock}.`;
+  }
+}
+
+/** The settings file changed since the dialog that edits it opened. */
+export class SettingsChanged extends Schema.TaggedError<
+  SettingsChanged,
+  { readonly brand: unique symbol }
+>()("SettingsChanged", { at: Schema.String }) {
+  override get message() {
+    return `Settings at ${this.at} changed since this dialog opened. Reopen /directorate-configure and reapply your changes.`;
+  }
+}
 
 /** A typo in a settings file is an error, not a silently ignored key. */
 const decodeSettings = Schema.decodeEffect(SettingsJson);
@@ -68,9 +93,10 @@ const make = Effect.gen(function* make() {
     if (scope === "global") {
       return (
         globalFile ??
-        (yield* failure(
-          "No global settings file: none of DIRECTORATE_SETTINGS, OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, HOME, or USERPROFILE is set."
-        ))
+        (yield* new SettingsUnavailable({
+          message:
+            "No global settings file: none of DIRECTORATE_SETTINGS, OPENCODE_CONFIG_DIR, XDG_CONFIG_HOME, HOME, or USERPROFILE is set.",
+        }))
       );
     }
 
@@ -89,7 +115,12 @@ const make = Effect.gen(function* make() {
         "PlatformError",
         "NotFound",
         () => Effect.undefined,
-        (_, error) => failure(`Cannot read ${at}: ${error.message}`)
+        (_, error) =>
+          Effect.fail(
+            new SettingsUnavailable({
+              message: `Cannot read ${at}: ${error.message}`,
+            })
+          )
       )
     );
 
@@ -98,10 +129,11 @@ const make = Effect.gen(function* make() {
     }
 
     return yield* decodeSettings(text, STRICT).pipe(
-      Effect.catch((error) =>
-        failure(
-          `${at} is not valid Directorate settings: ${error.message}. Fix it, or delete it and run /directorate-configure.`
-        )
+      Effect.mapError(
+        (error) =>
+          new SettingsUnavailable({
+            message: `${at} is not valid Directorate settings: ${error.message}. Fix it, or delete it and run /directorate-configure.`,
+          })
       )
     );
   });
@@ -130,9 +162,9 @@ const make = Effect.gen(function* make() {
   ) {
     const at =
       (yield* file(scope, directory)) ??
-      (yield* failure(
-        `No project settings here: ${globalFile} is the global file. Write the global scope, or configure from a project.`
-      ));
+      (yield* new SettingsUnavailable({
+        message: `No project settings here: ${globalFile} is the global file. Write the global scope, or configure from a project.`,
+      }));
 
     const settings = normalizeSettings(input);
     const removed = isUnset(settings);
@@ -148,7 +180,9 @@ const make = Effect.gen(function* make() {
         : merge(unchanged, settings);
 
     const fail = (e: { message: string }) =>
-      failure(`Cannot write ${at}: ${e.message}`);
+      Effect.fail(
+        new SettingsUnavailable({ message: `Cannot write ${at}: ${e.message}` })
+      );
 
     yield* fs
       .makeDirectory(path.dirname(at), { recursive: true })
@@ -159,19 +193,14 @@ const make = Effect.gen(function* make() {
         Effect.catchReason(
           "PlatformError",
           "AlreadyExists",
-          () =>
-            failure(
-              `Settings are busy. Retry the save; if all writers have stopped, remove the lock directory at ${lock}.`
-            ),
+          () => Effect.fail(new SettingsBusy({ lock })),
           (_, error) => fail(error)
         )
       ),
       () =>
         Effect.gen(function* replaceFile() {
           if (previous && !sameSettings(previous, yield* read(at))) {
-            return yield* failure(
-              `Settings at ${at} changed since this dialog opened. Reopen /directorate-configure and reapply your changes.`
-            );
+            return yield* new SettingsChanged({ at });
           }
 
           if (removed) {

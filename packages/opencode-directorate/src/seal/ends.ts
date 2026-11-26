@@ -1,13 +1,29 @@
 // Directorate targets: what a review compares (a base and a post-image), resolved from the user's target and re-resolved later
 // to tell whether the sealed code moved.
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import { scopeOf } from "../exclusions.ts";
-import { failure, ReviewError } from "../platform/error.ts";
 import { sha256 } from "../platform/hash.ts";
 import { Git, Worktree } from "../platform/platform.ts";
+import type {
+  GitFailed,
+  MissingHistory,
+  UnreadableFile,
+} from "../platform/platform.ts";
 import type { Seal } from "./record.ts";
 import type { Target, TargetKind } from "./target.ts";
+
+/** A review target that cannot be resolved to two ends to compare. */
+export class InvalidTarget extends Schema.TaggedError<
+  InvalidTarget,
+  { readonly brand: unique symbol }
+>()("InvalidTarget", { message: Schema.String }) {}
+
+/** Whether the sealed target moved could not be told. */
+export class FreshnessUnchecked extends Schema.TaggedError<
+  FreshnessUnchecked,
+  { readonly brand: unique symbol }
+>()("FreshnessUnchecked", { message: Schema.String }) {}
 
 export interface Ends {
   readonly kind: Exclude<TargetKind, "auto">;
@@ -46,9 +62,10 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   // Before the first commit, HEAD is the empty tree and nothing is ahead of anything.
   if (!(yield* git.hasCommit(repo, head))) {
     if (!dirty) {
-      return yield* failure(
-        "No local changes, and HEAD has no commits yet. Ask the user what to review."
-      );
+      return yield* new InvalidTarget({
+        message:
+          "No local changes, and HEAD has no commits yet. Ask the user what to review.",
+      });
     }
 
     return yield* localEnds(repo, { kind: "local" });
@@ -58,7 +75,7 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   const def = yield* git.defaultBranch(repo).pipe(
     Effect.mapError(
       (e) =>
-        new ReviewError({
+        new InvalidTarget({
           message: `${e.message} Or use local scope to review only uncommitted changes.`,
         })
     )
@@ -78,9 +95,9 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
         );
 
   if (!dirty && !ahead) {
-    return yield* failure(
-      `No local changes, and HEAD has no commits beyond ${def}. Ask the user what to review.`
-    );
+    return yield* new InvalidTarget({
+      message: `No local changes, and HEAD has no commits beyond ${def}. Ask the user what to review.`,
+    });
   }
 
   if (ahead) {
@@ -120,13 +137,17 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
   function* resolveTarget(
     repo: string,
     target: Target
-  ): Effect.fn.Return<Ends, ReviewError, Git> {
+  ): Effect.fn.Return<
+    Ends,
+    InvalidTarget | GitFailed | MissingHistory | UnreadableFile,
+    Git
+  > {
     const git = yield* Git;
 
     if (rejectsPaths(target)) {
-      return yield* failure(
-        `The ${target.kind} target does not support paths. Use local for scoped working-tree changes or paths for whole files.`
-      );
+      return yield* new InvalidTarget({
+        message: `The ${target.kind} target does not support paths. Use local for scoped working-tree changes or paths for whole files.`,
+      });
     }
 
     switch (target.kind) {
@@ -173,9 +194,10 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
 
       case "range": {
         if (!target.base) {
-          return yield* failure(
-            "range target needs base (and optional head, default HEAD); base may be @default"
-          );
+          return yield* new InvalidTarget({
+            message:
+              "range target needs base (and optional head, default HEAD); base may be @default",
+          });
         }
 
         const base =
@@ -203,21 +225,23 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
 
       case "pr": {
         if (!target.pr) {
-          return yield* failure("pr target needs pr (number or URL)");
+          return yield* new InvalidTarget({
+            message: "pr target needs pr (number or URL)",
+          });
         }
 
         const m = yield* git.pr(repo, target.pr);
 
         if (!m.headFetched) {
-          return yield* failure(
-            `Head commit ${m.headRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin pull/${m.number}/head\`, then seal again.`
-          );
+          return yield* new InvalidTarget({
+            message: `Head commit ${m.headRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin pull/${m.number}/head\`, then seal again.`,
+          });
         }
 
         if (!m.baseFetched) {
-          return yield* failure(
-            `Base commit ${m.baseRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin ${m.baseRefName}\`, then seal again.`
-          );
+          return yield* new InvalidTarget({
+            message: `Base commit ${m.baseRefOid} of PR #${m.number} is not in the local repo. Ask the user to run \`git fetch origin ${m.baseRefName}\`, then seal again.`,
+          });
         }
 
         const mb = yield* prMergeBase(repo, m);
@@ -234,9 +258,9 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
       }
 
       default: {
-        return yield* failure(
-          `Unsupported review target: ${String(target.kind)}`
-        );
+        return yield* new InvalidTarget({
+          message: `Unsupported review target: ${String(target.kind)}`,
+        });
       }
     }
   }
@@ -297,9 +321,9 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
       m.headRefOid === seal.headSha && m.baseRefOid === seal.baseTip;
 
     if (!m.baseFetched && !unmoved) {
-      return yield* failure(
-        `the PR base moved to ${m.baseRefOid.slice(0, 10)}, which is not fetched (git fetch origin ${m.baseRefName})`
-      );
+      return yield* new FreshnessUnchecked({
+        message: `the PR base moved to ${m.baseRefOid.slice(0, 10)}, which is not fetched (git fetch origin ${m.baseRefName})`,
+      });
     }
 
     const baseSha = m.baseFetched
@@ -329,5 +353,9 @@ export const currentFingerprint = (seal: Seal, timeoutMs = 20_000) =>
   Effect.timeoutOrElse(currentEnds(seal), {
     duration: timeoutMs,
     orElse: () =>
-      failure(`freshness check timed out after ${timeoutMs / 1000}s`),
+      Effect.fail(
+        new FreshnessUnchecked({
+          message: `freshness check timed out after ${timeoutMs / 1000}s`,
+        })
+      ),
   });

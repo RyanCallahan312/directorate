@@ -2,8 +2,18 @@
 // and report failures the way the host expects.
 import type { Plugin } from "@opencode/plugin/effect";
 import { Tool } from "@opencode/schema/tool";
-import { Effect, Predicate, Schema } from "effect";
+import {
+  Context,
+  Effect,
+  HashMap,
+  Layer,
+  Option,
+  Predicate,
+  Ref,
+  Schema,
+} from "effect";
 
+import { Agent, agentNamed } from "../feature/agents/agent.ts";
 import type { Actor } from "../feature/agents/agent.ts";
 import { recover } from "./error.ts";
 import { Host } from "./host.ts";
@@ -28,7 +38,60 @@ export type DefineTool<R> = <
   >;
   /** Files the call reads, checked with the seal. */
   files?: (input: Input["Type"]) => readonly (string | undefined)[];
+  /** The agents that keep the tool once the budget locks; none by default. */
+  lockdown?: readonly Agent[];
+  /** False for a tool any agent may call: it is not part of the review harness. True by default. */
+  harness?: boolean;
 }) => void;
+
+/** What a tool declares about its callers: who keeps it at lockdown, and whether only Directorate agents call it. */
+export class ToolDeclaration extends Schema.Class<
+  ToolDeclaration,
+  { readonly brand: unique symbol }
+>("directorate/ToolDeclaration")({
+  harness: Schema.Boolean,
+  lockdown: Schema.Array(Agent),
+  name: Schema.String,
+}) {}
+
+const makeCatalog = Effect.gen(function* makeCatalog() {
+  const declared = yield* Ref.make(HashMap.empty<string, ToolDeclaration>());
+
+  const declaration = (tool: string) =>
+    Ref.get(declared).pipe(
+      Effect.map((m) => Option.getOrUndefined(HashMap.get(m, tool)))
+    );
+
+  return {
+    /** Records tools' declarations by name; declaring a tool again replaces its declaration. */
+    declare: (declarations: HashMap.HashMap<string, ToolDeclaration>) =>
+      Ref.update(declared, (m) => HashMap.union(m, declarations)),
+    /** Whether a Directorate-namespaced tool is part of the review harness, which only Directorate agents call. */
+    harness: (tool: string) =>
+      declaration(tool).pipe(
+        Effect.map(
+          (d) => tool.startsWith("directorate_") && (d?.harness ?? true)
+        )
+      ),
+    /** Whether `agent`'s calls to `tool` still run once the budget is locked; other agents keep nothing. */
+    keeps: (agent: string | undefined, tool: string) =>
+      declaration(tool).pipe(
+        Effect.map((d) => {
+          const by = agentNamed(agent);
+
+          return by !== undefined && (d?.lockdown.includes(by) ?? false);
+        })
+      ),
+  };
+});
+
+/** The tools' declarations, collected once at registration, before any hook or tool runs. */
+export class ToolCatalog extends Context.Service<
+  ToolCatalog,
+  Effect.Success<typeof makeCatalog>
+>()("directorate/ToolCatalog") {
+  static readonly layer = Layer.effect(ToolCatalog, makeCatalog);
+}
 
 // Optional inputs are absent keys (optionalKey): Schema.optional renders as anyOf-null for the model.
 export const str = Schema.String;
@@ -85,40 +148,58 @@ export const adapter = <R>() =>
           run(event).pipe(Effect.provideContext(services), recover(name));
       },
       /**
-       * Registers tools with an editor. Every tool first checks role and permission on the seal its input names, if any;
-       * input the schema rejects never reaches a permission prompt.
+       * Declares every tool `register` defines in the ToolCatalog now, and returns the host's tool transform, which may
+       * run any number of times. Every tool first checks role and permission on the seal its input names, if any; input
+       * the schema rejects never reaches a permission prompt.
        */
-      tools:
-        (editor: Editor): DefineTool<R | Host> =>
-        (spec) => {
-          const { files = () => [], ...definition } = spec;
+      tools: Effect.fnUntraced(function* tools(
+        register: (tool: DefineTool<R | Host>) => void
+      ) {
+        const catalog = yield* ToolCatalog;
+        let declarations = HashMap.empty<string, ToolDeclaration>();
 
-          const run = Effect.fn(spec.name)(function* run(
-            input: typeof spec.input.Type,
-            c: Tool.Context
-          ) {
-            yield* authorize(
-              spec.name,
-              c,
-              Predicate.hasProperty(input, "seal") &&
-                Predicate.isString(input.seal)
-                ? input.seal
-                : undefined,
-              files(input).filter(Predicate.isString)
-            );
+        register(({ harness = true, lockdown = [], name }) => {
+          declarations = HashMap.set(
+            declarations,
+            name,
+            ToolDeclaration.make({ harness, lockdown, name })
+          );
+        });
+        yield* catalog.declare(declarations);
 
-            return yield* spec.execute(input, c);
+        return (editor: Editor) =>
+          register((spec) => {
+            const { description, files = () => [], input, name } = spec;
+
+            const run = Effect.fn(name)(function* run(
+              value: typeof input.Type,
+              c: Tool.Context
+            ) {
+              yield* authorize(
+                name,
+                c,
+                Predicate.hasProperty(value, "seal") &&
+                  Predicate.isString(value.seal)
+                  ? value.seal
+                  : undefined,
+                files(value).filter(Predicate.isString)
+              );
+
+              return yield* spec.execute(value, c);
+            });
+
+            editor.add({
+              description,
+              execute: (value, c) =>
+                run(value, c).pipe(
+                  Effect.provideContext(services),
+                  Effect.mapError(toolError)
+                ),
+              input,
+              name,
+              options: { codemode: false },
+            });
           });
-
-          editor.add({
-            ...definition,
-            execute: (input, c) =>
-              run(input, c).pipe(
-                Effect.provideContext(services),
-                Effect.mapError(toolError)
-              ),
-            options: { codemode: false },
-          });
-        },
+      }),
     };
   });

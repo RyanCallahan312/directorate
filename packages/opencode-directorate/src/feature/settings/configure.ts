@@ -4,7 +4,7 @@
 // key is rejected when read; tool input drops unknown keys, so the tool's result shows exactly what was stored.
 import { Effect, Schema } from "effect";
 
-import { failure, ignore } from "../../platform/error.ts";
+import { ignore } from "../../platform/error.ts";
 import { Host, optional, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
 import { Sessions } from "../../seal/seal.ts";
@@ -19,7 +19,13 @@ import {
 } from "./file.ts";
 import type { Settings, SettingsScope } from "./file.ts";
 import { DirectorateRpc } from "./rpc.ts";
-import { SettingsStore } from "./store.ts";
+import { SettingsStore, SettingsUnavailable } from "./store.ts";
+
+/** A settings change the tool refuses: a review agent's, an incomplete write, or models the host does not have. */
+class SettingsRejected extends Schema.TaggedError<
+  SettingsRejected,
+  { readonly brand: unique symbol }
+>()("SettingsRejected", { message: Schema.String }) {}
 
 const show = (label: string, file: string, s: Settings) =>
   `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;
@@ -37,7 +43,12 @@ const make = Effect.gen(function* make() {
     const out = yield* host.model
       .list({ location: { directory }, types: ["chat"] })
       .pipe(
-        Effect.catch((error) => failure(`Cannot list models: ${String(error)}`))
+        Effect.mapError(
+          (error) =>
+            new SettingsUnavailable({
+              message: `Cannot list models: ${String(error)}`,
+            })
+        )
       );
 
     return out.data
@@ -78,7 +89,9 @@ const make = Effect.gen(function* make() {
       });
 
       if (bad.length) {
-        return yield* failure(`Not written: ${bad.join("; ")}.`);
+        return yield* new SettingsRejected({
+          message: `Not written: ${bad.join("; ")}.`,
+        });
       }
     }
 
@@ -108,9 +121,10 @@ export const configureTool = (
       "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
     *execute(input, c) {
       if (agentNamed(c.agent)) {
-        return yield* failure(
-          "Directorate review agents cannot modify Directorate settings."
-        );
+        return yield* new SettingsRejected({
+          message:
+            "Directorate review agents cannot modify Directorate settings.",
+        });
       }
 
       const host = yield* Host;
@@ -122,18 +136,19 @@ export const configureTool = (
 
       if (input.action === "write") {
         if (!input.scope || !input.settings) {
-          return yield* failure(
-            `write needs scope and settings ({} removes the scope's file).`
-          );
+          return yield* new SettingsRejected({
+            message: `write needs scope and settings ({} removes the scope's file).`,
+          });
         }
 
         const out = yield* directorate
           .save(input.scope, directory, input.settings)
           .pipe(
-            Effect.catch((error) =>
-              failure(
-                `${error.message} Look models up with action "show" and find.`
-              )
+            Effect.mapError(
+              (error) =>
+                new SettingsRejected({
+                  message: `${error.message} Look models up with action "show" and find.`,
+                })
             )
           );
 
@@ -189,6 +204,7 @@ export const configureTool = (
 
       return { content: lines.join("\n") };
     },
+    harness: false,
     input: Schema.Struct({
       action: Schema.Literals(["show", "write"]),
       find: optional(

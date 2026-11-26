@@ -8,7 +8,7 @@ import { currentSeverity, unresolved } from "../../feature/ledger/decide.ts";
 import type { registerReport } from "../../feature/report/report.ts";
 import { resolve } from "../../feature/settings/file.ts";
 import { SettingsStore } from "../../feature/settings/settings.ts";
-import { failure, ignore } from "../../platform/error.ts";
+import { ignore } from "../../platform/error.ts";
 import {
   actor,
   Host,
@@ -16,20 +16,23 @@ import {
   ProcessIdentity,
   str,
 } from "../../platform/platform.ts";
-import type { DefineTool } from "../../platform/platform.ts";
+import type { DefineTool, ToolCatalog } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, mutate, RepoScope, Sessions } from "../../seal/seal.ts";
 import { TargetKindSchema } from "../../seal/target.ts";
+import { AbandonRefused } from "./custody.ts";
 import {
   createSeal,
   recheckable,
   recheckSeal,
   refreshSeal,
+  ReviewConflict,
 } from "./lifecycle.ts";
 import {
   DEFAULT_REVIEW_SCOPE,
+  InvalidRequest,
   ModeSchema,
   REVIEW_SCOPE_TARGET,
   ReviewScopeSchema,
@@ -146,6 +149,7 @@ export type AutoReport = Effect.Success<
 
 type SealServices =
   | Sessions
+  | ToolCatalog
   | Effect.Services<ReturnType<typeof createSeal>>
   | Effect.Services<ReturnType<typeof recheckSeal>>
   | Effect.Services<ReturnType<typeof refreshSeal>>
@@ -187,16 +191,19 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
         "Start a Directorate review: pin the target in containment and start the time budget. Pass scope or a specific target, not both. Omit both to use the configured default scope (branch if unset). target.kind auto = local changes plus any commits on this branch beyond the default branch. Also: local, commit, range (base may be @default), pr, paths (no paths = whole repository). Returns the seal id every other directorate_* tool needs. resume takes over an interrupted review. panel convenes independent whole-change reviews by several models (Directorate Seats), combined in one Directive.",
       *execute(input, c) {
         if (!input.resume && input.scope && input.target) {
-          return yield* failure("Pass either scope or target, not both.");
+          return yield* new InvalidRequest({
+            message: "Pass either scope or target, not both.",
+          });
         }
 
         if (
           input.recheck &&
           RECHECK_FIXED.some((key) => input[key] !== undefined)
         ) {
-          return yield* failure(
-            "A re-check reuses the earlier review's target and mode, without a panel. Pass recheck with only budget_minutes, question, or abandon."
-          );
+          return yield* new InvalidRequest({
+            message:
+              "A re-check reuses the earlier review's target and mode, without a panel. Pass recheck with only budget_minutes, question, or abandon.",
+          });
         }
 
         const a = actor(c);
@@ -219,15 +226,13 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
 
             if (replaced) {
               if (!input.abandon) {
-                return yield* failure(
-                  `This session already holds an active containment seal ${replaced.id}. Close it with directorate_report, or pass abandon: true to file its partial directive and start over.`
-                );
+                return yield* new ReviewConflict({
+                  message: `This session already holds an active containment seal ${replaced.id}. Close it with directorate_report, or pass abandon: true to file its partial directive and start over.`,
+                });
               }
 
               if (replaced.ownerSession !== a.session) {
-                return yield* failure(
-                  `Only the owner of ${replaced.id} can abandon it.`
-                );
+                return yield* new AbandonRefused({ seal: replaced.id });
               }
             }
 
@@ -262,9 +267,9 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
                   const s = yield* store.load(resume);
 
                   if (s.reportedAt) {
-                    return yield* failure(
-                      `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`
-                    );
+                    return yield* new ReviewConflict({
+                      message: `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`,
+                    });
                   }
 
                   // A spent budget gets more time (Window.takeover), unless the caller names a budget.
@@ -464,9 +469,10 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
           "directorate_refresh",
           function* execute(seal) {
             if (seal.refreshes >= 1) {
-              return yield* failure(
-                "This seal was already re-contained once. Call directorate_report; it marks the directive stale if the artifact moved again."
-              );
+              return yield* new ReviewConflict({
+                message:
+                  "This seal was already re-contained once. Call directorate_report; it marks the directive stale if the artifact moved again.",
+              });
             }
 
             const r = yield* refreshSeal(

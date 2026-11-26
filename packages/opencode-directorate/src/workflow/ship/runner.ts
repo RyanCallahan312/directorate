@@ -26,7 +26,7 @@ import type { Digest } from "effect/crypto";
 
 import { agentNamed, Liaison } from "../../feature/agents/agent.ts";
 import type { SessionEvent } from "../../feature/dispatch/dispatch.ts";
-import { failure, recover } from "../../platform/error.ts";
+import { recover } from "../../platform/error.ts";
 import {
   activity,
   createdAt,
@@ -40,7 +40,7 @@ import {
 import type { Activity, Worktree } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import { currentFingerprint } from "../../seal/seal.ts";
+import { currentFingerprint, FreshnessUnchecked } from "../../seal/seal.ts";
 import { parseRequest, reviewRequest } from "../review/request.ts";
 import type { ReviewScope } from "../review/request.ts";
 import { interruptedReview } from "../review/review.ts";
@@ -231,10 +231,31 @@ const describe = (state: ShipState) => {
     .join("\n");
 };
 
+/** A ship command run from the wrong place: a Directorate agent, another worktree or location, or another server. */
+class ShipElsewhere extends Schema.TaggedError<
+  ShipElsewhere,
+  { readonly brand: unique symbol }
+>()("ShipElsewhere", { message: Schema.String }) {}
+
+/** A ship command the ship's state or the command's input does not allow. */
+class ShipCommandRefused extends Schema.TaggedError<
+  ShipCommandRefused,
+  { readonly brand: unique symbol }
+>()("ShipCommandRefused", { message: Schema.String }) {}
+
+/** The ship's status, shown instead of acting: for status, or when a ship ends without a continuation. */
+class ShipStatus extends Schema.TaggedError<
+  ShipStatus,
+  { readonly brand: unique symbol }
+>()("ShipStatus", { message: Schema.String }) {}
+
 const assertAgent = (agent: string | undefined) =>
   agentNamed(agent)
-    ? failure(
-        "Use /directorate-ship from the calling session, not from a Directorate agent."
+    ? Effect.fail(
+        new ShipElsewhere({
+          message:
+            "Use /directorate-ship from the calling session, not from a Directorate agent.",
+        })
       )
     : Effect.void;
 
@@ -442,9 +463,9 @@ export const registerShip = Effect.fn("Ship.register")(
       yield* assertAgent(parent.agent);
 
       if ((yield* git.root(parent.location.directory)) !== seal.repo) {
-        return yield* failure(
-          `Seal ${seal.id} is for a different Git worktree than this session.`
-        );
+        return yield* new ShipElsewhere({
+          message: `Seal ${seal.id} is for a different Git worktree than this session.`,
+        });
       }
     });
 
@@ -545,7 +566,7 @@ export const registerShip = Effect.fn("Ship.register")(
         const { fingerprint, unfetched } = yield* currentFingerprint(seal);
 
         if (unfetched) {
-          return yield* failure(unfetched);
+          return yield* new FreshnessUnchecked({ message: unfetched });
         }
 
         return { fingerprint, ledger };
@@ -744,7 +765,9 @@ export const registerShip = Effect.fn("Ship.register")(
       yield* write(sessionID, ended);
 
       if (input) {
-        return yield* failure(`${describe(ended)}\nNo continuation was sent.`);
+        return yield* new ShipStatus({
+          message: `${describe(ended)}\nNo continuation was sent.`,
+        });
       }
     });
 
@@ -856,17 +879,20 @@ export const registerShip = Effect.fn("Ship.register")(
       state: ShipState | undefined
     ) {
       if (state?.status !== "paused") {
-        return yield* failure("No paused Directorate ship to resume.");
+        return yield* new ShipCommandRefused({
+          message: "No paused Directorate ship to resume.",
+        });
       }
 
       if (state.location !== undefined && state.location !== location) {
-        return yield* failure(
-          "This ship belongs to its original OpenCode location. Start a new ship here instead."
-        );
+        return yield* new ShipElsewhere({
+          message:
+            "This ship belongs to its original OpenCode location. Start a new ship here instead.",
+        });
       }
 
       if (state.needsAttachments) {
-        return yield* failure(restartAttached);
+        return yield* new ShipCommandRefused({ message: restartAttached });
       }
 
       const { recovery: _recovery, ...resumable } = state;
@@ -1133,14 +1159,14 @@ export const registerShip = Effect.fn("Ship.register")(
           ?.id;
 
         if (!pending || confirmed !== pending) {
-          return yield* failure(
-            pending
+          return yield* new ShipCommandRefused({
+            message: pending
               ? cancelFirst(pending)
-              : "No undelivered ship input to forget."
-          );
+              : "No undelivered ship input to forget.",
+          });
         }
       } else if (pending) {
-        return yield* failure(cancelFirst(pending));
+        return yield* new ShipCommandRefused({ message: cancelFirst(pending) });
       }
 
       yield* host.storage.remove(storageKey(sessionID));
@@ -1173,9 +1199,9 @@ export const registerShip = Effect.fn("Ship.register")(
       state: ShipState | undefined
     ) {
       if (state && running(state) && (yield* foreignOwner(state.pid))) {
-        return yield* failure(
-          "Another live OpenCode server is driving this ship."
-        );
+        return yield* new ShipElsewhere({
+          message: "Another live OpenCode server is driving this ship.",
+        });
       }
     });
 
@@ -1193,17 +1219,19 @@ export const registerShip = Effect.fn("Ship.register")(
               (["pause", "status", "stop"].includes(action) || forgetting) &&
               hasAttachments(prompt)
             ) {
-              return yield* failure(
-                `The ${action} command does not accept attachments. Run it without attachments.`
-              );
+              return yield* new ShipCommandRefused({
+                message: `The ${action} command does not accept attachments. Run it without attachments.`,
+              });
             }
 
             const state = yield* read(sessionID, true);
 
             if (action === "status") {
-              return yield* failure(
-                state ? describe(state) : "No Directorate ship in this session."
-              );
+              return yield* new ShipStatus({
+                message: state
+                  ? describe(state)
+                  : "No Directorate ship in this session.",
+              });
             }
 
             yield* assertWritable(state);
@@ -1212,9 +1240,10 @@ export const registerShip = Effect.fn("Ship.register")(
             const session = yield* host.session.get({ sessionID });
 
             if (locationKey(session.location) !== location) {
-              return yield* failure(
-                "Run this command from the session's current OpenCode location."
-              );
+              return yield* new ShipElsewhere({
+                message:
+                  "Run this command from the session's current OpenCode location.",
+              });
             }
 
             if (action === "stop" || forgetting) {
@@ -1222,12 +1251,16 @@ export const registerShip = Effect.fn("Ship.register")(
             }
 
             if (pending) {
-              return yield* failure(cancelFirst(pending));
+              return yield* new ShipCommandRefused({
+                message: cancelFirst(pending),
+              });
             }
 
             if (action === "pause") {
               if (state?.status !== "active") {
-                return yield* failure("No active Directorate ship to pause.");
+                return yield* new ShipCommandRefused({
+                  message: "No active Directorate ship to pause.",
+                });
               }
 
               yield* pause(sessionID, state, "Paused by the user.");
@@ -1236,9 +1269,10 @@ export const registerShip = Effect.fn("Ship.register")(
             }
 
             if (state?.status === "active") {
-              return yield* failure(
-                "A Directorate ship is already active in this session."
-              );
+              return yield* new ShipCommandRefused({
+                message:
+                  "A Directorate ship is already active in this session.",
+              });
             }
 
             yield* assertAgent(session.agent);
@@ -1249,9 +1283,10 @@ export const registerShip = Effect.fn("Ship.register")(
             }
 
             if (/^\s*--recheck(?=\s|=|$)/iu.test(raw)) {
-              return yield* failure(
-                "/directorate-ship starts a new review. Use /directorate-review --recheck to re-check an existing seal."
-              );
+              return yield* new ShipCommandRefused({
+                message:
+                  "/directorate-ship starts a new review. Use /directorate-review --recheck to re-check an existing seal.",
+              });
             }
 
             const id = yield* uuid;

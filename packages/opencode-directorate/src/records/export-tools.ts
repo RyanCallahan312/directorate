@@ -20,6 +20,7 @@ export const exportTools = (tool: DefineTool<ExportServices>) => {
 
       return { content: JSON.stringify(page) };
     },
+    harness: false,
     input: Schema.Struct({ before: optional(str) }),
     name: "directorate_export_list",
   });
@@ -30,6 +31,7 @@ export const exportTools = (tool: DefineTool<ExportServices>) => {
     *execute(input) {
       return { content: yield* exportReview(input.seal) };
     },
+    harness: false,
     input: Schema.Struct({ seal: str }),
     name: "directorate_export",
   });

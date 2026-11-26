@@ -1,8 +1,20 @@
-import { ByteSize, Effect, FileSystem, Option, Path, Stream } from "effect";
+import {
+  ByteSize,
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  Schema,
+  Stream,
+} from "effect";
 import { Zip } from "effect/encoding";
 import type { PlatformError } from "effect/PlatformError";
 
-import { failure, ReviewError } from "../platform/error.ts";
+/** A review could not be exported: an artifact that is not a regular file or directory, or an archive that failed. */
+export class ExportFailed extends Schema.TaggedError<
+  ExportFailed,
+  { readonly brand: unique symbol }
+>()("ExportFailed", { message: Schema.String }) {}
 
 type ArchiveEntry = Zip.ContentEntry | Zip.Entry<PlatformError>;
 
@@ -17,7 +29,7 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
 
     const entry = (
       name: string
-    ): Stream.Stream<ArchiveEntry, PlatformError | ReviewError> =>
+    ): Stream.Stream<ArchiveEntry, PlatformError | ExportFailed> =>
       Stream.unwrap(
         Effect.gen(function* readEntry() {
           const source = paths.join(root, name);
@@ -37,7 +49,9 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
           }
 
           if (info.type !== "File") {
-            return yield* failure(`Not a regular export artifact: ${name}`);
+            return yield* new ExportFailed({
+              message: `Not a regular export artifact: ${name}`,
+            });
           }
 
           return Stream.make(
@@ -52,11 +66,11 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
     return yield* Stream.fromIterable(entries).pipe(
       Stream.flatMap(entry),
       Stream.pipeThroughChannel(
-        Zip.encode<PlatformError | ReviewError, unknown, ArchiveEntry>()
+        Zip.encode<PlatformError | ExportFailed, unknown, ArchiveEntry>()
       ),
       Stream.catchTag("ZipError", (cause) =>
         Stream.fail(
-          new ReviewError({
+          new ExportFailed({
             message: `Cannot create export archive: ${cause.message}`,
           })
         )
@@ -68,6 +82,10 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
   Effect.timeoutOrElse({
     duration: "2 minutes",
     orElse: () =>
-      failure("Creating the export archive timed out after 2 minutes"),
+      Effect.fail(
+        new ExportFailed({
+          message: "Creating the export archive timed out after 2 minutes",
+        })
+      ),
   })
 );

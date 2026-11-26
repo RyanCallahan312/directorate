@@ -3,7 +3,6 @@ import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "../exclusions.ts";
 import type { Entry } from "../feature/ledger/entry.ts";
-import { failure, ReviewError } from "../platform/error.ts";
 import { Git } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Store } from "../records/records.ts";
@@ -72,6 +71,34 @@ export const sealedFile = (seal: Seal, path: string, side: Side = "new") =>
 /** Whether a repository path lies in a dependency directory (node_modules, vendor, venv, …); a directory counts too. */
 export const inDependencyDir = (p: string) => DEPENDENCY_DIRS.test(`${p}/`);
 
+/** A path, region, or line the seal does not hold. */
+export class NotInSeal extends Schema.TaggedError<
+  NotInSeal,
+  { readonly brand: unique symbol }
+>()("NotInSeal", { message: Schema.String }) {}
+
+/** A secret-like path, or one renamed or copied from one: never shown. */
+export class Withheld extends Schema.TaggedError<
+  Withheld,
+  { readonly brand: unique symbol }
+>()("Withheld", { message: Schema.String }) {}
+
+/** An anchor or quote that does not tie to the sealed code. */
+export class AnchorRejected extends Schema.TaggedError<
+  AnchorRejected,
+  { readonly brand: unique symbol }
+>()("AnchorRejected", { message: Schema.String }) {}
+
+/** Evidence refs that do not fit the sealed files, each with its reason. */
+export class EvidenceRejected extends Schema.TaggedError<
+  EvidenceRejected,
+  { readonly brand: unique symbol }
+>()("EvidenceRejected", { problems: Schema.Array(Schema.String) }) {
+  override get message() {
+    return `Rejected evidence: ${this.problems.join("; ")}`;
+  }
+}
+
 /**
  * An installed dependency file or directory on disk, which is outside the seal: allowed only when its resolved path is in
  * the repository, in a gitignored dependency directory, and not secret-like. It is resolved before git sees it: package
@@ -86,26 +113,32 @@ export const installed = Effect.fn("Directorate.installed")(function* installed(
   const missing = `${p} not found (installed dependencies: directorate_ls lists a dependency directory)`;
 
   if (isSecret(p) || !inDependencyDir(p)) {
-    return yield* failure(`${p} not found at the seal`);
+    return yield* new NotInSeal({ message: `${p} not found at the seal` });
   }
 
   const [root, abs] = yield* Effect.all(
     [fs.realPath(seal.repo), fs.realPath(paths.join(seal.repo, p))],
     { concurrency: 2 }
-  ).pipe(Effect.catchTag("PlatformError", () => failure(missing)));
+  ).pipe(
+    Effect.catchTag("PlatformError", () =>
+      Effect.fail(new NotInSeal({ message: missing }))
+    )
+  );
 
   const rel = paths.relative(root, abs).split(paths.sep).join("/");
 
   if (rel === ".." || rel.startsWith("../") || paths.isAbsolute(rel)) {
-    return yield* failure(`${p} resolves outside the repository`);
+    return yield* new NotInSeal({
+      message: `${p} resolves outside the repository`,
+    });
   }
 
   if (isSecret(rel) || !inDependencyDir(rel)) {
-    return yield* failure(`${p} resolves to a withheld path`);
+    return yield* new Withheld({ message: `${p} resolves to a withheld path` });
   }
 
   if (!(yield* (yield* Git).isIgnored(seal.repo, rel))) {
-    return yield* failure(`${p} not found at the seal`);
+    return yield* new NotInSeal({ message: `${p} not found at the seal` });
   }
 
   return { abs, missing, rel };
@@ -116,19 +149,15 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
   seal: Seal,
   p: string,
   side: Side = "new"
-): Effect.fn.Return<
-  { content: string; live: boolean },
-  ReviewError,
-  FileSystem.FileSystem | Path.Path | Git | Store
-> {
+) {
   const fs = yield* FileSystem.FileSystem;
 
   if (isWithheld(seal, p, side)) {
-    return yield* failure(
-      isSecret(p)
+    return yield* new Withheld({
+      message: isSecret(p)
         ? `${p} is a secret-like path; content withheld`
-        : `${p} was renamed or copied from a secret-like path; content withheld`
-    );
+        : `${p} was renamed or copied from a secret-like path; content withheld`,
+    });
   }
 
   const sealed = yield* sealedFile(seal, p, side);
@@ -142,9 +171,9 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
     seal.deleted.includes(p) ||
     seal.files.some((f) => f.path === p)
   ) {
-    return yield* failure(
-      `${p} does not exist on the ${side === "old" ? "base" : "sealed"} side`
-    );
+    return yield* new NotInSeal({
+      message: `${p} does not exist on the ${side === "old" ? "base" : "sealed"} side`,
+    });
   }
 
   const dep = yield* installed(seal, p);
@@ -152,7 +181,11 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
   return {
     content: yield* fs
       .readFileString(dep.abs)
-      .pipe(Effect.catchTag("PlatformError", () => failure(dep.missing))),
+      .pipe(
+        Effect.catchTag("PlatformError", () =>
+          Effect.fail(new NotInSeal({ message: dep.missing }))
+        )
+      ),
     live: true,
   };
 });
@@ -164,15 +197,15 @@ const longEnough = (line: string) => line.replaceAll(/\s/gu, "").length >= 8;
 export const checkQuote = Effect.fn("Directorate.checkQuote")(
   function* checkQuote(seal: Seal, anchor: Anchor, quote: string) {
     if (anchor.side === "new" && outsideWorktreeScope(seal, anchor.path)) {
-      return yield* failure(
-        `${anchor.path} is outside the sealed scope; only the base is available. Use side:"old" to anchor to the base.`
-      );
+      return yield* new AnchorRejected({
+        message: `${anchor.path} is outside the sealed scope; only the base is available. Use side:"old" to anchor to the base.`,
+      });
     }
 
     const { content } = yield* readable(seal, anchor.path, anchor.side).pipe(
       Effect.mapError(
         (e) =>
-          new ReviewError({
+          new AnchorRejected({
             message: `${e.message}. Use side:"old" for removed code.`,
           })
       )
@@ -181,9 +214,9 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
     const lines = content.split("\n");
 
     if (anchor.line < 1 || anchor.line > lines.length) {
-      return yield* failure(
-        `${anchor.path}:${anchor.line} is outside the file (${lines.length} lines).`
-      );
+      return yield* new AnchorRejected({
+        message: `${anchor.path}:${anchor.line} is outside the file (${lines.length} lines).`,
+      });
     }
 
     const q = quote.split("\n").map(norm).filter(Boolean);
@@ -191,15 +224,16 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
     const [first] = q;
 
     if (first === undefined) {
-      return yield* failure(
-        "quote is empty; copy the exact code at the anchor."
-      );
+      return yield* new AnchorRejected({
+        message: "quote is empty; copy the exact code at the anchor.",
+      });
     }
 
     if (!q.some(longEnough)) {
-      return yield* failure(
-        "quote too short to identify the code; include at least one full line with 8 or more non-space characters."
-      );
+      return yield* new AnchorRejected({
+        message:
+          "quote too short to identify the code; include at least one full line with 8 or more non-space characters.",
+      });
     }
 
     const matchAt = (i: number): number | undefined => {
@@ -254,16 +288,17 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
     );
 
     if (window.includes(norm(quote))) {
-      return yield* failure(
-        "quote is a fragment; copy at least one complete line of the code at the anchor."
-      );
+      return yield* new AnchorRejected({
+        message:
+          "quote is a fragment; copy at least one complete line of the code at the anchor.",
+      });
     }
 
     const hit = lines.findIndex((l) => norm(l).includes(first));
 
-    return yield* failure(
-      `quote not found at ${anchor.path}:${anchor.line} on the ${anchor.side === "old" ? "base" : "sealed"} side.${hit === -1 ? " It does not appear in the file." : ` Its first line appears at line ${hit + 1}.`} Re-read with directorate_read and anchor to the real code.`
-    );
+    return yield* new AnchorRejected({
+      message: `quote not found at ${anchor.path}:${anchor.line} on the ${anchor.side === "old" ? "base" : "sealed"} side.${hit === -1 ? " It does not appear in the file." : ` Its first line appears at line ${hit + 1}.`} Re-read with directorate_read and anchor to the real code.`,
+    });
   }
 );
 
@@ -295,7 +330,11 @@ export const checkEvidence = Effect.fn("Directorate.checkEvidence")(
 
                 return r.end <= n
                   ? Effect.void
-                  : failure(`line outside file (${n} lines)`);
+                  : Effect.fail(
+                      new NotInSeal({
+                        message: `line outside file (${n} lines)`,
+                      })
+                    );
               })
             );
 
@@ -310,12 +349,7 @@ export const checkEvidence = Effect.fn("Directorate.checkEvidence")(
         }).pipe(Effect.mapError((e) => `${ref}: ${e.message}`));
       },
       { concurrency: IO_CONCURRENCY }
-    ).pipe(
-      Effect.mapError(
-        (bad) =>
-          new ReviewError({ message: `Rejected evidence: ${bad.join("; ")}` })
-      )
-    );
+    ).pipe(Effect.mapError((bad) => new EvidenceRejected({ problems: bad })));
   }
 );
 

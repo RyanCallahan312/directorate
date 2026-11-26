@@ -13,7 +13,6 @@ import {
 
 import { LedgerJson } from "../feature/ledger/entry.ts";
 import type { Ledger } from "../feature/ledger/entry.ts";
-import { failure, ReviewError } from "../platform/error.ts";
 import { SealJson } from "../seal/record.ts";
 import type { Seal } from "../seal/record.ts";
 import { mutationLocks } from "./locks.ts";
@@ -34,6 +33,18 @@ const encodeLedger = (l: Ledger) =>
   Schema.encodeEffect(LedgerJson)(l).pipe(Effect.orDie);
 
 export const emptyLedger: Ledger = { entries: [], notes: [] };
+
+/** No seal by that id: a malformed id, or one with no record under the state root. */
+export class SealNotFound extends Schema.TaggedError<
+  SealNotFound,
+  { readonly brand: unique symbol }
+>()("SealNotFound", { message: Schema.String }) {}
+
+/** A review record that exists, or must, cannot be read: unreadable, missing, or failing its schema. */
+export class RecordDamaged extends Schema.TaggedError<
+  RecordDamaged,
+  { readonly brand: unique symbol }
+>()("RecordDamaged", { message: Schema.String }) {}
 
 const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;
@@ -66,9 +77,15 @@ const make = Effect.gen(function* make() {
 
   /** Runs body under the seal's cross-process lock. */
   const withLock = <A, E, R>(id: string, body: Effect.Effect<A, E, R>) =>
-    SEAL_ID.test(id)
-      ? locked(id, file(id, "mutation.lock"), body)
-      : failure(`Unknown seal id "${id}". Call directorate_seal first.`);
+    Effect.gen(function* withSealLock() {
+      if (!SEAL_ID.test(id)) {
+        return yield* new SealNotFound({
+          message: `Unknown seal id "${id}". Call directorate_seal first.`,
+        });
+      }
+
+      return yield* locked(id, file(id, "mutation.lock"), body);
+    });
 
   const withShipLock = <A, E, R>(id: string, body: Effect.Effect<A, E, R>) =>
     fs
@@ -85,24 +102,32 @@ const make = Effect.gen(function* make() {
 
   const load = Effect.fn("Store.load")(function* load(id: string) {
     if (!SEAL_ID.test(id)) {
-      return yield* failure(
-        `Unknown seal id "${id}". Call directorate_seal first, or directorate_ledger_list with no seal to list recent seals.`
-      );
+      return yield* new SealNotFound({
+        message: `Unknown seal id "${id}". Call directorate_seal first, or directorate_ledger_list with no seal to list recent seals.`,
+      });
     }
 
     const raw = yield* fs.readFileString(file(id, "seal.json")).pipe(
       Effect.catchReason(
         "PlatformError",
         "NotFound",
-        () => failure(`Seal ${id} not found under ${root}.`),
-        (_, e) => failure(`Cannot read seal ${id}: ${e.message}`)
+        () =>
+          Effect.fail(
+            new SealNotFound({ message: `Seal ${id} not found under ${root}.` })
+          ),
+        (_, e) =>
+          Effect.fail(
+            new RecordDamaged({
+              message: `Cannot read seal ${id}: ${e.message}`,
+            })
+          )
       )
     );
 
     return yield* decodeSeal(raw).pipe(
       Effect.mapError(
         (e) =>
-          new ReviewError({ message: `Seal ${id} is damaged: ${e.message}` })
+          new RecordDamaged({ message: `Seal ${id} is damaged: ${e.message}` })
       )
     );
   });
@@ -124,14 +149,16 @@ const make = Effect.gen(function* make() {
 
     if (raw === undefined) {
       return options?.required
-        ? yield* failure(`The ledger for ${id} is missing.`)
+        ? yield* new RecordDamaged({
+            message: `The ledger for ${id} is missing.`,
+          })
         : emptyLedger;
     }
 
     return yield* decodeLedger(raw).pipe(
       Effect.mapError(
         (e) =>
-          new ReviewError({
+          new RecordDamaged({
             message: `Ledger for ${id} is damaged; refusing to treat it as empty: ${e.message}`,
           })
       )

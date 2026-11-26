@@ -1,10 +1,9 @@
 import { DateTime, Effect, FileSystem, Path, Result, Schema } from "effect";
 
-import { failure } from "../platform/error.ts";
 import { Git, Host, command } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { ActiveSeal } from "./active-seal.ts";
-import { writeArchive } from "./archive.ts";
+import { ExportFailed, writeArchive } from "./archive.ts";
 import { Store } from "./repository.ts";
 
 const TIMEOUT = 120_000;
@@ -101,7 +100,9 @@ const copyArtifact: (
     }
 
     if (type !== "Directory") {
-      return yield* failure(`Not a regular export artifact: ${source}`);
+      return yield* new ExportFailed({
+        message: `Not a regular export artifact: ${source}`,
+      });
     }
 
     yield* fs.makeDirectory(dest);
@@ -124,7 +125,9 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
   const source = paths.join(store.root, id);
 
   if ((yield* fs.lstat(source)).type !== "Directory") {
-    return yield* failure(`Not a seal directory: ${source}`);
+    return yield* new ExportFailed({
+      message: `Not a seal directory: ${source}`,
+    });
   }
 
   const artifacts = paths.join(staging, "seal");

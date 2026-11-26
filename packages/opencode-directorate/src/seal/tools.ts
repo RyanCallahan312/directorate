@@ -2,7 +2,6 @@
 import { Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
-import { failure } from "../platform/error.ts";
 import {
   actor,
   optional,
@@ -10,8 +9,9 @@ import {
   str,
   strArr,
 } from "../platform/platform.ts";
-import type { DefineTool, Git } from "../platform/platform.ts";
+import type { DefineTool, Git, ToolCatalog } from "../platform/platform.ts";
 import { Store } from "../records/records.ts";
+import { NotInSeal } from "./content.ts";
 import {
   coverageSummary,
   dispose,
@@ -30,13 +30,18 @@ import {
 } from "./views.ts";
 
 export const readTools = (
-  tool: DefineTool<Sessions | Store | Git | FileSystem.FileSystem | Path.Path>
+  tool: DefineTool<
+    Sessions | Store | Git | ToolCatalog | FileSystem.FileSystem | Path.Path
+  >
 ) => {
   tool({
     description:
       "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
     *execute(input, c) {
-      return yield* locked(c, input.seal, function* execute(seal) {
+      return yield* locked<
+        { content: string },
+        Store | Git | ToolCatalog | FileSystem.FileSystem | Path.Path
+      >(c, input.seal, function* execute(seal) {
         // A step that began before lockdown must not record reads after it; a reported seal stays readable.
         yield* unlocked(seal, c, "directorate_diff");
         const a = actor(c);
@@ -216,7 +221,9 @@ export const readTools = (
           );
 
           if (unknown.length) {
-            return yield* failure(`Unknown regions: ${unknown.join(", ")}`);
+            return yield* new NotInSeal({
+              message: `Unknown regions: ${unknown.join(", ")}`,
+            });
           }
 
           const { seal: next, coerced } = dispose(

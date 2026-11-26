@@ -6,6 +6,16 @@ import { Time } from "../../platform/stored.ts";
 const list = Schema.Array;
 const opt = Schema.optional;
 
+/** Only the session that owns a review may abandon it. */
+export class AbandonRefused extends Schema.TaggedError<
+  AbandonRefused,
+  { readonly brand: unique symbol }
+>()("AbandonRefused", { seal: Schema.String }) {
+  override get message() {
+    return `Only the owner of ${this.seal} can abandon it.`;
+  }
+}
+
 /** The Custody field group of seal.json. */
 export const Custody = Schema.Struct({
   abandoned: opt(Schema.Boolean),

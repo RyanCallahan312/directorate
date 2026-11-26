@@ -124,28 +124,6 @@ export const childNamed = (name: string | undefined) => {
   return agent && Liaison.dispatches.includes(agent.id) ? agent : undefined;
 };
 
-/** What each agent may still call once the budget is locked. */
-const LOCKED_TOOLS = Schema.Record(
-  AgentIdSchema,
-  Schema.Array(Schema.String)
-).make({
-  directorate_auditor: ["directorate_ledger_add", "directorate_note"],
-  directorate_compliance: [
-    "directorate_ledger_verdict",
-    "directorate_ledger_list",
-  ],
-  directorate_liaison: [
-    "directorate_report",
-    "directorate_ledger_list",
-    "directorate_note",
-  ],
-  directorate_seat: ["directorate_ledger_add", "directorate_note"],
-});
-
-/** Whether `name`'s agent still calls `tool` once the budget is locked; other agents call nothing. */
-export const keepsAtLockdown = (name: string | undefined, tool: string) =>
-  isAgentId(name) && LOCKED_TOOLS[name].includes(tool);
-
 export const ActorSchema = Schema.Struct({
   agent: Schema.String,
   session: Schema.String,

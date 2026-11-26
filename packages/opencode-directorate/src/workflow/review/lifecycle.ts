@@ -1,6 +1,6 @@
 // Directorate review lifecycle: create a seal from a target, refresh it into its next generation when the code moves, and
 // re-check a reported review as a new seal. Capture itself is seal/'s; this orchestrates it with the ledger.
-import { DateTime, Effect, Option } from "effect";
+import { DateTime, Effect, Option, Schema } from "effect";
 import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
@@ -10,7 +10,6 @@ import type { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
 import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
-import { failure, ReviewError } from "../../platform/error.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
 import { emptyLedger, Store } from "../../records/records.ts";
 import { isRead } from "../../seal/coverage.ts";
@@ -30,6 +29,18 @@ import type { Current } from "../../seal/seal.ts";
 import type { Target } from "../../seal/target.ts";
 import type { Mode } from "./request.ts";
 import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, Window } from "./window.ts";
+
+/** What the review's state does not allow: a second active seal, re-checking an open review, resuming a reported one. */
+export class ReviewConflict extends Schema.TaggedError<
+  ReviewConflict,
+  { readonly brand: unique symbol }
+>()("ReviewConflict", { message: Schema.String }) {}
+
+/** The target's current ends cannot be told or are not fetched, so the review cannot be refreshed or re-checked. */
+export class TargetUnresolved extends Schema.TaggedError<
+  TargetUnresolved,
+  { readonly brand: unique symbol }
+>()("TargetUnresolved", { message: Schema.String }) {}
 
 const IO_CONCURRENCY = 16;
 
@@ -227,14 +238,16 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     const cur = yield* currentFingerprint(seal).pipe(
       Effect.mapError(
         (e) =>
-          new ReviewError({ message: `Cannot check freshness: ${e.message}` })
+          new TargetUnresolved({
+            message: `Cannot check freshness: ${e.message}`,
+          })
       )
     );
 
     if (cur.unfetched) {
-      return yield* failure(
-        `${cur.unfetched}. Ask the user to fetch it, or call directorate_report to report the review as stale.`
-      );
+      return yield* new TargetUnresolved({
+        message: `${cur.unfetched}. Ask the user to fetch it, or call directorate_report to report the review as stale.`,
+      });
     }
 
     if (cur.fingerprint === seal.fingerprint) {
@@ -308,8 +321,10 @@ const RECHECK_MIN_MINUTES = 10;
 export const recheckable = (prior: Seal) =>
   prior.reportedAt
     ? Effect.void
-    : failure(
-        `${prior.id} has not been reported. Resume it with resume: "${prior.id}" instead of re-checking it.`
+    : Effect.fail(
+        new ReviewConflict({
+          message: `${prior.id} has not been reported. Resume it with resume: "${prior.id}" instead of re-checking it.`,
+        })
       );
 
 /**
@@ -359,15 +374,17 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             : yield* currentFingerprint(prior).pipe(
                 Effect.mapError(
                   (e) =>
-                    new ReviewError({
+                    new TargetUnresolved({
                       message: `Cannot re-resolve ${prior.id}'s target: ${e.message}`,
                     })
                 ),
                 Effect.filterOrElse(
                   (c) => !c.unfetched,
                   (c) =>
-                    failure(
-                      `${c.unfetched}. Ask the user to fetch it, then re-check again.`
+                    Effect.fail(
+                      new TargetUnresolved({
+                        message: `${c.unfetched}. Ask the user to fetch it, then re-check again.`,
+                      })
                     )
                 )
               );

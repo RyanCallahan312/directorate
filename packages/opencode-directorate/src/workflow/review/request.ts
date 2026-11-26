@@ -2,7 +2,6 @@
 // from the user's words and a leading --scope flag.
 import { Effect, Result, Schema } from "effect";
 
-import { failure } from "../../platform/error.ts";
 import type { TargetKind } from "../../seal/target.ts";
 
 export const ModeSchema = Schema.Literals(["default", "code-quality", "full"]);
@@ -26,6 +25,12 @@ export const REVIEW_SCOPE_TARGET = {
 } as const satisfies Record<ReviewScope, TargetKind>;
 
 const SCOPE_FLAG = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u;
+
+/** A review request the command or tool cannot act on, with how to ask instead. */
+export class InvalidRequest extends Schema.TaggedError<
+  InvalidRequest,
+  { readonly brand: unique symbol }
+>()("InvalidRequest", { message: Schema.String }) {}
 
 /** A review request: the user's words without the flag, and the scope the flag selected. */
 export interface ReviewRequest {
@@ -89,6 +94,6 @@ export const requestText = (
 /** The text that starts a review for a command's request; fails with the message the user sees on a bad flag. */
 export const reviewRequest = (text: string, bare: "ask" | "defaults") =>
   Result.match(parseRequest(text), {
-    onFailure: failure,
+    onFailure: (message) => Effect.fail(new InvalidRequest({ message })),
     onSuccess: (request) => Effect.succeed(requestText(request, bare)),
   });

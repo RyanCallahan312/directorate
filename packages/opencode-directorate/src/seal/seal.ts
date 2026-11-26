@@ -15,7 +15,7 @@ export {
   readable,
 } from "./content.ts";
 
-export { currentFingerprint, resolveEnds } from "./ends.ts";
+export { currentFingerprint, FreshnessUnchecked, resolveEnds } from "./ends.ts";
 
 export type { Current } from "./ends.ts";
 

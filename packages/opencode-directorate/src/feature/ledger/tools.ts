@@ -2,7 +2,6 @@
 import { DateTime, Effect, Function, Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
-import { failure, ReviewError } from "../../platform/error.ts";
 import {
   actor,
   Git,
@@ -12,7 +11,7 @@ import {
   str,
   strArr,
 } from "../../platform/platform.ts";
-import type { DefineTool } from "../../platform/platform.ts";
+import type { DefineTool, ToolCatalog } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import { SideSchema } from "../../seal/region.ts";
@@ -24,7 +23,7 @@ import {
   done,
   mutate,
 } from "../../seal/seal.ts";
-import { Auditor, Liaison, Seat } from "../agents/agent.ts";
+import { Auditor, Compliance, Liaison, Seat } from "../agents/agent.ts";
 import {
   actorName,
   childFailures,
@@ -37,6 +36,7 @@ import {
   nearby,
   unresolved,
   verdictError,
+  VerdictRefused,
 } from "./decide.ts";
 import {
   EntryStatus,
@@ -48,9 +48,41 @@ import {
 } from "./entry.ts";
 import type { Entry } from "./entry.ts";
 
+/** A candidate the dossier does not take: a disabled lens, or an anchor or quote that does not tie to the sealed code. */
+class EntryRejected extends Schema.TaggedError<
+  EntryRejected,
+  { readonly brand: unique symbol }
+>()("EntryRejected", { reason: Schema.String }) {
+  override get message() {
+    return `Rejected: ${this.reason}`;
+  }
+}
+
+/** No entry by that id in the dossier. */
+class NoEntry extends Schema.TaggedError<
+  NoEntry,
+  { readonly brand: unique symbol }
+>()("NoEntry", { id: Schema.String }) {
+  override get message() {
+    return `No entry ${this.id}.`;
+  }
+}
+
+/** A note the caller may not record: an answered question only the Liaison records, for a question a failed Auditor asked. */
+class NoteRefused extends Schema.TaggedError<
+  NoteRefused,
+  { readonly brand: unique symbol }
+>()("NoteRefused", { message: Schema.String }) {}
+
 export const ledgerTools = (
   tool: DefineTool<
-    Sessions | Store | Git | Host | FileSystem.FileSystem | Path.Path
+    | Sessions
+    | Store
+    | Git
+    | Host
+    | ToolCatalog
+    | FileSystem.FileSystem
+    | Path.Path
   >
 ) => {
   tool({
@@ -65,9 +97,9 @@ export const ledgerTools = (
           const store = yield* Store;
 
           if (seal.lensesOff?.includes(input.lens)) {
-            return yield* failure(
-              `Rejected: the ${input.lens} lens is disabled for this review (directorate.json). File it under the lens it also fits, or leave it.`
-            );
+            return yield* new EntryRejected({
+              reason: `the ${input.lens} lens is disabled for this review (directorate.json). File it under the lens it also fits, or leave it.`,
+            });
           }
 
           const raw = {
@@ -78,9 +110,7 @@ export const ledgerTools = (
           };
 
           const anchor = yield* checkQuote(seal, raw, input.quote).pipe(
-            Effect.mapError(
-              (e) => new ReviewError({ message: `Rejected: ${e.message}` })
-            )
+            Effect.mapError((e) => new EntryRejected({ reason: e.message }))
           );
 
           const evidence = yield* checkEvidence(seal, input.evidence);
@@ -173,6 +203,7 @@ export const ledgerTools = (
           "Concrete input, state, timing, or actor that makes it happen.",
       }),
     }),
+    lockdown: [Auditor, Seat],
     name: "directorate_ledger_add",
   });
 
@@ -190,7 +221,7 @@ export const ledgerTools = (
           const entry = ledger.entries.find((e) => e.id === input.id);
 
           if (!entry) {
-            return yield* failure(`No entry ${input.id}.`);
+            return yield* new NoEntry({ id: input.id });
           }
 
           const by = actor(c);
@@ -208,7 +239,7 @@ export const ledgerTools = (
           );
 
           if (err) {
-            return yield* failure(err);
+            return yield* new VerdictRefused({ message: err });
           }
 
           const evidence = yield* checkEvidence(seal, input.evidence);
@@ -232,7 +263,7 @@ export const ledgerTools = (
                   anchor: yield* checkQuote(seal, want, quote).pipe(
                     Effect.mapError(
                       (e) =>
-                        new ReviewError({
+                        new VerdictRefused({
                           message: `Cannot confirm: the anchor does not match the sealed code (${e.message}). Re-anchor with path/line/quote, or refute.`,
                         })
                     )
@@ -294,6 +325,7 @@ export const ledgerTools = (
       side: optional(SideSchema),
       verdict: VerdictKind,
     }),
+    lockdown: [Compliance],
     name: "directorate_ledger_verdict",
   });
 
@@ -399,6 +431,7 @@ export const ledgerTools = (
       seal: optional(str),
       status: optional(EntryStatus),
     }),
+    lockdown: [Liaison, Compliance],
     name: "directorate_ledger_list",
   });
 
@@ -417,9 +450,9 @@ export const ledgerTools = (
 
           if (input.kind === "answered") {
             if (c.agent !== Liaison.id) {
-              return yield* failure(
-                `Only ${Liaison.id} records an answered question.`
-              );
+              return yield* new NoteRefused({
+                message: `Only ${Liaison.id} records an answered question.`,
+              });
             }
 
             text = questionText(input.text);
@@ -429,11 +462,11 @@ export const ledgerTools = (
               .map(childQuestion);
 
             if (!failed.includes(text)) {
-              return yield* failure(
-                failed.length
+              return yield* new NoteRefused({
+                message: failed.length
                   ? `No failed Auditor asked "${text}". Pass one of these question lines verbatim: ${failed.map((q) => `"${q}"`).join("; ")}.`
-                  : "No failed Auditor question is unanswered."
-              );
+                  : "No failed Auditor question is unanswered.",
+              });
             }
           }
 
@@ -455,6 +488,7 @@ export const ledgerTools = (
       );
     },
     input: Schema.Struct({ kind: NoteKind, seal: str, text: str }),
+    lockdown: [Liaison, Auditor, Seat],
     name: "directorate_note",
   });
 };

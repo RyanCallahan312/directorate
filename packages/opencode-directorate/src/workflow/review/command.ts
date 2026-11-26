@@ -3,8 +3,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { CommandDefinition } from "@opencode/plugin/effect/command";
 import { Effect } from "effect";
 
-import { failure } from "../../platform/error.ts";
-import { reviewRequest } from "./request.ts";
+import { InvalidRequest, reviewRequest } from "./request.ts";
 
 export const reviewCommand = (host: Plugin.Context) =>
   ({
@@ -21,8 +20,11 @@ export const reviewCommand = (host: Plugin.Context) =>
         const rest = prompt.text.slice(again[0].length).trim();
 
         if (rest.startsWith("=")) {
-          return failure(
-            "Use --recheck alone for the latest Directive, or --recheck <seal id> (directorate-…)."
+          return Effect.fail(
+            new InvalidRequest({
+              message:
+                "Use --recheck alone for the latest Directive, or --recheck <seal id> (directorate-…).",
+            })
           );
         }
 

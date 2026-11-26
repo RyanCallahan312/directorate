@@ -11,7 +11,7 @@ import { nodeProcessIdentity } from "./process-identity.ts";
 
 export { command } from "./command.ts";
 
-export { Git } from "./git.ts";
+export { Git, GitFailed, MissingHistory, UnreadableFile } from "./git.ts";
 
 export { Host } from "./host.ts";
 
@@ -27,7 +27,15 @@ export type { Activity } from "./host-record.ts";
 
 export { ProcessIdentity } from "./process-identity.ts";
 
-export { actor, adapter, optional, positiveInt, str, strArr } from "./tool.ts";
+export {
+  actor,
+  adapter,
+  optional,
+  positiveInt,
+  str,
+  strArr,
+  ToolCatalog,
+} from "./tool.ts";
 
 export type { Body, DefineTool } from "./tool.ts";
 

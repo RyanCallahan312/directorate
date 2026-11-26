@@ -2,8 +2,6 @@
 // reviews. Either way the report is rendered and saved once, and the seal is reported from then on.
 import { Clock, DateTime, Effect, Result, Schema } from "effect";
 
-import { failure } from "../../platform/error.ts";
-import type { ReviewError } from "../../platform/error.ts";
 import { optional, str } from "../../platform/platform.ts";
 import type { DefineTool, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
@@ -11,12 +9,15 @@ import type { Seal } from "../../seal/record.ts";
 import {
   changedSinceSeal,
   currentFingerprint,
+  FreshnessUnchecked,
   locked,
   Sessions,
   writable,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
+import { AbandonRefused } from "../../workflow/review/custody.ts";
 import { budget, GRACE_MS, windowOf } from "../../workflow/review/window.ts";
+import { Liaison } from "../agents/agent.ts";
 import type { Ledger } from "../ledger/entry.ts";
 import { assess } from "./directive.ts";
 import type { Freshness } from "./directive.ts";
@@ -31,8 +32,20 @@ import {
 import type { Hold } from "./gates.ts";
 import { renderReport } from "./render.ts";
 
+/** A freshness check's outcome: the target's current ends, or why they could not be told. */
+type CurrentCheck = Result.Result<
+  Current,
+  Effect.Error<ReturnType<typeof currentFingerprint>>
+>;
+
+/** A protocol gate pushes back: the Liaison reads why, and calling again proceeds. */
+class ProtocolHold extends Schema.TaggedError<
+  ProtocolHold,
+  { readonly brand: unique symbol }
+>()("ProtocolHold", { message: Schema.String }) {}
+
 /** What changed since the seal; failures to check are reported as unverified, never raised. */
-const freshness = (seal: Seal, cur: Result.Result<Current, ReviewError>) =>
+const freshness = (seal: Seal, cur: CurrentCheck) =>
   Result.match(cur, {
     onFailure: (e) => Effect.succeed<Freshness>({ unverified: e.message }),
     onSuccess: (c) =>
@@ -42,7 +55,11 @@ const freshness = (seal: Seal, cur: Result.Result<Current, ReviewError>) =>
             Effect.timeoutOrElse({
               duration: 20_000,
               orElse: () =>
-                failure("listing changed files timed out after 20s"),
+                Effect.fail(
+                  new FreshnessUnchecked({
+                    message: "listing changed files timed out after 20s",
+                  })
+                ),
             }),
             Effect.match({
               onFailure: (e): Freshness => ({
@@ -68,7 +85,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     synthesis?: string | undefined;
     extraReasons?: readonly string[];
     auto?: boolean;
-    cur?: Result.Result<Current, ReviewError>;
+    cur?: CurrentCheck;
   }
 ) {
   const { stale, unverified } = yield* freshness(
@@ -137,7 +154,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
         }
 
         if (abandonedBy && seal.ownerSession !== abandonedBy) {
-          return yield* failure(`Only the owner of ${id} can abandon it.`);
+          return yield* new AbandonRefused({ seal: id });
         }
 
         if (
@@ -194,7 +211,9 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
             const pushBack = (gates: Seal["gates"], message: string) =>
               store
                 .save({ ...seal, gates: { ...seal.gates, ...gates } })
-                .pipe(Effect.andThen(failure(message)));
+                .pipe(
+                  Effect.andThen(Effect.fail(new ProtocolHold({ message })))
+                );
 
             /** A gate pushes back once for each new id it has not already pushed back on. */
             const once = (gate: Hold) => {
@@ -262,6 +281,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
           })
         ),
       }),
+      lockdown: [Liaison],
       name: "directorate_report",
     });
   };

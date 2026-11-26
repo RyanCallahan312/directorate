@@ -3216,14 +3216,14 @@ test("mutation lock excludes a separate process", async () => {
 
   const excludes = async (method: "withLock" | "withShipLock", id: string) => {
     const result = await run(
-      store.pipe(
-        Effect.flatMap((st) =>
-          st[method](
-            id,
-            Effect.tryPromise(() => probe(method, id, 150))
-          )
-        )
-      )
+      Effect.gen(function* lockedProbe() {
+        const st = yield* store;
+
+        return yield* st[method](
+          id,
+          Effect.tryPromise(() => probe(method, id, 150))
+        );
+      })
     );
 
     assert.equal(result.stdout.trim(), "waiting", method);

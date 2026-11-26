@@ -20,6 +20,7 @@ import {
   Git,
   Host,
   nodeLayer,
+  ToolCatalog,
   Worktree,
 } from "./platform/platform.ts";
 import {
@@ -65,9 +66,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
     editor.add(ship.command);
   });
 
-  // The tool list is part of the prompt prefix: keep this order.
-  yield* host.tool.transform((editor) => {
-    const tool = tools(editor);
+  // The tool list is part of the prompt prefix: keep this order. Declared in the ToolCatalog before any hook registers.
+  const toolList = yield* tools((tool) => {
     readTools(tool);
     ledgerTools(tool);
     configureTool(tool);
@@ -76,6 +76,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
     report.reportTool(tool);
     waitTool(tool);
   });
+
+  yield* host.tool.transform(toolList);
 
   // The one ordered session-event consumer: the ship loop hears each event before the review's runs take theirs.
   yield* registerDispatch(ship.sessionEvent);
@@ -89,7 +91,8 @@ const register = Effect.fn("Directorate.register")(function* register() {
 export const platformLayer = Layer.mergeAll(
   Store.layer,
   Worktree.layer,
-  SettingsStore.layer
+  SettingsStore.layer,
+  ToolCatalog.layer
 ).pipe(
   Layer.provideMerge(Layer.merge(Git.layer, StateRoot.layer)),
   Layer.provideMerge(nodeLayer)

@@ -3,43 +3,35 @@
 import type { SessionContext } from "@opencode/plugin/effect/session";
 import { Effect } from "effect";
 
-import { adapter, Host } from "../../platform/platform.ts";
+import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
 import { budget, windowOf } from "../../workflow/review/window.ts";
-import {
-  agentNamed,
-  budgetNotice,
-  childNamed,
-  keepsAtLockdown,
-  Liaison,
-} from "./agent.ts";
-
-const GENERAL_TOOLS = new Set([
-  "directorate_configure",
-  "directorate_export",
-  "directorate_export_list",
-]);
+import { agentNamed, budgetNotice, childNamed, Liaison } from "./agent.ts";
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
 const LIAISON_ONLY =
   "Only directorate_liaison runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch directorate_liaison with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another. To re-check after fixes, send that session a follow-up asking for a re-check, or dispatch a new Liaison with the seal id from the Directive's Containment line.";
 
 /** True for a request of an agent outside The Directorate, whose tools then keep only those to configure and export. */
-export const withholdHarness = (event: SessionContext) => {
+export const withholdHarness = Effect.fnUntraced(function* withholdHarness(
+  event: SessionContext
+) {
   if (agentNamed(event.agent)) {
     return false;
   }
 
+  const catalog = yield* ToolCatalog;
+
   // Other agents can configure and export without getting the review harness.
   for (const name of Object.keys(event.tools ?? {})) {
-    if (name.startsWith("directorate_") && !GENERAL_TOOLS.has(name)) {
+    if (yield* catalog.harness(name)) {
       Reflect.deleteProperty(event.tools, name);
     }
   }
 
   return true;
-};
+});
 
 /** Once the seal's budget is locked: the lockdown notice, and only the tools the agent keeps at lockdown. */
 export const lockdown = Effect.fnUntraced(function* lockdown(
@@ -52,6 +44,8 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
     return;
   }
 
+  const catalog = yield* ToolCatalog;
+
   // Unknown agents read the Liaison's notice.
   event.system.push({
     text: budgetNotice(agentNamed(event.agent) ?? Liaison, b.phase),
@@ -59,7 +53,7 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
   });
 
   for (const name of Object.keys(event.tools ?? {})) {
-    if (!keepsAtLockdown(event.agent, name)) {
+    if (!(yield* catalog.keeps(event.agent, name))) {
       Reflect.deleteProperty(event.tools, name);
     }
   }
@@ -72,6 +66,7 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
 export const registerAccess = Effect.fnUntraced(function* registerAccess() {
   const host = yield* Host;
   const sessions = yield* Sessions;
+  const catalog = yield* ToolCatalog;
   const { hook } = yield* adapter<Sessions>();
 
   yield* host.permission.hook(
@@ -85,8 +80,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
       const covered =
         event.action === "subagent"
           ? child !== undefined
-          : event.action.startsWith("directorate_") &&
-            !GENERAL_TOOLS.has(event.action);
+          : yield* catalog.harness(event.action);
 
       // A request that names no agent is the session's agent's, as the host resolves it.
       const caller = covered

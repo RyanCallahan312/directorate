@@ -5,6 +5,7 @@ import { Effect } from "effect";
 
 import { lockdown, withholdHarness } from "../../feature/agents/agents.ts";
 import { adapter, Host } from "../../platform/platform.ts";
+import type { ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
 
@@ -17,7 +18,7 @@ export const sessionPrefix = Effect.fnUntraced(function* sessionPrefix(
 ) {
   const host = yield* Host;
   const sessions = yield* Sessions;
-  const { hook } = yield* adapter<Sessions>();
+  const { hook } = yield* adapter<Sessions | ToolCatalog>();
 
   // Session prefix & lockdown: keep event.system and event.tools invariant across normal and drain so KV-cache prefixes
   // stay intact (tool results already append [DIRECTORATE // EVACUATION] at the tail); strip tools and push a lockdown
@@ -26,7 +27,7 @@ export const sessionPrefix = Effect.fnUntraced(function* sessionPrefix(
     yield* host.session.hook(
       kind,
       hook(kind, function* onSessionHook(event) {
-        if (withholdHarness(event)) {
+        if (yield* withholdHarness(event)) {
           return;
         }
 

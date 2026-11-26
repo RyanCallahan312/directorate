@@ -1,23 +1,37 @@
 // The cross-process mutation lock: a directory that appears with its holder record, reclaimed when its holder is gone.
 import {
   Clock,
-  Data,
   Effect,
   FileSystem,
   Function,
   Option,
   Path,
-  Predicate,
   Random,
   Schedule,
   Schema,
 } from "effect";
 
-import { failure } from "../platform/error.ts";
 import { ProcessIdentity } from "../platform/platform.ts";
 
-/** Another writer holds the seal's mutation lock. */
-export class LockBusy extends Data.TaggedError("DirectorateLockBusy") {}
+/** Another writer holds the lock at `path`. */
+export class LockBusy extends Schema.TaggedError<
+  LockBusy,
+  { readonly brand: unique symbol }
+>()("LockBusy", { id: Schema.String, path: Schema.String }) {
+  override get message() {
+    return `${this.id} is busy. If all writers have stopped, remove the orphaned lock directory at ${this.path}.`;
+  }
+}
+
+/** The lock for `id` could not be placed. */
+export class LockFailed extends Schema.TaggedError<
+  LockFailed,
+  { readonly brand: unique symbol }
+>()("LockFailed", { id: Schema.String, reason: Schema.String }) {
+  override get message() {
+    return `${this.id}: ${this.reason}`;
+  }
+}
 
 /** A mutation lock older than this is orphaned: far above the longest locked section (git calls stop at 120 s). */
 const LOCK_STALE_MS = 10 * 60_000;
@@ -116,7 +130,11 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
             directory: paths.dirname(path),
             prefix: ".mutation.lock-",
           })
-          .pipe(Effect.catch((error) => failure(`${id}: ${error.message}`)));
+          .pipe(
+            Effect.mapError(
+              (error) => new LockFailed({ id, reason: error.message })
+            )
+          );
 
         const discard = removeDir(tmp).pipe(Effect.ignore);
 
@@ -124,7 +142,11 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
           .writeFileString(paths.join(tmp, "holder"), holder)
           .pipe(
             Effect.catch((error) =>
-              discard.pipe(Effect.andThen(failure(`${id}: ${error.message}`)))
+              discard.pipe(
+                Effect.andThen(
+                  Effect.fail(new LockFailed({ id, reason: error.message }))
+                )
+              )
             )
           );
 
@@ -135,7 +157,7 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
             Effect.catch(() =>
               discard.pipe(
                 Effect.andThen(reclaim()),
-                Effect.andThen(Effect.fail(new LockBusy()))
+                Effect.andThen(Effect.fail(new LockBusy({ id, path })))
               )
             )
           );
@@ -160,13 +182,8 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
           Effect.retry({
             schedule: Schedule.spaced("50 millis"),
             times: 800,
-            while: Predicate.isTagged("DirectorateLockBusy"),
-          }),
-          Effect.catchTag("DirectorateLockBusy", () =>
-            failure(
-              `${id} is busy. If all writers have stopped, remove the orphaned lock directory at ${path}.`
-            )
-          )
+            while: Schema.is(LockBusy),
+          })
         ),
         body
       )

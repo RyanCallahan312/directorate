@@ -18,12 +18,11 @@ import {
   agentNamed,
   budgetLine,
   childNamed,
-  keepsAtLockdown,
   Liaison,
 } from "../feature/agents/agent.ts";
 import { childOutstanding } from "../feature/dispatch/lifecycle.ts";
-import { failure, ignore } from "../platform/error.ts";
-import { Host } from "../platform/platform.ts";
+import { ignore } from "../platform/error.ts";
+import { Host, ToolCatalog } from "../platform/platform.ts";
 import type { Body } from "../platform/platform.ts";
 import { ActiveSeal, Store } from "../records/records.ts";
 import { budget, windowOf } from "../workflow/review/window.ts";
@@ -31,6 +30,46 @@ import type { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
+
+/** A reported seal accepts no changes. */
+export class SealReported extends Schema.TaggedError<
+  SealReported,
+  { readonly brand: unique symbol }
+>()("SealReported", {
+  autoReported: Schema.Boolean,
+  seal: Schema.String,
+}) {
+  override get message() {
+    return `${this.seal} was already reported${this.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`;
+  }
+}
+
+/** An owner-only tool called from a session other than the one that sealed. */
+export class NotOwner extends Schema.TaggedError<
+  NotOwner,
+  { readonly brand: unique symbol }
+>()("NotOwner", {
+  seal: Schema.String,
+  tool: Schema.String,
+}) {
+  override get message() {
+    return `Only the session that sealed ${this.seal} may call ${this.tool}. To take over an interrupted review, call directorate_seal with resume: "${this.seal}".`;
+  }
+}
+
+/** Once the budget locks, a tool the caller's agent does not keep at lockdown no longer runs. */
+export class Lockdown extends Schema.TaggedError<
+  Lockdown,
+  { readonly brand: unique symbol }
+>()("Lockdown", {
+  agent: Schema.String,
+  seal: Schema.String,
+  tool: Schema.String,
+}) {
+  override get message() {
+    return `Directorate lockdown: the budget for ${this.seal} is locked, so ${this.tool} no longer runs. ${this.agent === Liaison.id ? "Call directorate_report now." : "Hand off what you hold now."}`;
+  }
+}
 
 /** A host session id, or none for anything else (hook events are typed loosely). */
 const asSessionID = Schema.decodeUnknownOption(Session.ID);
@@ -327,15 +366,16 @@ export const writable = (
   ownerOnly = false
 ) => {
   if (seal.reportedAt) {
-    return failure(
-      `${seal.id} was already reported${seal.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`
+    return Effect.fail(
+      new SealReported({
+        autoReported: seal.autoReported === true,
+        seal: seal.id,
+      })
     );
   }
 
   return ownerOnly && seal.ownerSession !== c.sessionID
-    ? failure(
-        `Only the session that sealed ${seal.id} may call ${name}. To take over an interrupted review, call directorate_seal with resume: "${seal.id}".`
-      )
+    ? Effect.fail(new NotOwner({ seal: seal.id, tool: name }))
     : Effect.void;
 };
 
@@ -358,14 +398,14 @@ export const unlocked = Effect.fnUntraced(function* unlocked(
   c: Tool.Context,
   name: string
 ) {
+  const catalog = yield* ToolCatalog;
+
   if (
     !seal.reportedAt &&
-    !keepsAtLockdown(c.agent, name) &&
+    !(yield* catalog.keeps(c.agent, name)) &&
     (yield* budget(windowOf(seal))).phase === "locked"
   ) {
-    return yield* failure(
-      `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === Liaison.id ? "Call directorate_report now." : "Hand off what you hold now."}`
-    );
+    return yield* new Lockdown({ agent: c.agent, seal: seal.id, tool: name });
   }
 });
 
@@ -377,7 +417,7 @@ export const mutate = <A, R>(
   body: Body<[seal: Seal], A, R>,
   ownerOnly = false
 ) =>
-  locked(c, sealId, function* mutateSeal(seal) {
+  locked<A, R | ToolCatalog>(c, sealId, function* mutateSeal(seal) {
     yield* writable(seal, c, name, ownerOnly);
     yield* unlocked(seal, c, name);
 

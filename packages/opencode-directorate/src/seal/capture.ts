@@ -2,7 +2,6 @@
 // tells whether the sealed code moved since.
 import {
   Bytes,
-  Data,
   Effect,
   FileSystem,
   Match,
@@ -12,7 +11,6 @@ import {
 } from "effect";
 
 import { exclusionReason, isSecret, scopeOf } from "../exclusions.ts";
-import { failure, ReviewError } from "../platform/error.ts";
 import { sha256 } from "../platform/hash.ts";
 import { Git, Worktree } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
@@ -43,7 +41,16 @@ const RAW_DIFF = [
 const decodeRawDiff = Schema.decodeEffect(RawDiff);
 
 /** An edit landed while capturing; the capture is retried. */
-class CaptureDrift extends Data.TaggedError("DirectorateCaptureDrift") {}
+class CaptureDrift extends Schema.TaggedError<
+  CaptureDrift,
+  { readonly brand: unique symbol }
+>()("CaptureDrift", {}) {}
+
+/** The target could not be captured consistently. */
+export class CaptureFailed extends Schema.TaggedError<
+  CaptureFailed,
+  { readonly brand: unique symbol }
+>()("CaptureFailed", { message: Schema.String }) {}
 
 /** Retries a capture twice when files change mid-capture, then fails with `message`. */
 export const settled =
@@ -52,9 +59,11 @@ export const settled =
     self.pipe(
       Effect.retry({
         times: 2,
-        while: (e) => Predicate.isTagged(e, "DirectorateCaptureDrift"),
+        while: Schema.is(CaptureDrift),
       }),
-      Effect.catchTag("DirectorateCaptureDrift", () => failure(message))
+      Effect.catchTag("CaptureDrift", () =>
+        Effect.fail(new CaptureFailed({ message }))
+      )
     );
 
 const binary = (buf: Uint8Array) => buf.subarray(0, 8000).includes(0);
@@ -467,7 +476,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
     Effect.mapError((e) =>
       worktree
         ? new CaptureDrift()
-        : new ReviewError({
+        : new CaptureFailed({
             message: `git listed different files than it diffed for ${seal.description}: ${e.message}`,
           })
     )

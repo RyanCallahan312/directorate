@@ -1,9 +1,8 @@
 // Directorate views of a seal: diff regions with line numbers, file reads, search, listings, and history, each paged to fit one
 // tool result.
-import { Effect, FileSystem, Option, Path } from "effect";
+import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { inScope, isSecret, scopeOf } from "../exclusions.ts";
-import { failure } from "../platform/error.ts";
 import { Git } from "../platform/platform.ts";
 import { encodeUtf8 } from "../platform/utf8.ts";
 import { Store } from "../records/records.ts";
@@ -11,9 +10,11 @@ import {
   inDependencyDir,
   installed,
   isWithheld,
+  NotInSeal,
   outsideWorktreeScope,
   readable,
   sealedFile,
+  Withheld,
 } from "./content.ts";
 import type { Shown } from "./coverage.ts";
 import type { Seal } from "./record.ts";
@@ -422,13 +423,17 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
 
     const root = yield* fs
       .realPath(seal.repo)
-      .pipe(Effect.catchTag("PlatformError", () => failure(missing)));
+      .pipe(
+        Effect.catchTag("PlatformError", () =>
+          Effect.fail(new NotInSeal({ message: missing }))
+        )
+      );
 
     const names = (yield* fs
       .readDirectory(abs)
       .pipe(
         Effect.catchTag("PlatformError", () =>
-          failure(`${dir} is not a directory`)
+          Effect.fail(new NotInSeal({ message: `${dir} is not a directory` }))
         )
       )).toSorted();
 
@@ -544,6 +549,12 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
   return `${names.length} files${scope.length ? ` under ${scope.join(", ")}` : ""} at the seal\n${shown.join("\n")}${marked.length > shown.length ? `\n… ${marked.length - shown.length} more; pass a directory` : ""}`;
 });
 
+/** A history request missing what its kind needs, or naming no such revision or file. */
+export class InvalidRead extends Schema.TaggedError<
+  InvalidRead,
+  { readonly brand: unique symbol }
+>()("InvalidRead", { message: Schema.String }) {}
+
 const REV = /^(?!-)[0-9A-Za-z._/~^@{}-]+$/u;
 
 const historyShow = Effect.fnUntraced(function* historyShow(
@@ -553,7 +564,7 @@ const historyShow = Effect.fnUntraced(function* historyShow(
   path: string | undefined
 ) {
   if (!inputRev) {
-    return yield* failure("show needs rev");
+    return yield* new InvalidRead({ message: "show needs rev" });
   }
 
   const git = yield* Git;
@@ -565,9 +576,9 @@ const historyShow = Effect.fnUntraced(function* historyShow(
         .pipe(Effect.map((type) => type.trim() === "blob"));
 
     if (!(yield* isFile(rev)) && !(yield* isFile(`${rev}^`))) {
-      return yield* failure(
-        `${path} is not a file at ${inputRev} or its parent; pass a file path.`
-      );
+      return yield* new InvalidRead({
+        message: `${path} is not a file at ${inputRev} or its parent; pass a file path.`,
+      });
     }
   }
 
@@ -613,18 +624,22 @@ export const history = Effect.fn("Directorate.history")(function* history(
   const { path } = input;
 
   if (path && isSecret(path)) {
-    return yield* failure(`${path} is a secret-like path; withheld.`);
+    return yield* new Withheld({
+      message: `${path} is a secret-like path; withheld.`,
+    });
   }
 
   // Blame and show would print the content it was renamed or copied from.
   if (path && input.kind !== "log" && isWithheld(seal, path)) {
-    return yield* failure(
-      `${path} was renamed or copied from a secret-like path; withheld.`
-    );
+    return yield* new Withheld({
+      message: `${path} was renamed or copied from a secret-like path; withheld.`,
+    });
   }
 
   if (input.rev && !REV.test(input.rev)) {
-    return yield* failure(`Invalid revision ${input.rev}.`);
+    return yield* new InvalidRead({
+      message: `Invalid revision ${input.rev}.`,
+    });
   }
 
   // Before the first commit, the seal's head is the empty tree, which has no history.
@@ -658,7 +673,7 @@ export const history = Effect.fn("Directorate.history")(function* history(
     );
   } else if (input.kind === "blame") {
     if (!path) {
-      return yield* failure("blame needs path");
+      return yield* new InvalidRead({ message: "blame needs path" });
     }
 
     const s = input.start ?? 1;

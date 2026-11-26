@@ -5,8 +5,33 @@ import { Context, Effect, Layer, Predicate, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 
 import { command } from "./command.ts";
-import { failure, ReviewError } from "./error.ts";
 import { decodeUtf8 } from "./utf8.ts";
+
+/** A git or GitHub CLI command failed, or answered in a shape Directorate cannot read. */
+export class GitFailed extends Schema.TaggedError<
+  GitFailed,
+  { readonly brand: unique symbol }
+>()("GitFailed", { message: Schema.String }) {}
+
+/** History the review needs is not in the local repository: an unfetched ref, a parent, a merge base, a default branch. */
+export class MissingHistory extends Schema.TaggedError<
+  MissingHistory,
+  { readonly brand: unique symbol }
+>()("MissingHistory", { message: Schema.String }) {}
+
+/** A file that is there could not be read, in the working tree or at a revision. */
+export class UnreadableFile extends Schema.TaggedError<
+  UnreadableFile,
+  { readonly brand: unique symbol }
+>()("UnreadableFile", {
+  path: Schema.String,
+  reason: Schema.String,
+  rev: Schema.optionalKey(Schema.String),
+}) {
+  override get message() {
+    return `Cannot read ${this.path}${this.rev === undefined ? "" : ` at ${this.rev}`}: ${this.reason}`;
+  }
+}
 
 const GIT_ENV = (extra: Record<string, string> = {}) => ({
   GIT_CONFIG_PARAMETERS: "",
@@ -70,7 +95,11 @@ const make = Effect.gen(function* make() {
         Predicate.isNumber(error.code) &&
         ok.includes(error.code)
           ? Effect.succeed(error.stdout)
-          : failure(`git ${args[0]} failed: ${error.message}`)
+          : Effect.fail(
+              new GitFailed({
+                message: `git ${args[0]} failed: ${error.message}`,
+              })
+            )
       )
     );
 
@@ -89,8 +118,12 @@ const make = Effect.gen(function* make() {
           onFailure: (err) =>
             err.code === 128
               ? Effect.undefined
-              : failure(
-                  `Cannot read ${path} at ${rev.slice(0, 10)}: ${err.message}`
+              : Effect.fail(
+                  new UnreadableFile({
+                    path,
+                    reason: err.message,
+                    rev: rev.slice(0, 10),
+                  })
                 ),
           onSuccess: Effect.succeed,
         })
@@ -177,9 +210,9 @@ const make = Effect.gen(function* make() {
     )).trim();
 
     if (!out) {
-      return yield* failure(
-        `Cannot resolve ${ref} to a commit. Ask the user to fetch it (for example \`git fetch origin ${ref}\`), then seal again.`
-      );
+      return yield* new MissingHistory({
+        message: `Cannot resolve ${ref} to a commit. Ask the user to fetch it (for example \`git fetch origin ${ref}\`), then seal again.`,
+      });
     }
 
     return out;
@@ -203,9 +236,9 @@ const make = Effect.gen(function* make() {
     const parent = firstHeader.slice("parent ".length);
 
     if (!(yield* hasCommit(repo, parent))) {
-      return yield* failure(
-        `Cannot review commit ${commit.slice(0, 10)}: its first parent is not available. Deepen the clone's history and seal again.`
-      );
+      return yield* new MissingHistory({
+        message: `Cannot review commit ${commit.slice(0, 10)}: its first parent is not available. Deepen the clone's history and seal again.`,
+      });
     }
 
     return parent;
@@ -236,9 +269,10 @@ const make = Effect.gen(function* make() {
       }
     }
 
-    return yield* failure(
-      "Cannot find the default branch (no origin/HEAD, main, or master). Ask the user which base to review against."
-    );
+    return yield* new MissingHistory({
+      message:
+        "Cannot find the default branch (no origin/HEAD, main, or master). Ask the user which base to review against.",
+    });
   });
 
   /**
@@ -263,11 +297,11 @@ const make = Effect.gen(function* make() {
 
     const [b, h] = [labels?.base ?? base, labels?.head ?? head];
 
-    return yield* failure(
-      shallow
+    return yield* new MissingHistory({
+      message: shallow
         ? `Cannot find the merge base of ${b} and ${h}: this shallow clone lacks their shared history. Ask the user to deepen it (\`git fetch --deepen=<n>\` or \`git fetch --unshallow\`), then seal again.`
-        : `${b} and ${h} share no history (no merge base). Ask the user which base to review against.`
-    );
+        : `${b} and ${h} share no history (no merge base). Ask the user which base to review against.`,
+    });
   });
 
   /** Untracked files that .gitignore does not exclude. */
@@ -418,7 +452,7 @@ const make = Effect.gen(function* make() {
       Effect.map(decodeUtf8),
       Effect.mapError(
         (cause) =>
-          new ReviewError({
+          new GitFailed({
             message:
               cause.code === "NotFound"
                 ? "gh CLI not found; PR targets need GitHub CLI."
@@ -439,7 +473,7 @@ const make = Effect.gen(function* make() {
 
     const meta = yield* decodePr(response).pipe(
       Effect.mapError(
-        () => new ReviewError({ message: "Invalid GitHub CLI response." })
+        () => new GitFailed({ message: "Invalid GitHub CLI response." })
       )
     );
 

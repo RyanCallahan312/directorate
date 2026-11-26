@@ -1,5 +1,5 @@
 // Directorate ledger rules: who may decide an entry, how severities and duplicates resolve, and how entries reopen.
-import { Match } from "effect";
+import { Match, Schema } from "effect";
 
 import type { Anchor } from "../../seal/region.ts";
 import { Compliance, Liaison } from "../agents/agent.ts";
@@ -122,6 +122,12 @@ const evidenceError = (verdict: Verdict["verdict"]) =>
         "a verdict needs at least one deciding evidence reference (path:line)."
     )
   );
+
+/** A verdict the caller may not record on an entry, or one whose confirmation does not tie to the sealed code. */
+export class VerdictRefused extends Schema.TaggedError<
+  VerdictRefused,
+  { readonly brand: unique symbol }
+>()("VerdictRefused", { message: Schema.String }) {}
 
 export const verdictError = (
   entry: Entry,
