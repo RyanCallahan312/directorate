@@ -18,13 +18,11 @@ import {
 import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { RecoveryWake, Sessions, Watchdog } from "../../seal/seal.ts";
-import { halted, shipped, waking, woken } from "./custody.ts";
+import { halted, Recovery, waking, woken } from "./custody.ts";
 import { interruptedReview } from "./interrupted.ts";
+import { shipped } from "./ship-link.ts";
 import type { AutoReport } from "./tools.ts";
 import { GRACE_MS } from "./window.ts";
-
-const timeOfWake = ({ admittedAt }: NonNullable<Seal["recovery"]>) =>
-  admittedAt ? DateTime.toEpochMillis(admittedAt) : -Infinity;
 
 /** Tells the caller of a review the watchdog woke that its Liaison filed the Directive, if the caller is still here. */
 export const notifyRecoveredReview = Effect.fnUntraced(
@@ -167,17 +165,17 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
           // A still-queued wake does not need a duplicate, nor does one already handled by this instance.
           if (
             prior?.admitted &&
-            (!delivered || timeOfWake(prior) >= loadedAt)
+            (!delivered || prior.admittedMillis >= loadedAt)
           ) {
             return { out: undefined };
           }
 
           const retry = prior?.admitted ? undefined : prior;
 
-          const recovery = {
+          const recovery = Recovery.make({
             id: retry?.id ?? SessionMessage.ID.create(),
             ownerSession: sessionID,
-          };
+          });
 
           // The intent is saved before the wake, and the wake's ID is reused until its admission is saved: the host
           // keeps the first admission of an ID, so neither a lost wake nor a lost acknowledgement repeats or drops it.

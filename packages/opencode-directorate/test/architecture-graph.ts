@@ -44,6 +44,7 @@ export const PRIMITIVE_MODULES: readonly string[] = [
   "workflow/review/window.ts",
   "workflow/review/custody.ts",
   "workflow/review/request.ts",
+  "workflow/review/ship-link.ts",
   "workflow/ship/state.ts",
   "workflow/ship/step.ts",
 ];

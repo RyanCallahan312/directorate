@@ -1,47 +1,86 @@
-// Pure next-step policy and prompts for the bounded /directorate-ship loop.
-import { Result } from "effect";
+// Pure next-step policy and prompts for the bounded /directorate-ship loop. It reads the saved Directive from the seal,
+// never the model's reply, and decides one step at a time.
+import { Result, Schema, Struct } from "effect";
 
 import { scopeOf } from "../../exclusions.ts";
-import { panelSeats } from "../../feature/dispatch/lifecycle.ts";
+import {
+  panelSeats,
+  SeatStatusSchema,
+} from "../../feature/dispatch/lifecycle.ts";
 import {
   currentSeverity,
   RANK,
   unresolved,
 } from "../../feature/ledger/decide.ts";
-import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
-import type { Seal } from "../../seal/record.ts";
+import { Ledger } from "../../feature/ledger/entry.ts";
+import type { Entry } from "../../feature/ledger/entry.ts";
+import { DirectiveStatusSchema } from "../../feature/report/directive.ts";
+import { Count } from "../../platform/stored.ts";
+import { Seal } from "../../seal/record.ts";
 import { parseRequest, requestText } from "../review/request.ts";
+import { ShipFieldsSchema } from "./state.ts";
 
-interface ShipState {
-  readonly id: string;
-  readonly request: string;
-  readonly rounds: number;
-  readonly reviewsAtResume: number;
-  readonly step?: string | undefined;
-}
+/** What the policy reads from the ship itself: its request, how far this run has gone, and the step it last took. */
+export const ShipProgressSchema = ShipFieldsSchema.mapFields(
+  Struct.pick(["id", "request", "reviewsAtResume", "rounds", "step"])
+);
 
-interface ShipObservation {
-  readonly reviews: number;
-  readonly seal?: Seal | undefined;
-  readonly ledger?: Ledger | undefined;
-  readonly fingerprint?: string | undefined;
-  readonly error?: string | undefined;
-}
+export type ShipProgress = typeof ShipProgressSchema.Type;
 
-interface ShipDecision {
-  readonly status: "active" | "paused" | "complete";
-  readonly reason: string;
-  readonly text: string;
-  readonly step?: string | undefined;
-}
+/** What the runner observed before asking: the seals so far, the latest one, its ledger and target fingerprint, or why not. */
+export const ShipObservationSchema = Schema.Struct({
+  error: Schema.optional(Schema.String),
+  fingerprint: Schema.optional(Schema.String),
+  ledger: Schema.optional(Ledger),
+  reviews: Count,
+  seal: Schema.optional(Seal),
+});
 
+export type ShipObservation = typeof ShipObservationSchema.Type;
+
+/** Take `step` next: `text` is the prompt that asks for it. */
+export class Proceed extends Schema.TaggedClass<
+  Proceed,
+  { readonly brand: unique symbol }
+>()("Proceed", {
+  reason: Schema.String,
+  step: Schema.String,
+  text: Schema.String,
+}) {}
+
+/** Stop the loop: `text` tells the user why and what to do. */
+export class Pause extends Schema.TaggedClass<
+  Pause,
+  { readonly brand: unique symbol }
+>()("Pause", { reason: Schema.String, text: Schema.String }) {}
+
+/** The Directive is clean: `text` says so. */
+export class Conclude extends Schema.TaggedClass<
+  Conclude,
+  { readonly brand: unique symbol }
+>()("Conclude", { reason: Schema.String, text: Schema.String }) {}
+
+/** The one next step the policy chooses. */
+export const ShipDecisionSchema = Schema.Union([Proceed, Pause, Conclude]).pipe(
+  Schema.toTaggedUnion("_tag")
+);
+
+export type ShipDecision = typeof ShipDecisionSchema.Type;
+
+/** Reviews a run may start before the loop pauses for the user, counted from its start or last resume. */
 const REVIEW_LIMIT = 6;
+
+/** Steps a run may take before the loop pauses for the user. */
 const ROUND_LIMIT = 30;
+
+const isCompletedSeat = Schema.is(SeatStatusSchema.pick(["completed"]));
+
+const isCompleteDirective = Schema.is(DirectiveStatusSchema.pick(["complete"]));
 
 const GUARDRAILS =
   "Do not commit, push, approve, or merge. If blocked, tell the user what decision or action is needed and stop. End your turn after this one step and wait for the plugin to direct the next step.";
 
-export const shipKickoff = (reviewText: string, shipID: string): string =>
+export const shipKickoff = (reviewText: string, shipID: string) =>
   [
     "/directorate-ship runs review, fix, and re-check as separate turns until a fresh, complete Directive has no findings or unresolved leads, or the loop pauses. For this turn, only dispatch directorate_liaison, wait, and relay its final Directive verbatim. Do not fix or re-check yet.",
     `In the dispatch prompt, explicitly tell the Liaison to pass \`ship: "${shipID}"\` to \`directorate_seal\` for the initial seal only. Do not pass ship when resuming or re-checking a seal.`,
@@ -131,28 +170,28 @@ const reviewedContent = (seal: Seal, ledger: Ledger) =>
 
 const reportedMissingSeats = (seal: Seal | undefined) =>
   seal?.reportedAt && seal.regions.length
-    ? panelSeats(seal).filter((seat) => seat.status !== "completed")
+    ? panelSeats(seal).filter((seat) => !isCompletedSeat(seat.status))
     : [];
 
 /** Choose only the next ship step; the runtime observes it before asking again. */
 export const decideShip = (
-  state: ShipState,
+  state: ShipProgress,
   { reviews, seal, ledger, fingerprint, error }: ShipObservation
-): ShipDecision => {
+) => {
   const subject = seal ? `Seal \`${seal.id}\`` : "The ship";
 
-  const pause = (why: string, action: string): ShipDecision => ({
-    reason: `${subject}: ${why}`,
-    status: "paused",
-    text: `Directorate ship paused. ${subject}: ${why} ${action}`,
-  });
+  const pause = (why: string, action: string) =>
+    Pause.make({
+      reason: `${subject}: ${why}`,
+      text: `Directorate ship paused. ${subject}: ${why} ${action}`,
+    });
 
   const next = (
     step: string,
     why: string,
     text: string,
     startsReview = false
-  ): ShipDecision => {
+  ) => {
     const resume = "Run `/directorate-ship resume` when ready to continue.";
 
     if (state.rounds >= ROUND_LIMIT) {
@@ -179,7 +218,7 @@ export const decideShip = (
       );
     }
 
-    return { reason: `${subject}: ${why}`, status: "active", step, text };
+    return Proceed.make({ reason: `${subject}: ${why}`, step, text });
   };
 
   const missing = reportedMissingSeats(seal);
@@ -276,18 +315,17 @@ export const decideShip = (
     );
   }
 
-  if (seal.directive?.status === "complete" && leads.length === 0) {
+  if (isCompleteDirective(seal.directive?.status) && leads.length === 0) {
     if (!reviewedContent(seal, ledger)) {
       return empty();
     }
 
     const reason = `${subject}: the Directive is complete and current, with no confirmed findings or unresolved leads.`;
 
-    return {
+    return Conclude.make({
       reason,
-      status: "complete",
       text: `Directorate ship complete. ${reason}`,
-    };
+    });
   }
 
   return next(

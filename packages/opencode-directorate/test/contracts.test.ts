@@ -15,11 +15,11 @@ import {
   SettingsJson,
 } from "../src/feature/settings/file.ts";
 import { SealJson } from "../src/seal/record.ts";
-import { ShipStateSchema } from "../src/workflow/ship/state.ts";
+import { ShipStateFromStored } from "../src/workflow/ship/state.ts";
 // ---------- end stored codecs ----------
 
 /** The host's plugin storage holds ship state as a JSON value under `ship:<sessionID>`; it is stored as this text. */
-const ShipJson = Schema.fromJsonString(ShipStateSchema, { space: 2 });
+const ShipJson = Schema.fromJsonString(ShipStateFromStored, { space: 2 });
 
 const read = (name: string) =>
   readFileSync(new URL(`stored/${name}`, import.meta.url), "utf-8");
@@ -72,7 +72,13 @@ const contracts = [
   },
   {
     current: ["ship.json", "ship.paused.json"],
-    legacy: ["ship.pre-recovery.json", "ship.minimal.json"],
+    legacy: [
+      "ship.pre-recovery.json",
+      "ship.minimal.json",
+      "ship.waiting-full.json",
+      "ship.paused-full.json",
+      "ship.complete-full.json",
+    ],
     name: "ship state",
     roundTrip: shipRoundTrip,
     stored: ShipJson.to.ast,

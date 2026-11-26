@@ -8,14 +8,14 @@ import { scopeOf } from "../../exclusions.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
-import { Ledger } from "../../feature/ledger/entry.ts";
+import { CarriedStatusSchema, Ledger } from "../../feature/ledger/entry.ts";
 import type { CarriedStatus, Entry } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
 import { emptyLedger } from "../../records/records.ts";
 import { carryMarks } from "../../seal/coverage.ts";
 import { Seal } from "../../seal/record.ts";
-import type { Region } from "../../seal/region.ts";
+import { Region } from "../../seal/region.ts";
 import {
   capture,
   changedBetween,
@@ -32,7 +32,12 @@ import type { Current } from "../../seal/seal.ts";
 import { Target } from "../../seal/target.ts";
 import { started } from "./custody.ts";
 import type { Mode } from "./request.ts";
-import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, Window } from "./window.ts";
+import {
+  DEFAULT_BUDGET,
+  PANEL_BUDGET_FACTOR,
+  recheckMinutes,
+  Window,
+} from "./window.ts";
 
 /** What the review's state does not allow: a second active seal, re-checking an open review, resuming a reported one. */
 export class ReviewConflict extends Schema.TaggedError<
@@ -161,13 +166,14 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
   };
 };
 
-interface RefreshResult {
-  files: string[];
-  ledger: Ledger;
-  newRegions: Region[];
-  reopened: string[];
-  seal: Seal;
-}
+/** What a refresh did: the files that changed, the regions left to read, the entries it reopened, and the next seal and ledger. */
+const RefreshSchema = Schema.Struct({
+  files: Schema.Array(Schema.String),
+  ledger: Ledger,
+  newRegions: Schema.Array(Region),
+  reopened: Schema.Array(Schema.String),
+  seal: Seal,
+});
 
 /**
  * Re-pins a moved target into the seal's next generation. Regions whose content did not change keep their read receipts
@@ -179,13 +185,13 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     ledger: Ledger,
     beforeCapture?: () => Effect.Effect<void>
   ) {
-    const unchanged: RefreshResult = {
+    const unchanged = RefreshSchema.make({
       files: [],
       ledger,
       newRegions: [],
       reopened: [],
       seal,
-    };
+    });
 
     const cur = yield* currentFingerprint(seal).pipe(
       Effect.mapError(
@@ -230,37 +236,34 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     const changed = new Set(yield* changedBetween(seal, captured));
     const next = carryMarks(captured, seal);
     const moved = movedUnder(seal, captured, changed);
-    const reopened: string[] = [];
 
     const entries = ledger.entries.map((e) => {
       const why = moved(e);
 
       if (!why || (e.status === "refuted" && !why.hit)) {
-        return e;
+        return { entry: e, reopened: false };
       }
 
-      reopened.push(e.id);
-
-      return reopen(
-        e,
-        why.gone
-          ? `${e.anchor.path} is no longer part of the change; re-verify or refute`
-          : `code changed after the seal (${why.files}); re-verify and re-anchor`
-      );
+      return {
+        entry: reopen(
+          e,
+          why.gone
+            ? `${e.anchor.path} is no longer part of the change; re-verify or refute`
+            : `code changed after the seal (${why.files}); re-verify and re-anchor`
+        ),
+        reopened: true,
+      };
     });
 
-    return {
+    return RefreshSchema.make({
       files: [...changed],
-      ledger: ledger.withEntries(entries),
+      ledger: ledger.withEntries(entries.map((r) => r.entry)),
       newRegions: next.regions.filter((r) => !r.ownerRead && !r.disposition),
-      reopened,
+      reopened: entries.flatMap((r) => (r.reopened ? [r.entry.id] : [])),
       seal: next,
-    };
+    });
   }
 );
-
-/** A re-check's budget when the caller names none: half its mode's default, at least RECHECK_MIN_MINUTES. */
-const RECHECK_MIN_MINUTES = 10;
 
 /** Only a reported review can be re-checked; an unreported one is resumed. */
 export const recheckable = (prior: Seal) =>
@@ -297,11 +300,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
 
     const window = Window.open(
       createdAt,
-      input.budgetMinutes ??
-        Math.max(
-          RECHECK_MIN_MINUTES,
-          Math.round(DEFAULT_BUDGET[prior.mode] / 2)
-        )
+      input.budgetMinutes ?? recheckMinutes(prior.mode)
     );
 
     return yield* openReview(
@@ -309,10 +308,11 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
       Effect.gen(function* attempt() {
         // A worktree seal keeps its base (committed fixes are not a new change) but records the HEAD it now sits on;
         // only commit pairs re-resolve both ends.
-        const cur: Pick<Current, "baseSha" | "headSha" | "baseTip"> =
+        const cur =
           prior.postImage === "worktree"
             ? {
                 baseSha: prior.baseSha,
+                baseTip: undefined,
                 headSha: yield* (yield* Git).head(prior.repo),
               }
             : yield* currentFingerprint(prior).pipe(
@@ -362,8 +362,6 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
 
         const moved = movedUnder(prior, captured, changed);
         const open = new Set(unresolved(input.ledger));
-        const reopened: string[] = [];
-        const kept: string[] = [];
 
         // Installed dependencies are read live from disk, outside any seal, so Git cannot say whether they changed:
         // a confirmed finding that cites one is re-decided. One that is gone now counts as changed.
@@ -384,59 +382,65 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
         );
 
         // What the earlier review left behind: verified findings, and entries filed but never cleared.
-        const entries = input.ledger.entries.flatMap((e): Entry[] => {
-          let status: CarriedStatus | undefined;
-
+        const carriedStatus = (e: Entry) => {
           if (e.status === "confirmed") {
-            status = "confirmed";
-          } else if (open.has(e)) {
-            status = "unverified";
+            return CarriedStatusSchema.make("confirmed");
           }
 
-          if (!status) {
-            return [];
-          }
+          return open.has(e)
+            ? CarriedStatusSchema.make("unverified")
+            : undefined;
+        };
 
-          const carried = e.carriedAs(
-            `F${reopened.length + kept.length + 1}`,
-            status
-          );
-
+        /** Why a carried entry is decided again, or undefined for a confirmed one nothing it rests on moved under. */
+        const reopenReason = (e: Entry, status: CarriedStatus) => {
           const why = moved(e);
           const onDisk = [...depsOf(e)].filter((d) => live.has(d));
 
-          if (status === "confirmed" && !why && !onDisk.length) {
-            kept.push(carried.id);
-
-            return [carried];
-          }
-
-          reopened.push(carried.id);
-
-          let reason: string;
-
           if (status === "unverified") {
-            reason = `unverified in ${prior.id}; decide it on the current code`;
-          } else if (why?.gone) {
-            reason = `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`;
-          } else if (why) {
-            reason = `code it rests on changed since ${prior.id} (${why.files}); decide whether it is still present (re-anchor) or resolved`;
-          } else {
-            reason = `it rests on installed dependencies read from disk (${onDisk.join(", ")}), which may have changed since ${prior.id}; decide whether it is still present (re-anchor) or resolved`;
+            return `unverified in ${prior.id}; decide it on the current code`;
           }
 
-          return [reopen(carried, reason)];
-        });
+          if (why?.gone) {
+            return `${e.anchor.path} is no longer part of the change since ${prior.id}; decide whether it is resolved`;
+          }
 
-        const ledger = Ledger.make({ entries, notes: [] });
+          if (why) {
+            return `code it rests on changed since ${prior.id} (${why.files}); decide whether it is still present (re-anchor) or resolved`;
+          }
+
+          return onDisk.length
+            ? `it rests on installed dependencies read from disk (${onDisk.join(", ")}), which may have changed since ${prior.id}; decide whether it is still present (re-anchor) or resolved`
+            : undefined;
+        };
+
+        const carried = input.ledger.entries
+          .flatMap((e) => {
+            const status = carriedStatus(e);
+
+            return status ? [{ entry: e, status }] : [];
+          })
+          .map(({ entry, status }, i) => {
+            const next = entry.carriedAs(`F${i + 1}`, status);
+            const reason = reopenReason(entry, status);
+
+            return reason === undefined
+              ? { entry: next, kept: true }
+              : { entry: reopen(next, reason), kept: false };
+          });
+
+        const ledger = Ledger.make({
+          entries: carried.map((c) => c.entry),
+          notes: [],
+        });
 
         return {
           ledger,
           out: {
             files: [...changed],
-            kept,
+            kept: carried.flatMap((c) => (c.kept ? [c.entry.id] : [])),
             ledger,
-            reopened,
+            reopened: carried.flatMap((c) => (c.kept ? [] : [c.entry.id])),
             seal,
             // Explicit notes, and Auditor questions the earlier review left without an answer.
             unanswered: [

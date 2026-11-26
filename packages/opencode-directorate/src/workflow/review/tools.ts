@@ -179,12 +179,8 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
   const starting = new Map<string, Semaphore.Semaphore>();
 
   const startLock = (session: string) => {
-    let lock = starting.get(session);
-
-    if (!lock) {
-      lock = Semaphore.makeUnsafe(1);
-      starting.set(session, lock);
-    }
+    const lock = starting.get(session) ?? Semaphore.makeUnsafe(1);
+    starting.set(session, lock);
 
     return lock;
   };

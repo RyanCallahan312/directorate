@@ -3,14 +3,11 @@ import type { SessionMessage } from "@opencode/schema/session-message";
 import { DateTime } from "effect";
 
 import { createdAt, turns } from "../../platform/platform.ts";
+import type { Seal } from "../../seal/record.ts";
 
 /** On resume, ignore old interruptions, not later ones. Older manually resumed seals lack the resume time. */
 export const interruptedReview = (
-  seal: {
-    readonly createdAt: DateTime.Utc;
-    readonly halted?: boolean | undefined;
-    readonly resumedAt?: DateTime.Utc | undefined;
-  },
+  seal: Pick<Seal, "createdAt" | "halted" | "resumedAt">,
   messages: readonly SessionMessage.Info[]
 ) => {
   if (seal.halted || (!seal.resumedAt && seal.halted === false)) {

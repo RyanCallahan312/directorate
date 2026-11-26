@@ -6,7 +6,7 @@ import { Effect } from "effect";
 import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { budget } from "../../workflow/review/window.ts";
+import { budget, PHASE_STAGES } from "../../workflow/review/window.ts";
 import {
   agentNamed,
   budgetNotice,
@@ -122,9 +122,8 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
         : b.phase === "normal";
 
       if (!launchable) {
-        const stage = b.phase === "locked" ? "lockdown" : "evacuation";
         event.effect = "deny";
-        event.message = `Directorate ${stage} (${b.phase}): <We/The Directorate> deny new ${target || "subagent"} dispatches. Verify what you hold and call directorate_report.`;
+        event.message = `Directorate ${PHASE_STAGES[b.phase]} (${b.phase}): <We/The Directorate> deny new ${target || "subagent"} dispatches. Verify what you hold and call directorate_report.`;
       }
     })
   );

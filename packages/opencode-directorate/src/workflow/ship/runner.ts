@@ -46,13 +46,34 @@ import {
   Sessions,
   ShipLink,
 } from "../../seal/seal.ts";
-import { shipped } from "../review/custody.ts";
 import { parseRequest, reviewRequest } from "../review/request.ts";
 import type { ReviewScope } from "../review/request.ts";
 import { interruptedReview } from "../review/review.ts";
-import { ShipStateSchema } from "./state.ts";
-import type { Plan, ShipState } from "./state.ts";
-import { decideShip, shipKickoff } from "./step.ts";
+import { shipped } from "../review/ship-link.ts";
+import {
+  Active,
+  changed,
+  completed,
+  delivered,
+  enqueued,
+  fieldsOf,
+  isActive,
+  isComplete,
+  isPaused,
+  isRunning,
+  isWaiting,
+  paused,
+  proceeding,
+  rebuilt,
+  resumed,
+  settled,
+  ShipStateFromStored,
+  statusOf,
+  stopped,
+  toStored,
+} from "./state.ts";
+import type { Plan, ShipFields, ShipState } from "./state.ts";
+import { decideShip, ShipDecisionSchema, shipKickoff } from "./step.ts";
 
 /** How long a finished subagent's completion notice may stay undelivered before recovery stops waiting for it. */
 const NOTICE_GRACE_MS = 30_000;
@@ -87,18 +108,17 @@ const inboxKind = (item: SessionInbox.Item): InboxKind =>
     : "other";
 
 const asSessionID = Schema.decodeUnknownOption(Session.ID);
-const decode = Schema.decodeUnknownEffect(ShipStateSchema);
-const decodeSnapshot = Schema.decodeUnknownOption(ShipStateSchema);
+const decode = Schema.decodeUnknownEffect(ShipStateFromStored);
+const decodeSnapshot = Schema.decodeUnknownOption(ShipStateFromStored);
 const prefix = "ship:";
 const storageKey = (id: string) => `${prefix}${id}`;
 
-const running = (state: ShipState) =>
-  state.status === "active" || state.status === "waiting";
+const isProceed = ShipDecisionSchema.isAnyOf(["Proceed"]);
 
 const restartAttached =
   "Start a new /directorate-ship with the request and attachments; their delivery could not be confirmed.";
 
-const queued = (state: ShipState) =>
+const queued = (state: ShipFields) =>
   state.inbox?.deliveredAt === undefined ? state.inbox?.id : undefined;
 
 const reached = (at: number, boundary: number | undefined) =>
@@ -202,7 +222,7 @@ const superseded = (
 
 const checkpointHidesPlan = (
   messages: readonly SessionMessage.Info[],
-  plan: typeof Plan.Type
+  plan: Plan
 ) => {
   const checkpoint = checkpointID(messages);
 
@@ -218,7 +238,7 @@ const describe = (state: ShipState) => {
   const pending = queued(state);
 
   return [
-    `Directorate ship ${state.status}${pending ? " (queued input can still execute)" : ""}.`,
+    `Directorate ship ${statusOf(state)}${pending ? " (queued input can still execute)" : ""}.`,
     `Request: ${state.request.trim() || "(configured defaults)"}`,
     `Rounds this run: ${state.rounds}`,
     `Seals: ${state.chain.join(" → ") || "none"}`,
@@ -227,7 +247,7 @@ const describe = (state: ShipState) => {
       `Latest host outcome before delivery (not attributed to this ship): ${state.lastHostFailure}`,
     pending && cancelFirst(pending),
     !pending &&
-      state.status === "paused" &&
+      isPaused(state) &&
       (state.needsAttachments
         ? restartAttached
         : (state.recovery ??
@@ -279,18 +299,6 @@ const BLOCKED = {
   unnoticed:
     "A waiting subagent finished, but its completion message was not delivered.",
 };
-
-/** What one turn leaves for the next: nothing queued, planned, or awaited. */
-const settle = ({
-  admitting: _admitting,
-  awaiting: _awaiting,
-  inbox: _inbox,
-  lastHostFailure: _lastHostFailure,
-  notices: _notices,
-  plan: _plan,
-  wokeAt: _wokeAt,
-  ...settled
-}: ShipState) => settled;
 
 const turnFailure = (turn: SessionMessage.Idle) =>
   turn.outcome === "failed"
@@ -413,30 +421,24 @@ export const registerShip = Effect.fn("Ship.register")(
 
     const location = locationKey(host.location);
 
-    const write = (sessionID: string, { step, ...state }: ShipState) =>
-      host.storage.set(
+    const write = (sessionID: string, state: ShipState) => {
+      const { step, ...stored } = toStored(state);
+
+      return host.storage.set(
         storageKey(sessionID),
-        step === undefined ? state : { ...state, step }
+        step === undefined ? stored : { ...stored, step }
       );
+    };
 
     const pause = Effect.fnUntraced(function* pause(
       sessionID: SessionID,
-      state: ShipState,
+      state: ShipFields,
       reason: string
     ) {
-      const {
-        admitting: _admitting,
-        awaiting: _awaiting,
-        notices: _notices,
-        plan: _plan,
-        wokeAt: _wokeAt,
-        ...rest
-      } = state;
+      const next = paused(state, reason);
+      yield* write(sessionID, next);
 
-      const paused: ShipState = { ...rest, reason, status: "paused" };
-      yield* write(sessionID, paused);
-
-      return paused;
+      return next;
     });
 
     const read = Effect.fn("Ship.read")(function* read(
@@ -499,7 +501,7 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* attach() {
           const state = yield* read(parentID);
 
-          if (!state || state.status === "complete") {
+          if (!state || isComplete(state)) {
             return;
           }
 
@@ -542,10 +544,10 @@ export const registerShip = Effect.fn("Ship.register")(
               seal: shipped(review.seal, state.id),
             })
           );
-          yield* write(parentID, {
-            ...state,
-            chain: [...state.chain, seal.id],
-          });
+          yield* write(
+            parentID,
+            changed(state, { chain: [...state.chain, seal.id] })
+          );
         })
       );
     }, recover("could not associate seal with ship"));
@@ -603,7 +605,7 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.andThen(write(sessionID, submitted)),
         Effect.onError((cause) => {
           // Typed admission failures precede host enqueue. A defect or interruption may have left an item queued.
-          const { inbox: _inbox, ...rejected } = submitted;
+          const { inbox: _inbox, ...rejected } = fieldsOf(submitted);
 
           const retained =
             Cause.hasDies(cause) || Cause.hasInterrupts(cause)
@@ -640,27 +642,30 @@ export const registerShip = Effect.fn("Ship.register")(
       const id = SessionMessage.ID.create();
       const checkpoint = checkpointID(messages);
 
-      let submitted: ShipState = {
-        ...settle(state),
-        inbox: { continuation: input === undefined, id },
-        needsAttachments: input ? hasAttachments(input.prompt) : false,
-        status: "waiting",
+      const waiting = enqueued(
+        state,
+        { continuation: input === undefined, id },
+        input ? hasAttachments(input.prompt) : false
+      );
+
+      /** The continuation's prompt, rendered once the host promotes its marker. */
+      const planned = (from: string) => {
+        const plan = { id, origin: from, rendered: false, text };
+
+        return checkpoint ? { ...plan, checkpoint } : plan;
       };
 
-      if (!input && origin) {
-        const plan = { id, origin, rendered: false, text };
-        submitted = {
-          ...submitted,
-          plan: checkpoint ? { ...plan, checkpoint } : plan,
-        };
-      }
+      const submitted =
+        !input && origin
+          ? changed(waiting, { plan: planned(origin) })
+          : waiting;
 
       if (!input) {
         // A reload must not interrupt automatic admission between enqueue and its checkpoint; a crash there leaves the
         // intent so recovery can confirm delivery or pause without reissuing it.
         return yield* commit(
           sessionID,
-          { ...submitted, admitting: true },
+          changed(submitted, { admitting: true }),
           submitted,
           marker(sessionID, state, id)
         ).pipe(Effect.uninterruptible);
@@ -669,11 +674,7 @@ export const registerShip = Effect.fn("Ship.register")(
       // The user is here to retry: do not leave an active loop behind if admission or its final storage write fails.
       yield* commit(
         sessionID,
-        {
-          ...submitted,
-          reason: "Could not send the ship prompt.",
-          status: "paused",
-        },
+        paused(submitted, "Could not send the ship prompt."),
         submitted,
         host.session.prompt({
           ...input.prompt,
@@ -705,11 +706,10 @@ export const registerShip = Effect.fn("Ship.register")(
 
       const { chain, seal } = observed;
 
-      const current = {
-        ...state,
+      const current = changed(state, {
         chain,
         reviewsAtResume: manual ? chain.length : state.reviewsAtResume,
-      };
+      });
 
       const review = seal?.reportedAt
         ? yield* observeReview(seal).pipe(
@@ -749,28 +749,21 @@ export const registerShip = Effect.fn("Ship.register")(
         input !== undefined
       );
 
-      const next = {
-        ...current,
-        reason: decision.reason,
-        rounds: current.rounds + (decision.status === "active" ? 1 : 0),
-        status: decision.status,
-        step: decision.step,
-      };
+      const next = ShipDecisionSchema.match(decision, {
+        Conclude: ({ reason }) => completed(current, reason),
+        Pause: ({ reason, text }) => stopped(current, reason, text),
+        Proceed: ({ reason, step }) => proceeding(current, reason, step),
+      });
 
-      if (decision.status === "active") {
+      if (isActive(next)) {
         return yield* admit(sessionID, next, decision.text, input);
       }
 
-      const ended =
-        decision.status === "paused"
-          ? { ...next, recovery: decision.text }
-          : next;
-
-      yield* write(sessionID, ended);
+      yield* write(sessionID, next);
 
       if (input) {
         return yield* new ShipStatus({
-          message: `${describe(ended)}\nNo continuation was sent.`,
+          message: `${describe(next)}\nNo continuation was sent.`,
         });
       }
     });
@@ -779,15 +772,17 @@ export const registerShip = Effect.fn("Ship.register")(
     const stillPlanned = Effect.fnUntraced(function* stillPlanned(
       sessionID: SessionID,
       state: ShipState,
-      plan: typeof Plan.Type
+      plan: Plan
     ) {
-      const { decision } = yield* decide(sessionID, {
-        ...state,
-        rounds: Math.max(0, state.rounds - 1),
-        step: undefined,
-      });
+      const { decision } = yield* decide(
+        sessionID,
+        changed(state, {
+          rounds: Math.max(0, state.rounds - 1),
+          step: undefined,
+        })
+      );
 
-      return decision.status === "active" && decision.text === plan.text;
+      return isProceed(decision) && decision.text === plan.text;
     });
 
     // The synthetic admission only wakes the runner; it does not wait for a model request.
@@ -802,7 +797,7 @@ export const registerShip = Effect.fn("Ship.register")(
             !state ||
             !plan ||
             state.inbox?.id !== plan.id ||
-            !running(state)
+            !isRunning(state)
           ) {
             return;
           }
@@ -825,8 +820,8 @@ export const registerShip = Effect.fn("Ship.register")(
 
           // Completed checkpoints come from stored history, not the speculative compaction request.
           if (checkpointHidesPlan(stored, plan)) {
-            const { inbox: _inbox, ...delivered } = state;
-            yield* pause(sessionID, delivered, compacted);
+            const { inbox: _inbox, ...promotedState } = fieldsOf(state);
+            yield* pause(sessionID, promotedState, compacted);
 
             return;
           }
@@ -854,8 +849,11 @@ export const registerShip = Effect.fn("Ship.register")(
             state.boot !== (yield* boot) &&
             !(yield* stillPlanned(sessionID, state, plan))
           ) {
-            const { plan: _plan, ...stale } = state;
-            yield* write(sessionID, { ...stale, step: undefined });
+            const { plan: _plan, ...stale } = fieldsOf(state);
+            yield* write(
+              sessionID,
+              rebuilt(state, { ...stale, step: undefined })
+            );
 
             return;
           }
@@ -864,10 +862,10 @@ export const registerShip = Effect.fn("Ship.register")(
 
           if (entry?.role === "user") {
             if (!plan.rendered) {
-              yield* write(sessionID, {
-                ...state,
-                plan: { ...plan, rendered: true },
-              });
+              yield* write(
+                sessionID,
+                changed(state, { plan: { ...plan, rendered: true } })
+              );
             }
 
             messages[index] = {
@@ -882,7 +880,7 @@ export const registerShip = Effect.fn("Ship.register")(
       input: CommandInvocation,
       state: ShipState | undefined
     ) {
-      if (state?.status !== "paused") {
+      if (!state || !isPaused(state)) {
         return yield* new ShipCommandRefused({
           message: "No paused Directorate ship to resume.",
         });
@@ -899,21 +897,9 @@ export const registerShip = Effect.fn("Ship.register")(
         return yield* new ShipCommandRefused({ message: restartAttached });
       }
 
-      const { recovery: _recovery, ...resumable } = state;
-
       return yield* advance(
         input.sessionID,
-        {
-          ...resumable,
-          boot: yield* boot,
-          location,
-          needsAttachments: false,
-          pid,
-          reviewsAtResume: state.chain.length,
-          rounds: 0,
-          status: "active",
-          step: undefined,
-        },
+        resumed(state, { boot: yield* boot, location, pid }),
         input
       );
     });
@@ -939,7 +925,7 @@ export const registerShip = Effect.fn("Ship.register")(
         return "interrupted" as const;
       }
 
-      const delivered = new Set(
+      const notified = new Set(
         after.map((message) => noticed(message, awaiting))
       );
 
@@ -949,7 +935,7 @@ export const registerShip = Effect.fn("Ship.register")(
         ...Object.keys(awaiting),
         ...(owner ? [owner] : []),
       ])) {
-        const unnoticed = child in awaiting && !delivered.has(child);
+        const unnoticed = child in awaiting && !notified.has(child);
 
         const info = yield* Option.match(asSessionID(child), {
           onNone: () => Effect.succeedNone,
@@ -995,7 +981,8 @@ export const registerShip = Effect.fn("Ship.register")(
       state: ShipState,
       messages: readonly SessionMessage.Info[]
     ) {
-      const { admitting: _admitting, ...submitted } = state;
+      const { admitting: _admitting, ...unadmitted } = fieldsOf(state);
+      const submitted = rebuilt(state, unadmitted);
       const { inbox, plan } = submitted;
 
       if (!inbox || !plan) {
@@ -1013,7 +1000,7 @@ export const registerShip = Effect.fn("Ship.register")(
       const reason = superseded(messages, state.id, plan.origin);
 
       if (reason) {
-        const { inbox: _inbox, ...rejected } = submitted;
+        const { inbox: _inbox, ...rejected } = fieldsOf(submitted);
         yield* pause(sessionID, rejected, reason);
 
         return;
@@ -1062,18 +1049,17 @@ export const registerShip = Effect.fn("Ship.register")(
         return;
       }
 
-      const settled = { ...settle(state), boot: yield* boot, pid };
+      const claimed = changed(settled(state), { boot: yield* boot, pid });
 
       if ("lost" in found) {
-        return yield* pause(sessionID, settled, found.lost);
+        return yield* pause(sessionID, claimed, found.lost);
       }
 
       // The exact input is in the history, so its attachments were delivered with it.
-      const delivered = {
-        ...settled,
+      const traced = changed(claimed, {
         needsAttachments: false,
         origin: found.origin,
-      };
+      });
 
       const blocked = found.reason
         ? undefined
@@ -1086,14 +1072,16 @@ export const registerShip = Effect.fn("Ship.register")(
       const reason = found.reason ?? (blocked && BLOCKED[blocked]);
 
       if (reason) {
-        return yield* pause(sessionID, delivered, reason);
+        return yield* pause(sessionID, traced, reason);
       }
 
       // Recompute the next step from the seal and current tree, not the old prompt text.
-      yield* advance(sessionID, {
-        ...delivered,
-        step: state.plan?.rendered === false ? undefined : delivered.step,
-      });
+      yield* advance(
+        sessionID,
+        changed(traced, {
+          step: state.plan?.rendered === false ? undefined : traced.step,
+        })
+      );
     });
 
     const recoverOne = (sessionID: SessionID, reason?: string) =>
@@ -1102,7 +1090,7 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* claim() {
           const state = yield* read(sessionID);
 
-          if (state && running(state) && state.boot !== (yield* boot)) {
+          if (state && isRunning(state) && state.boot !== (yield* boot)) {
             yield* reconcile(sessionID, state, reason);
           }
         })
@@ -1132,7 +1120,7 @@ export const registerShip = Effect.fn("Ship.register")(
           // Settled records, other locations', this instance's own, and another live server's need no lock; one that
           // changes is seen by the next sweep.
           if (
-            !running(snapshot) ||
+            !isRunning(snapshot) ||
             snapshot.location !== location ||
             snapshot.boot === current ||
             (yield* foreignOwner(snapshot.pid))
@@ -1190,11 +1178,13 @@ export const registerShip = Effect.fn("Ship.register")(
               : []
           );
 
-          if (state && running(state) && seen.length) {
-            yield* write(sessionID, {
-              ...state,
-              awaiting: { ...state.awaiting, ...Object.fromEntries(seen) },
-            });
+          if (state && isRunning(state) && seen.length) {
+            yield* write(
+              sessionID,
+              changed(state, {
+                awaiting: { ...state.awaiting, ...Object.fromEntries(seen) },
+              })
+            );
           }
         })
       ).pipe(recover("ship idle hook failed"));
@@ -1202,7 +1192,7 @@ export const registerShip = Effect.fn("Ship.register")(
     const assertWritable = Effect.fnUntraced(function* assertWritable(
       state: ShipState | undefined
     ) {
-      if (state && running(state) && (yield* foreignOwner(state.pid))) {
+      if (state && isRunning(state) && (yield* foreignOwner(state.pid))) {
         return yield* new ShipElsewhere({
           message: "Another live OpenCode server is driving this ship.",
         });
@@ -1261,7 +1251,7 @@ export const registerShip = Effect.fn("Ship.register")(
             }
 
             if (action === "pause") {
-              if (state?.status !== "active") {
+              if (!state || !isActive(state)) {
                 return yield* new ShipCommandRefused({
                   message: "No active Directorate ship to pause.",
                 });
@@ -1272,7 +1262,7 @@ export const registerShip = Effect.fn("Ship.register")(
               return;
             }
 
-            if (state?.status === "active") {
+            if (state && isActive(state)) {
               return yield* new ShipCommandRefused({
                 message:
                   "A Directorate ship is already active in this session.",
@@ -1302,7 +1292,7 @@ export const registerShip = Effect.fn("Ship.register")(
 
             const now = yield* Clock.currentTimeMillis;
 
-            const created: ShipState = {
+            const created = Active.make({
               boot: yield* boot,
               chain: [],
               id,
@@ -1313,9 +1303,8 @@ export const registerShip = Effect.fn("Ship.register")(
               reviewsAtResume: 0,
               rounds: 0,
               startedAt: now,
-              status: "active",
               step: "review",
-            };
+            });
 
             return yield* admit(sessionID, created, kickoff, input);
           })
@@ -1332,7 +1321,7 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* onEnqueue() {
           const state = yield* read(sessionID);
 
-          if (!state || !running(state)) {
+          if (!state || !isRunning(state)) {
             return;
           }
 
@@ -1341,10 +1330,12 @@ export const registerShip = Effect.fn("Ship.register")(
 
           // A notice outlives a reload: its cancellation must still pause the ship that waits on it.
           if (Predicate.isObject(kind)) {
-            yield* write(sessionID, {
-              ...state,
-              notices: { ...state.notices, [id]: kind.child },
-            });
+            yield* write(
+              sessionID,
+              changed(state, {
+                notices: { ...state.notices, [id]: kind.child },
+              })
+            );
           }
         })
       ).pipe(recover("could not record ship inbox enqueue"));
@@ -1367,7 +1358,6 @@ export const registerShip = Effect.fn("Ship.register")(
       id: string,
       at: number
     ) {
-      const { lastHostFailure: _lastHostFailure, ...deliveredState } = state;
       const { plan } = state;
 
       // The primary hook can run before the stream supplies proof of exact promotion.
@@ -1375,18 +1365,16 @@ export const registerShip = Effect.fn("Ship.register")(
         plan?.id === id &&
         checkpointHidesPlan(yield* history(sessionID), plan)
       ) {
-        const { inbox: _inbox, ...promoted } = deliveredState;
+        const {
+          inbox: _inbox,
+          lastHostFailure: _lastHostFailure,
+          ...promoted
+        } = fieldsOf(state);
 
         return yield* pause(sessionID, promoted, compacted);
       }
 
-      yield* write(sessionID, {
-        ...deliveredState,
-        inbox: { deliveredAt: at, id },
-        needsAttachments: false,
-        origin: id,
-        status: state.status === "waiting" ? "active" : state.status,
-      });
+      yield* write(sessionID, delivered(state, id, at));
     });
 
     /** An input other than the ship's own settled: a user prompt hands control back, a subagent's notice is consumed. */
@@ -1394,7 +1382,7 @@ export const registerShip = Effect.fn("Ship.register")(
       sessionID: SessionID,
       state: ShipState,
       id: string,
-      delivered: boolean,
+      isDelivered: boolean,
       at: number
     ) {
       const { [id]: notice, ...notices } = state.notices ?? {};
@@ -1402,9 +1390,8 @@ export const registerShip = Effect.fn("Ship.register")(
       kinds.delete(id);
 
       if (
-        delivered &&
-        (state.status === "active" ||
-          (state.status === "waiting" && state.inbox?.continuation))
+        isDelivered &&
+        (isActive(state) || (isWaiting(state) && state.inbox?.continuation))
       ) {
         kind ??= yield* classify(sessionID, id);
 
@@ -1432,8 +1419,11 @@ export const registerShip = Effect.fn("Ship.register")(
         return;
       }
 
-      if (delivered) {
-        yield* write(sessionID, { ...state, awaiting, notices, wokeAt: at });
+      if (isDelivered) {
+        yield* write(
+          sessionID,
+          changed(state, { awaiting, notices, wokeAt: at })
+        );
       } else if (!queued(state)) {
         yield* pause(
           sessionID,
@@ -1446,7 +1436,7 @@ export const registerShip = Effect.fn("Ship.register")(
     const inboxSettled = (
       sessionID: SessionID,
       id: string,
-      delivered: boolean,
+      isDelivered: boolean,
       at: number
     ) =>
       guarded(
@@ -1459,7 +1449,7 @@ export const registerShip = Effect.fn("Ship.register")(
           }
 
           if (state.inbox?.id !== id) {
-            return yield* otherSettled(sessionID, state, id, delivered, at);
+            return yield* otherSettled(sessionID, state, id, isDelivered, at);
           }
 
           kinds.delete(id);
@@ -1468,11 +1458,11 @@ export const registerShip = Effect.fn("Ship.register")(
             return;
           }
 
-          if (delivered) {
+          if (isDelivered) {
             return yield* recordDelivery(sessionID, state, id, at);
           }
 
-          const { inbox: _inbox, ...cleared } = state;
+          const { inbox: _inbox, ...cleared } = fieldsOf(state);
           yield* pause(
             sessionID,
             cleared,
@@ -1491,7 +1481,7 @@ export const registerShip = Effect.fn("Ship.register")(
         Effect.gen(function* onTerminal() {
           const state = yield* read(sessionID);
 
-          if (!state || !running(state)) {
+          if (!state || !isRunning(state)) {
             return;
           }
 
@@ -1500,10 +1490,13 @@ export const registerShip = Effect.fn("Ship.register")(
             return yield* recoverOne(sessionID, reason);
           }
 
-          if (state.status === "waiting") {
+          if (isWaiting(state)) {
             // The host does not attribute a busy period to any one queued input.
             if (reason !== undefined) {
-              yield* write(sessionID, { ...state, lastHostFailure: reason });
+              yield* write(
+                sessionID,
+                changed(state, { lastHostFailure: reason })
+              );
             }
 
             return;
@@ -1531,20 +1524,22 @@ export const registerShip = Effect.fn("Ship.register")(
             inbox: _inbox,
             plan: _plan,
             wokeAt: _wokeAt,
-            ...settled
-          } = state;
+            ...rest
+          } = fieldsOf(state);
 
-          if (Object.keys(settled.awaiting ?? {}).length) {
-            yield* write(sessionID, settled);
+          const consumed = rebuilt(state, rest);
+
+          if (Object.keys(consumed.awaiting ?? {}).length) {
+            yield* write(sessionID, consumed);
 
             return;
           }
 
-          yield* advance(sessionID, settled).pipe(
+          yield* advance(sessionID, consumed).pipe(
             Effect.catchCauseIf(Cause.hasDies, (cause) =>
               read(sessionID).pipe(
                 Effect.flatMap((current) =>
-                  current?.status === "active"
+                  current && isActive(current)
                     ? pause(sessionID, current, causeMessage(cause)).pipe(
                         Effect.asVoid
                       )
@@ -1574,7 +1569,7 @@ export const registerShip = Effect.fn("Ship.register")(
 
           const state = yield* read(sessionID);
 
-          if (state?.status === "active" || state?.status === "waiting") {
+          if (state && isRunning(state)) {
             yield* pause(sessionID, state, relocated);
           }
         })

@@ -1,7 +1,6 @@
 // Who holds a review: the Custody field group of seal.json, and its transitions: start, resume or take over, halt, abandon,
-// and the recovery wake. Review also stamps the Ship link here, with the id the ship hands it.
-import { Schema } from "effect";
-import type { DateTime } from "effect";
+// and the recovery wake.
+import { DateTime, Schema } from "effect";
 
 import { Liaison } from "../../feature/agents/agent.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
@@ -22,14 +21,27 @@ export class AbandonRefused extends Schema.TaggedError<
 }
 
 /** A recovery wake sent to the owner's session, and whether the host admitted it. */
-const RecoverySchema = Schema.Struct({
+export class Recovery extends Schema.Class<
+  Recovery,
+  { readonly brand: unique symbol }
+>("directorate/Recovery")({
   admitted: opt(Schema.Boolean),
   admittedAt: opt(Time),
   id: Schema.String,
   ownerSession: Schema.String,
-});
+}) {
+  /** The same wake, admitted by the host at `at`. */
+  admittedAs(at: DateTime.Utc) {
+    return Recovery.make({ ...this, admitted: true, admittedAt: at });
+  }
 
-type Recovery = typeof RecoverySchema.Type;
+  /** When the host admitted it, in epoch milliseconds; -Infinity before. */
+  get admittedMillis() {
+    return this.admittedAt
+      ? DateTime.toEpochMillis(this.admittedAt)
+      : -Infinity;
+  }
+}
 
 /** The Custody field group of seal.json. */
 export const Custody = Schema.Struct({
@@ -48,7 +60,7 @@ export const Custody = Schema.Struct({
   /** Liaison sessions that owned this seal before a takeover, for full exports. */
   previousOwnerSessions: opt(list(Schema.String)),
   /** The last recovery wake. Until admitted, the same ID is submitted again. */
-  recovery: opt(RecoverySchema),
+  recovery: opt(Recovery),
   /** History before an explicit resume or takeover must not halt the resumed review. */
   resumedAt: opt(Time),
 });
@@ -111,11 +123,4 @@ export const woken = (
   pid: number,
   recovery: Recovery,
   at: DateTime.Utc
-) =>
-  seal.withCustody({
-    pid,
-    recovery: { ...recovery, admitted: true, admittedAt: at },
-  });
-
-/** The ship whose loop the review belongs to, stamped by review with the id the ship hands it. */
-export const shipped = (seal: Seal, ship: string) => seal.withShip(ship);
+) => seal.withCustody({ pid, recovery: recovery.admittedAs(at) });

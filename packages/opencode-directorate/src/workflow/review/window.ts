@@ -4,6 +4,7 @@ import { DateTime, Effect, Schema } from "effect";
 import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
 import { ModeSchema } from "./request.ts";
+import type { Mode } from "./request.ts";
 
 export const PhaseSchema = Schema.Literals(["normal", "drain", "locked"]);
 
@@ -27,11 +28,25 @@ export const GRACE_MS = 120_000;
 /** A taken-over review whose budget was spent restarts with half of it, at least this many minutes. */
 const TAKEOVER_MIN_MINUTES = 5;
 
+/** A re-check gets half its mode's default budget when the caller names none, at least this many minutes. */
+const RECHECK_MIN_MINUTES = 10;
+
+/** A re-check's budget when the caller names none: half its mode's default, at least RECHECK_MIN_MINUTES. */
+export const recheckMinutes = (mode: Mode) =>
+  Math.max(RECHECK_MIN_MINUTES, Math.round(DEFAULT_BUDGET[mode] / 2));
+
 /** Each phase's header; the instruction every agent reads in it is the agent's own. */
 export const PHASE_HEADERS = Schema.Record(PhaseSchema, Schema.String).make({
   drain: "DIRECTORATE // EVACUATION",
   locked: "DIRECTORATE // LOCKDOWN",
   normal: "DIRECTORATE // WINDOW",
+});
+
+/** Each phase's name in a refused dispatch; a launch refused while the window is normal is refused as in evacuation. */
+export const PHASE_STAGES = Schema.Record(PhaseSchema, Schema.String).make({
+  drain: "evacuation",
+  locked: "lockdown",
+  normal: "evacuation",
 });
 
 /** A window's deadline never precedes its start. Spreading StoredWindow's fields drops it, so the seal root re-applies it. */

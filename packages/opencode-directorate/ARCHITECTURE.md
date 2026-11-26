@@ -44,7 +44,7 @@ src/
 │   ├── report/             report.ts · directive.ts* · gates.ts* · render.ts* · filing.ts
 │   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts* · store.ts · configure.ts · prefix.ts
 └── workflow/
-    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts · tools.ts · command.ts · prefix.ts · watchdog.ts
+    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · ship-link.ts* · lifecycle.ts · interrupted.ts · tools.ts · command.ts · prefix.ts · watchdog.ts
     └── ship/               ship.ts · state.ts* · step.ts* · runner.ts
 ```
 
@@ -210,9 +210,9 @@ The protocol gates and the Directive they let through.
 
 Opening, timing, holding, refreshing, and closing a review.
 
-- **Owns:** `Window` and `Phase` (the budget clock: normal, then drain in the last 20% or 6 minutes if longer but never more than half, then locked at the deadline; per-mode minutes; the 1.5× panel factor; the takeover restart at half the budget, at least 5 minutes); `Custody`; `ReviewRequest`, `Mode`, `ReviewScope`, and the scope → target-kind table; create, refresh, and re-check orchestration; the per-session start lock; resume, takeover, and abandon; the watchdog sweep and recovery wake.
+- **Owns:** `Window` and `Phase` (the budget clock: normal, then drain in the last 20% or 6 minutes if longer but never more than half, then locked at the deadline; per-mode minutes; the 1.5× panel factor; the takeover restart at half the budget, at least 5 minutes; a re-check's default of half its mode's minutes, at least 10; each phase's header and its name in refusals); `Custody` and its `Recovery` wake; `ReviewRequest`, `Mode`, `ReviewScope`, and the scope → target-kind table; create, refresh, and re-check orchestration; the per-session start lock; resume, takeover, and abandon; the watchdog sweep and recovery wake.
 - **Tools and commands:** `directorate_seal`, `directorate_refresh`, `/directorate-review`.
-- **Field groups:** Window, Custody. It also stamps the Ship link at sealing, with the id `ship` hands it.
+- **Field groups:** Window, Custody. It also stamps the Ship link (`ship-link.ts`) at sealing, or when its watchdog adopts an older seal, with the id `ship` hands it.
 
 The budget belongs to the review, not to agents: its length varies per review (mode, panel, settings, takeover). What varies per agent is how it behaves in each phase, and that lives on `Agent`.
 
@@ -220,7 +220,7 @@ The budget belongs to the review, not to agents: its length varies per review (m
 
 Review, fix, and re-check until the Directive is clean or the loop pauses.
 
-- **Owns:** ship state as a tagged union (Waiting, Active, Paused, Complete) decoded from its stored `status` shape; the next-step policy, read from the saved Directive and never from the model's reply; the 6-review and 30-round limits; the kickoff text.
+- **Owns:** ship state as a tagged union (Waiting, Active, Paused, Complete) decoded from its stored `status` shape, with its transitions; the next-step policy and its decisions (Proceed, Pause, Conclude), read from the saved Directive and never from the model's reply; the 6-review and 30-round limits; the kickoff text.
 - **Commands and hooks:** `/directorate-ship`; its own `context` and idle session hooks; a session-event listener that `dispatch`'s one ordered consumer calls before its own handler; auto-resume after reload or restart.
 - **Storage:** `ship:<sessionID>` in OpenCode plugin storage. Ship is its own aggregate; it reacts to the review's filed Directive and never writes the seal.
 
@@ -303,7 +303,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
 | Custody | `workflow/review` | `owner` `ownerSession` `previousOwnerSessions` `resumedAt` `halted` `abandoned` `host` `pid` `recovery` | `started`, `resumedBy`, `halted`, `abandoned`, `waking`, `woken` |
 | Dispatches | `feature/dispatch` | `children` | `launched`, `claimed`, `finished`, `resumed`, `returned`, `withdrawn`, follow-ups |
 | Protocol & Directive | `feature/report` | `gates` `directive` `reportedAt` `autoReported` `freshnessUnverified` `staleFiles` | `pushedBack`, `freshnessChecked`, `directiveFiled`, `driftCleared` (called by refresh) |
-| Ship link | `workflow/ship` | `ship` | `shipped` (in review's `custody.ts`), with the id the ship hands it |
+| Ship link | `workflow/ship` | `ship` | `shipped` (in review's `ship-link.ts`), with the id the ship hands it |
 
 ### Artifacts
 
@@ -321,7 +321,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
 ### Names, copy, defaults, and errors
 
 - **Names.** Agent ids live on `Agent`. Tool names live with the tool that registers them. Neither is ever renamed: both are stored and host-facing.
-- **Copy.** Phase headers (`DIRECTORATE // WINDOW`, `EVACUATION`, `LOCKDOWN`) live with `Phase`; each agent's per-phase orders live on its `Agent`; each tool's description and gate text live with their slice.
+- **Copy.** Phase headers (`DIRECTORATE // WINDOW`, `EVACUATION`, `LOCKDOWN`) and each phase's name in refusals live with `Phase`; each agent's per-phase orders live on its `Agent`; each tool's description and gate text live with their slice.
 - **Defaults.** Owners publish defaults (minutes per mode and the panel factor in `review`, default seats in `dispatch`, default scope in `review`). Settings only resolves precedence.
 - **Errors.** Each slice defines branded `Schema.TaggedError`s for its expected failures, each with the `message` the model reads. The tool adapter in `platform/` maps them to tool output; there is no shared `ReviewError`.
 

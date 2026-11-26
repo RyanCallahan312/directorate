@@ -1,0 +1,41 @@
+{
+  "admitting": true,
+  "awaiting": {
+    "ses_child1": 1767261700000
+  },
+  "boot": "boot-1",
+  "chain": [
+    "directorate-a",
+    "directorate-b"
+  ],
+  "id": "ship-1",
+  "inbox": {
+    "continuation": true,
+    "deliveredAt": 1767261800000,
+    "id": "inb_1"
+  },
+  "lastHostFailure": "provider overloaded",
+  "location": "/repo",
+  "needsAttachments": true,
+  "notices": {
+    "inb_2": "ses_child1"
+  },
+  "origin": "msg_1",
+  "pid": 4242,
+  "plan": {
+    "checkpoint": "msg_cp",
+    "id": "plan_1",
+    "origin": "msg_1",
+    "rendered": true,
+    "text": "1. Fix E1"
+  },
+  "reason": "Seal `directorate-b`: reached the 30-round limit.",
+  "recovery": "Directorate ship paused. Run `/directorate-ship resume` when ready to continue.",
+  "request": "ship the feature",
+  "reviewsAtResume": 1,
+  "rounds": 2,
+  "startedAt": 1767261600000,
+  "status": "paused",
+  "step": "review",
+  "wokeAt": 1767261900000
+}

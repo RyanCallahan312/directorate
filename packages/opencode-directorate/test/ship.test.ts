@@ -15,7 +15,26 @@ import { Directive, Gates } from "../src/feature/report/directive.ts";
 import { Seal } from "../src/seal/record.ts";
 import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
 import { Target } from "../src/seal/target.ts";
-import { decideShip, shipKickoff } from "../src/workflow/ship/step.ts";
+import {
+  decideShip,
+  ShipDecisionSchema,
+  shipKickoff,
+} from "../src/workflow/ship/step.ts";
+
+/** A decision as these assertions read it: the ship status it leads to, the step it records, and its reason and text. */
+const decide = (...args: Parameters<typeof decideShip>) => {
+  const decision = decideShip(...args);
+
+  return {
+    ...ShipDecisionSchema.match(decision, {
+      Conclude: () => ({ status: "complete", step: undefined }),
+      Pause: () => ({ status: "paused", step: undefined }),
+      Proceed: ({ step }) => ({ status: "active", step }),
+    }),
+    reason: decision.reason,
+    text: decision.text,
+  };
+};
 
 const state = {
   id: "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
@@ -114,7 +133,7 @@ test("kickoff assigns only the first review turn; the no-seal retry preserves th
   assert.match(kickoff, /review instructions/u);
 
   const request = { ...state, request: "--scope=local focus on input parsing" };
-  const start = decideShip(request, { reviews: 0 });
+  const start = decide(request, { reviews: 0 });
   assert.equal(start.status, "active");
   assert.equal(start.step, "review");
   assert.ok(start.text.includes(`ship: "${state.id}"`));
@@ -122,7 +141,7 @@ test("kickoff assigns only the first review turn; the no-seal retry preserves th
   assert.match(start.text, /scope: "local"/u);
   assert.doesNotMatch(start.text, /--scope=local/u);
   assert.equal(
-    decideShip({ ...request, step: start.step }, { reviews: 0 }).status,
+    decide({ ...request, step: start.step }, { reviews: 0 }).status,
     "paused"
   );
 });
@@ -133,7 +152,7 @@ test("unfinished review resumes the Liaison and exact seal only once without pro
     seal: Seal.make({ ...seal, reportedAt: undefined }),
   };
 
-  const decision = decideShip(state, observation);
+  const decision = decide(state, observation);
   assert.equal(decision.status, "active");
   assert.equal(decision.step, `resume:${seal.id}`);
   assert.match(
@@ -145,14 +164,14 @@ test("unfinished review resumes the Liaison and exact seal only once without pro
   assert.match(decision.text, /Do not start another review/u);
   assert.match(decision.text, /wait for the plugin to direct the next step/u);
   assert.equal(
-    decideShip({ ...state, step: decision.step }, observation).status,
+    decide({ ...state, step: decision.step }, observation).status,
     "paused"
   );
 });
 
 test("empty initial targets and unreadable reported reviews never report completion", () => {
   for (const reportedAt of [at, undefined]) {
-    const result = decideShip(state, {
+    const result = decide(state, {
       ...reported,
       seal: Seal.make({ ...seal, files: [], regions: [], reportedAt }),
     });
@@ -166,7 +185,7 @@ test("empty initial targets and unreadable reported reviews never report complet
     [{ ...reported, ledger: undefined }, /review ledger/u],
     [{ ...reported, fingerprint: undefined }, /target fingerprint/u],
   ] as const) {
-    const result = decideShip(state, observation);
+    const result = decide(state, observation);
     assert.equal(result.status, "paused");
     assert.match(result.reason, /directorate-example/u);
     assert.match(result.text, cause);
@@ -182,7 +201,7 @@ test("an empty recheck still decides carried findings and can complete after res
     regions: [],
   });
 
-  const unfinished = decideShip(state, {
+  const unfinished = decide(state, {
     reviews: 2,
     seal: Seal.make({ ...recheck, reportedAt: undefined }),
   });
@@ -201,16 +220,16 @@ test("an empty recheck still decides carried findings and can complete after res
   });
 
   const observation = { ...reported, reviews: 2, seal: recheck };
-  assert.equal(decideShip(state, observation).status, "paused");
+  assert.equal(decide(state, observation).status, "paused");
   assert.equal(
-    decideShip(state, {
+    decide(state, {
       ...observation,
       ledger: Ledger.make({ entries: [resolved], notes: [] }),
     }).status,
     "complete"
   );
   assert.equal(
-    decideShip(state, {
+    decide(state, {
       ...observation,
       ledger: Ledger.make({
         entries: [Entry.make({ ...resolved, status: "open" })],
@@ -228,7 +247,7 @@ test("changed target rechecks the exact seal before looking at its findings or o
     ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
   };
 
-  const changed = decideShip(state, observation);
+  const changed = decide(state, observation);
   assert.equal(changed.status, "active");
   assert.equal(changed.step, `recheck:${seal.id}:updated`);
   assert.match(
@@ -243,11 +262,11 @@ test("changed target rechecks the exact seal before looking at its findings or o
   );
   assert.match(changed.text, /wait for the plugin to direct the next step/u);
   assert.equal(
-    decideShip({ ...state, step: changed.step }, observation).status,
+    decide({ ...state, step: changed.step }, observation).status,
     "paused"
   );
   assert.equal(
-    decideShip(
+    decide(
       { ...state, step: changed.step },
       { ...observation, fingerprint: "newer" }
     ).step,
@@ -277,7 +296,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
       ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
     },
   ]) {
-    const paused = decideShip(state, { ...observation, seal: panelSeal });
+    const paused = decide(state, { ...observation, seal: panelSeal });
     assert.equal(paused.status, "paused");
     assert.equal(paused.step, undefined);
     assert.match(
@@ -309,11 +328,11 @@ test("missing panel Seats require a new panel review even with drift or confirme
   });
 
   assert.equal(
-    decideShip(state, { ...reported, seal: completed }).status,
+    decide(state, { ...reported, seal: completed }).status,
     "complete"
   );
   assert.equal(
-    decideShip(state, {
+    decide(state, {
       ...reported,
       seal: Seal.make({ ...panelSeal, reportedAt: undefined }),
     }).step,
@@ -342,7 +361,7 @@ test("fix includes every severity and separates unverified leads from confirmed 
 
   const request = "--scope local\nKeep public interfaces unchanged.";
 
-  const fix = decideShip({ ...state, request }, observation);
+  const fix = decide({ ...state, request }, observation);
   assert.equal(fix.status, "active");
   assert.equal(fix.step, `fix:${seal.id}`);
   assert.match(fix.text, /Fix all confirmed findings.*including minor/u);
@@ -381,7 +400,7 @@ test("fix includes every severity and separates unverified leads from confirmed 
   assert.doesNotMatch(fix.text, /Title for ignored/u);
   assert.doesNotMatch(verified, /Title for lead/u);
   assert.equal(
-    decideShip({ ...state, step: fix.step }, observation).status,
+    decide({ ...state, step: fix.step }, observation).status,
     "paused"
   );
 });
@@ -392,7 +411,7 @@ test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
     ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
   };
 
-  const commit = decideShip(state, {
+  const commit = decide(state, {
     ...observation,
     seal: Seal.make({
       ...seal,
@@ -404,7 +423,7 @@ test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
   assert.equal(commit.status, "paused");
   assert.match(commit.text, /fixed commit.*working tree or a moving ref/u);
 
-  const pr = decideShip(state, {
+  const pr = decide(state, {
     ...observation,
     seal: Seal.make({
       ...seal,
@@ -450,7 +469,7 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
       seal: Seal.make({ ...seal, directive }),
     };
 
-    const finish = decideShip(state, observation);
+    const finish = decide(state, observation);
     assert.equal(finish.status, "active");
     assert.equal(finish.step, "finish");
     assert.match(finish.text, /recheck: "directorate-example"/u);
@@ -471,14 +490,14 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
       }),
     };
 
-    const paused = decideShip({ ...state, step: finish.step }, another);
+    const paused = decide({ ...state, step: finish.step }, another);
     assert.equal(paused.status, "paused");
     assert.match(paused.reason, /directorate-next/u);
   }
 });
 
 test("only complete and fresh reports without confirmed findings or unresolved leads complete", () => {
-  const decision = decideShip(state, {
+  const decision = decide(state, {
     ...reported,
     ledger: Ledger.make({
       entries: [entry("old", { status: "resolved" })],
@@ -491,7 +510,7 @@ test("only complete and fresh reports without confirmed findings or unresolved l
   assert.match(decision.reason, /directorate-example.*complete and current/u);
 
   for (const status of ["stale", "partial"] as const) {
-    const incomplete = decideShip(state, {
+    const incomplete = decide(state, {
       ...reported,
       seal: Seal.make({
         ...seal,
@@ -506,8 +525,8 @@ test("only complete and fresh reports without confirmed findings or unresolved l
 test("review cap only stops new reviews; round cap stops any next action", () => {
   const almost = { ...state, reviewsAtResume: 10, rounds: 29 };
   const drift = { ...reported, fingerprint: "different" };
-  assert.equal(decideShip(almost, { ...drift, reviews: 15 }).status, "active");
-  const reviewLimit = decideShip(almost, { ...drift, reviews: 16 });
+  assert.equal(decide(almost, { ...drift, reviews: 15 }).status, "active");
+  const reviewLimit = decide(almost, { ...drift, reviews: 16 });
   assert.equal(reviewLimit.status, "paused");
   assert.match(reviewLimit.reason, /6 reviews/u);
 
@@ -517,17 +536,17 @@ test("review cap only stops new reviews; round cap stops any next action", () =>
     reviews: 16,
   };
 
-  assert.equal(decideShip(almost, fix).step, `fix:${seal.id}`);
+  assert.equal(decide(almost, fix).step, `fix:${seal.id}`);
   assert.equal(
-    decideShip(almost, {
+    decide(almost, {
       ...fix,
       seal: Seal.make({ ...seal, reportedAt: undefined }),
     }).step,
     `resume:${seal.id}`
   );
   const capped = { ...almost, rounds: 30 };
-  const roundLimit = decideShip(capped, fix);
+  const roundLimit = decide(capped, fix);
   assert.equal(roundLimit.status, "paused");
   assert.match(roundLimit.reason, /30-round limit/u);
-  assert.equal(decideShip(capped, reported).status, "complete");
+  assert.equal(decide(capped, reported).status, "complete");
 });
