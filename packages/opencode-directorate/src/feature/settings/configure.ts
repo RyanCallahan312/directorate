@@ -10,7 +10,7 @@ import type { DefineTool } from "../../platform/platform.ts";
 import { Sessions } from "../../seal/seal.ts";
 import { agentNamed } from "../agents/agent.ts";
 import { DEFAULT_PANEL } from "../dispatch/seat.ts";
-import { LENSES } from "../ledger/entry.ts";
+import { LensSchema } from "../ledger/entry.ts";
 import {
   describe,
   isUnset,
@@ -171,7 +171,7 @@ export const configureTool = (
         ),
         `Effective: ${describe(now.effective) ?? "Directorate defaults"}.`,
         `Unset keys keep Directorate defaults: scope branch; mode default; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets 20, 30, 60 min (default, code-quality, full), half again for panels; no lenses disabled.`,
-        `Lenses: ${LENSES.join(", ")}.`,
+        `Lenses: ${LensSchema.literals.join(", ")}.`,
       ];
 
       if (input.find !== undefined) {

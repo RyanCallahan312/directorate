@@ -186,7 +186,8 @@ Each Auditor, Seat, or Compliance run the Liaison sends out in _this_ review.
 
 Findings and their verification.
 
-- **Owns:** the `Entry` entity; `Verdict` and `Note` value objects; `Severity`, `Kind`, `Lens`, entry statuses; decision authority as a specification over `Agent` (Compliance decides; the Liaison decides open minor entries from Auditors or Seats; no session confirms its own entry); `reopen` on refresh; the `ledger.json` codec.
+- **Owns:** the `Entry` entity; `Verdict`, `Note`, and `Carried` value objects; `Ledger`, the `ledger.json` root, and its codec `LedgerJson`; `Severity`, `Kind`, `Lens`, entry statuses; decision authority as a specification over `Agent` (only the Liaison and Compliance decide; the Liaison decides open minor entries other sessions raised, never affirming the Liaison's own; no session confirms or resolves its own entry; only carried findings resolve, and only Compliance decides a carried verified finding); `reopen` on refresh, carrying entries into a re-check, and reopening duplicates of a refuted or resolved entry.
+- **Shape:** every status carries the same fields, so `Entry` is one branded class with a `status` field rather than a union. Changes are named transitions (`Ledger.filed`, `Ledger.noted`, `Entry.decided`, `Entry.carriedAs`, `decide`, `reopen`) that rebuild through the constructors; stored fields such as `lens` and actors' agent names stay arbitrary strings.
 - **Tools:** `directorate_ledger_add`, `directorate_ledger_verdict`, `directorate_ledger_list`, `directorate_note`.
 
 ### `feature/report/`: the Directive

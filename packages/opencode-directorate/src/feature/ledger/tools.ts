@@ -39,14 +39,16 @@ import {
   VerdictRefused,
 } from "./decide.ts";
 import {
-  EntryStatus,
+  Entry,
+  EntryStatusSchema,
   KindSchema,
-  Lens,
-  NoteKind,
+  LensSchema,
+  Note,
+  NoteKindSchema,
   SeveritySchema,
-  VerdictKind,
+  Verdict,
+  VerdictKindSchema,
 } from "./entry.ts";
-import type { Entry } from "./entry.ts";
 
 /** A candidate the dossier does not take: a disabled lens, or an anchor or quote that does not tie to the sealed code. */
 class EntryRejected extends Schema.TaggedError<
@@ -114,14 +116,14 @@ export const ledgerTools = (
             // Seats operate under memetic isolation: never reveal other entries' titles or ids.
             const near = by.agent === Seat.id ? [] : nearby(ledger, anchor);
 
-            const entry: Entry = {
+            const entry = Entry.make({
               anchor,
               brief: input.brief,
               consequence: input.consequence,
               createdAt: yield* DateTime.now,
               evidence,
               fix: input.fix,
-              id: `F${ledger.entries.length + 1}`,
+              id: ledger.nextEntryId,
               kind: input.kind,
               lens: input.lens,
               quote: input.quote,
@@ -131,7 +133,7 @@ export const ledgerTools = (
               title: input.title,
               trigger: input.trigger,
               verdicts: [],
-            };
+            });
 
             const moved =
               anchor.line === raw.line
@@ -139,7 +141,7 @@ export const ledgerTools = (
                 : ` Anchor moved to line ${anchor.line}, where the quote is.`;
 
             return {
-              ledger: { ...ledger, entries: [...ledger.entries, entry] },
+              ledger: ledger.filed(entry),
               out: yield* done(
                 seal,
                 `Recorded ${entry.id} (open).${moved}${near.length ? ` Nearby entries: ${near.map((e) => `${e.id} "${e.title}" (${e.status})`).join("; ")}. If it is the same root cause, say so in your handoff.` : ""}`,
@@ -178,7 +180,7 @@ export const ledgerTools = (
         })
       ),
       kind: KindSchema,
-      lens: Lens,
+      lens: LensSchema,
       line: positiveInt,
       path: RepoPath,
       quote: str.annotate({
@@ -214,7 +216,7 @@ export const ledgerTools = (
           Effect.gen(function* execute() {
             const { seal } = review;
             const ledger = yield* review.ledger;
-            const entry = ledger.entries.find((e) => e.id === input.id);
+            const entry = ledger.entryById(input.id);
 
             if (!entry) {
               return yield* new NoEntry({ id: input.id });
@@ -264,9 +266,9 @@ export const ledgerTools = (
                     ),
                     quote,
                   }
-                : {};
+                : undefined;
 
-            const verdict = {
+            const verdict = Verdict.make({
               at: yield* DateTime.now,
               by,
               evidence,
@@ -277,15 +279,12 @@ export const ledgerTools = (
                   ? (input.severity ?? currentSeverity(entry))
                   : undefined,
               verdict: input.verdict,
-            };
-
-            const { ledger: next, reopened } = decide(ledger, {
-              ...entry,
-              ...anchored,
-              staleReason: undefined,
-              status: input.verdict,
-              verdicts: [...entry.verdicts, verdict],
             });
+
+            const { ledger: next, reopened } = decide(
+              ledger,
+              entry.decided(verdict, anchored)
+            );
 
             return {
               ledger: next,
@@ -318,7 +317,7 @@ export const ledgerTools = (
         })
       ),
       side: optional(SideSchema),
-      verdict: VerdictKind,
+      verdict: VerdictKindSchema,
     }),
     lockdown: [Compliance],
     name: "directorate_ledger_verdict",
@@ -424,7 +423,7 @@ export const ledgerTools = (
       brief: optional(Schema.Boolean),
       ids: optional(strArr),
       seal: optional(str),
-      status: optional(EntryStatus),
+      status: optional(EntryStatusSchema),
     }),
     lockdown: [Liaison, Compliance],
     name: "directorate_ledger_list",
@@ -468,19 +467,20 @@ export const ledgerTools = (
             }
 
             return {
-              ledger: {
-                ...ledger,
-                notes: [
-                  ...ledger.notes,
-                  { at: yield* DateTime.now, by, kind: input.kind, text },
-                ],
-              },
+              ledger: ledger.noted(
+                Note.make({
+                  at: yield* DateTime.now,
+                  by,
+                  kind: input.kind,
+                  text,
+                })
+              ),
               out: yield* done(seal, `Noted (${input.kind}).`, by),
             };
           })
       );
     },
-    input: Schema.Struct({ kind: NoteKind, seal: str, text: str }),
+    input: Schema.Struct({ kind: NoteKindSchema, seal: str, text: str }),
     lockdown: [Liaison, Auditor, Seat],
     name: "directorate_note",
   });

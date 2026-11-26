@@ -1,4 +1,5 @@
-// The Dossier as stored in ledger.json: entries, their verdicts, and the Liaison's notes.
+// The Dossier as stored in ledger.json: entries, their verdicts, and the Liaison's notes. Every value is read-only: a change
+// builds the next one through its constructor.
 import { Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
@@ -21,7 +22,7 @@ export const KindSchema = Schema.Literals(["defect", "test-gap", "quality"]);
 export type Kind = typeof KindSchema.Type;
 
 /** The review lenses: one playbook each under the directorate-lenses skill's references/. */
-export const LENSES = [
+export const LensSchema = Schema.Literals([
   "correctness",
   "security",
   "performance",
@@ -32,19 +33,21 @@ export const LENSES = [
   "ops",
   "docs",
   "ux",
-] as const;
+]);
 
-export const Lens = Schema.Literals(LENSES);
+export type Lens = typeof LensSchema.Type;
 
 /** `resolved`: a finding carried from the review a re-check follows no longer holds on the new code. */
-export const VerdictKind = Schema.Literals([
+export const VerdictKindSchema = Schema.Literals([
   "confirmed",
   "refuted",
   "duplicate",
   "resolved",
 ]);
 
-export const EntryStatus = Schema.Literals([
+export type VerdictKind = typeof VerdictKindSchema.Type;
+
+export const EntryStatusSchema = Schema.Literals([
   "open",
   "confirmed",
   "refuted",
@@ -52,70 +55,135 @@ export const EntryStatus = Schema.Literals([
   "resolved",
 ]);
 
+export type EntryStatus = typeof EntryStatusSchema.Type;
+
 /** `answered`: the Liaison answered a failed Auditor's question itself; its text is that question. */
-export const NoteKind = Schema.Literals([
+export const NoteKindSchema = Schema.Literals([
   "unanswered",
   "limit",
   "assumption",
   "answered",
 ]);
 
-const VerdictSchema = Schema.Struct({
+export type NoteKind = typeof NoteKindSchema.Type;
+
+/** What a carried entry was when the earlier review reported: verified, or filed and never cleared. */
+export const CarriedStatusSchema = Schema.Literals(["confirmed", "unverified"]);
+
+export type CarriedStatus = typeof CarriedStatusSchema.Type;
+
+/** A decision on an entry: who made it, on what evidence, and (confirming) at what severity or (duplicate) of what. */
+export class Verdict extends Schema.Class<
+  Verdict,
+  { readonly brand: unique symbol }
+>("directorate/Verdict")({
   at: Time,
   by: ActorSchema,
   evidence: list(Schema.String),
   of: opt(Schema.String),
   rationale: Schema.String,
   severity: opt(SeveritySchema),
-  verdict: VerdictKind,
-});
+  verdict: VerdictKindSchema,
+}) {}
 
-export type Verdict = typeof VerdictSchema.Type;
+/** In a re-check: the entry an entry continues in the earlier review, and its status when that review reported. */
+export class Carried extends Schema.Class<
+  Carried,
+  { readonly brand: unique symbol }
+>("directorate/Carried")({
+  id: Schema.String,
+  status: CarriedStatusSchema,
+}) {}
 
-const EntrySchema = Schema.Struct({
+/** A candidate finding: filed open, then decided by verdicts; reopened (its verdicts moved to history) when its code moves. */
+export class Entry extends Schema.Class<
+  Entry,
+  { readonly brand: unique symbol }
+>("directorate/Entry")({
   anchor: Anchor,
   brief: opt(Schema.String),
-  /** In a re-check: the entry this one continues in the earlier review, and its status when that review reported. */
-  carried: opt(
-    Schema.Struct({
-      id: Schema.String,
-      status: Schema.Literals(["confirmed", "unverified"]),
-    })
-  ),
+  carried: opt(Carried),
   consequence: Schema.String,
   createdAt: Time,
   evidence: list(Schema.String),
   fix: opt(Schema.String),
-  history: opt(list(VerdictSchema)),
+  history: opt(list(Verdict)),
   id: Schema.String,
   kind: KindSchema,
+  /** As stored: any string, though new entries are filed under a lens of `LensSchema`. */
   lens: Schema.String,
   quote: Schema.String,
   raisedBy: ActorSchema,
   severity: SeveritySchema,
   staleReason: opt(Schema.String),
-  status: EntryStatus,
+  status: EntryStatusSchema,
   title: Schema.String,
   trigger: Schema.String,
-  verdicts: list(VerdictSchema),
-});
+  verdicts: list(Verdict),
+}) {
+  /** Decided by `verdict`: its status, no longer stale, and (confirming) pinned to the sealed code it was checked against. */
+  decided(verdict: Verdict, anchored?: Pick<Entry, "anchor" | "quote">) {
+    return new Entry({
+      ...this,
+      ...anchored,
+      staleReason: undefined,
+      status: verdict.verdict,
+      verdicts: [...this.verdicts, verdict],
+    });
+  }
 
-export type Entry = typeof EntrySchema.Type;
+  /** This entry continued in a re-check as `id`, remembering what it was there. */
+  carriedAs(id: string, status: CarriedStatus) {
+    return new Entry({
+      ...this,
+      carried: Carried.make({ id: this.id, status }),
+      id,
+    });
+  }
+}
 
-const NoteSchema = Schema.Struct({
+/** A coverage limit, an unanswered or answered question, or an assumption, as the Directive reports it. */
+export class Note extends Schema.Class<Note, { readonly brand: unique symbol }>(
+  "directorate/Note"
+)({
   at: Time,
   by: ActorSchema,
-  kind: NoteKind,
+  kind: NoteKindSchema,
   text: Schema.String,
-});
+}) {}
 
-export type Note = typeof NoteSchema.Type;
+/** The Dossier: ledger.json. */
+export class Ledger extends Schema.Class<
+  Ledger,
+  { readonly brand: unique symbol }
+>("directorate/Ledger")({
+  entries: list(Entry),
+  notes: list(Note),
+}) {
+  /** The id the next filed entry takes. */
+  get nextEntryId() {
+    return `F${this.entries.length + 1}`;
+  }
 
-const LedgerSchema = Schema.Struct({
-  entries: list(EntrySchema),
-  notes: list(NoteSchema),
-});
+  /** The entry with this id, if any. */
+  entryById(id: string | undefined) {
+    return this.entries.find((e) => e.id === id);
+  }
 
-export type Ledger = typeof LedgerSchema.Type;
+  /** With `entry` filed after the others. */
+  filed(entry: Entry) {
+    return new Ledger({ ...this, entries: [...this.entries, entry] });
+  }
 
-export const LedgerJson = Schema.fromJsonString(LedgerSchema, { space: 2 });
+  /** With `note` recorded after the others. */
+  noted(note: Note) {
+    return new Ledger({ ...this, notes: [...this.notes, note] });
+  }
+
+  /** The Ledger's entries rebuilt: the ledger's transitions call it. */
+  withEntries(entries: readonly Entry[]) {
+    return new Ledger({ ...this, entries });
+  }
+}
+
+export const LedgerJson = Schema.fromJsonString(Ledger, { space: 2 });

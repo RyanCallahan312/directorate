@@ -1,0 +1,117 @@
+{
+  "entries": [
+    {
+      "anchor": {
+        "endLine": 3,
+        "line": 3,
+        "path": "src/a.ts",
+        "side": "new"
+      },
+      "carried": {
+        "id": "F7",
+        "status": "unverified",
+        "via": "an older writer"
+      },
+      "consequence": "Throws",
+      "createdAt": "2026-03-01T11:00:00+01:00",
+      "evidence": [],
+      "history": [],
+      "id": "F1",
+      "kind": "quality",
+      "lens": "c",
+      "quote": "throw err",
+      "raisedBy": {
+        "agent": "general",
+        "session": "ses_general",
+        "model": "unknown"
+      },
+      "reviewer": "kept by no schema",
+      "severity": "minor",
+      "status": "refuted",
+      "title": "Finding F1",
+      "trigger": "Any call",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00Z",
+          "by": {
+            "agent": "build",
+            "session": "ses_build"
+          },
+          "confidence": "high",
+          "evidence": [
+            "src/a.ts:1"
+          ],
+          "rationale": "Guarded",
+          "verdict": "refuted"
+        }
+      ]
+    },
+    {
+      "anchor": {
+        "endLine": 9,
+        "line": 8,
+        "path": "src/b.ts",
+        "side": "old"
+      },
+      "consequence": "Leaks",
+      "createdAt": "2026-03-01T10:00:00.5Z",
+      "evidence": [
+        "src/b.ts:8"
+      ],
+      "history": [
+        {
+          "at": "2026-03-01T12:00:00.000Z",
+          "by": {
+            "agent": "directorate_liaison",
+            "session": "ses_liaison"
+          },
+          "evidence": [
+            "src/b.ts:9"
+          ],
+          "rationale": "Withdrawn",
+          "verdict": "refuted"
+        },
+        {
+          "at": "2026-03-01T13:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_c"
+          },
+          "evidence": [
+            "src/b.ts:9"
+          ],
+          "of": "F1",
+          "rationale": "Same root cause",
+          "verdict": "duplicate"
+        }
+      ],
+      "id": "F2",
+      "kind": "test-gap",
+      "lens": "legacy-lens",
+      "quote": "open(fd)",
+      "raisedBy": {
+        "agent": "directorate_seat",
+        "session": "ses_seat"
+      },
+      "severity": "important",
+      "staleReason": "",
+      "status": "open",
+      "title": "Finding F2",
+      "trigger": "Early return",
+      "verdicts": []
+    }
+  ],
+  "notes": [
+    {
+      "at": "2026-03-02T10:00:00+00:00",
+      "by": {
+        "agent": "plan",
+        "session": "ses_plan"
+      },
+      "kind": "limit",
+      "pinned": true,
+      "text": ""
+    }
+  ],
+  "version": 0
+}

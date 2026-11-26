@@ -47,7 +47,7 @@ import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { Completed, statusOf } from "../src/feature/dispatch/lifecycle.ts";
-import { LENSES } from "../src/feature/ledger/entry.ts";
+import { LensSchema } from "../src/feature/ledger/entry.ts";
 import { Worktree } from "../src/platform/worktree.ts";
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/records/export.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
@@ -1556,7 +1556,10 @@ test("the plugin registers bundled review agents and skill without discovery fil
     .filter((f) => f.endsWith(".md"))
     .toSorted();
 
-  const expectedRefs = [...LENSES, "triage"].map((n) => `${n}.md`).toSorted();
+  const expectedRefs = [...LensSchema.literals, "triage"]
+    .map((n) => `${n}.md`)
+    .toSorted();
+
   assert.deepEqual(refFiles, expectedRefs, "references match LENSES + triage");
 
   for (const file of refFiles) {

@@ -58,7 +58,7 @@ const contracts = [
   },
   {
     current: ["ledger.json"],
-    legacy: ["ledger.minimal.json"],
+    legacy: ["ledger.minimal.json", "ledger.loose.json"],
     name: "ledger.json",
     roundTrip: ledgerRoundTrip,
     stored: LedgerJson.to.ast,

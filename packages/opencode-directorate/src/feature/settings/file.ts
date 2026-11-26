@@ -9,7 +9,7 @@ import {
 } from "../../workflow/review/request.ts";
 import type { Mode } from "../../workflow/review/request.ts";
 import { DEFAULT_PANEL, SeatSpecSchema, seatRef } from "../dispatch/seat.ts";
-import { Lens } from "../ledger/entry.ts";
+import { LensSchema } from "../ledger/entry.ts";
 
 /** Which directorate.json: global (in OpenCode's global config directory, ~/.config/opencode) or the project's (<repo>/.opencode). */
 export const SettingsScopeSchema = Schema.Literals(["global", "project"]);
@@ -40,7 +40,7 @@ export const SettingsSchema = Schema.Struct({
   lenses: Schema.optionalKey(
     Schema.Struct({
       disabled: Schema.optionalKey(
-        Schema.Array(Lens).annotate({
+        Schema.Array(LensSchema).annotate({
           description: "Lenses reviews skip; entries under them are rejected.",
         })
       ),

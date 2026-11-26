@@ -11,8 +11,7 @@ import {
   Schema,
 } from "effect";
 
-import { LedgerJson } from "../feature/ledger/entry.ts";
-import type { Ledger } from "../feature/ledger/entry.ts";
+import { Ledger, LedgerJson } from "../feature/ledger/entry.ts";
 import { SealJson } from "../seal/record.ts";
 import type { Seal } from "../seal/record.ts";
 import { mutationLocks } from "./locks.ts";
@@ -32,7 +31,7 @@ const encodeSeal = (s: Seal) =>
 const encodeLedger = (l: Ledger) =>
   Schema.encodeEffect(LedgerJson)(l).pipe(Effect.orDie);
 
-export const emptyLedger: Ledger = { entries: [], notes: [] };
+export const emptyLedger = Ledger.make({ entries: [], notes: [] });
 
 /** No seal by that id: a malformed id, or one with no record under the state root. */
 export class SealNotFound extends Schema.TaggedError<

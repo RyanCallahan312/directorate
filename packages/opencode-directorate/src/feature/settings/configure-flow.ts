@@ -15,7 +15,8 @@ import {
 } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL, seatRef } from "../dispatch/seat.ts";
 import type { SeatSpec } from "../dispatch/seat.ts";
-import { LENSES } from "../ledger/entry.ts";
+import { LensSchema } from "../ledger/entry.ts";
+import type { Lens } from "../ledger/entry.ts";
 import { normalizeSettings, sameSettings } from "./file.ts";
 import type { Settings, SettingsScope } from "./file.ts";
 import type { SettingsView, WriteResult } from "./rpc.ts";
@@ -70,8 +71,6 @@ export interface Backend {
     readonly settings: Settings;
   }) => Effect.Effect<WriteResult, SettingsError>;
 }
-
-type Lens = (typeof LENSES)[number];
 
 type Item =
   | "mode"
@@ -398,7 +397,7 @@ const editLenses = Effect.fnUntraced(function* editLenses(
     const pick = yield* ctx.dialog.select<Lens | "inherit">({
       current: at,
       options: [
-        ...LENSES.map((l) => ({
+        ...LensSchema.literals.map((l) => ({
           description: off.has(l) ? "off" : "on",
           title: l,
           value: l,
@@ -435,7 +434,7 @@ const editLenses = Effect.fnUntraced(function* editLenses(
 
     current = {
       ...current,
-      lenses: { disabled: LENSES.filter((l) => off.has(l)) },
+      lenses: { disabled: LensSchema.literals.filter((l) => off.has(l)) },
     };
   }
 });

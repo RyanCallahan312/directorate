@@ -40,7 +40,13 @@ import {
   unresolved,
   verdictError,
 } from "../src/feature/ledger/decide.ts";
-import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
+import {
+  Carried,
+  Entry,
+  Ledger,
+  Note,
+  Verdict,
+} from "../src/feature/ledger/entry.ts";
 import { assess } from "../src/feature/report/directive.ts";
 import { renderReport } from "../src/feature/report/render.ts";
 import { finalize } from "../src/feature/report/report.ts";
@@ -597,11 +603,13 @@ test("only a subsequent successful retry clears a failed question", async () => 
     regions: [],
   });
 
-  assert.deepEqual(failedDispatches(reviewed, { entries: [], notes: [] }), [
-    failed,
-  ]);
+  assert.deepEqual(
+    failedDispatches(reviewed, Ledger.make({ entries: [], notes: [] })),
+    [failed]
+  );
   assert.equal(
-    assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
+    assess(reviewed, Ledger.make({ entries: [], notes: [] }), {}, "normal")
+      .status,
     "partial"
   );
   assert.equal(
@@ -613,7 +621,7 @@ test("only a subsequent successful retry clears a failed question", async () => 
           new Completed({ ...fields, call: "retry" }),
         ],
       }),
-      { entries: [], notes: [] },
+      Ledger.make({ entries: [], notes: [] }),
       {},
       "normal"
     ).status,
@@ -633,10 +641,11 @@ test("the Liaison's answer settles a twice-failed Auditor question", async () =>
 
   const reviewed = Seal.make({ ...seal, children: [failed], regions: [] });
 
-  const answered = (text: string) => ({
-    entries: [],
-    notes: [{ at: T0, by: lead, kind: "answered" as const, text }],
-  });
+  const answered = (text: string) =>
+    Ledger.make({
+      entries: [],
+      notes: [Note.make({ at: T0, by: lead, kind: "answered" as const, text })],
+    });
 
   assert.deepEqual(failedDispatches(reviewed, answered("other")), [failed]);
 
@@ -685,7 +694,11 @@ test("re-check: carries an Auditor question the earlier review never answered", 
   });
 
   const r = await run(
-    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+    recheckSeal({
+      ledger: Ledger.make({ entries: [], notes: [] }),
+      owner: lead,
+      prior,
+    })
   );
 
   assert.deepEqual(r.files, []);
@@ -697,17 +710,17 @@ test("re-check: carries an Auditor question the earlier review never answered", 
 
   const settled = await run(
     recheckSeal({
-      ledger: {
+      ledger: Ledger.make({
         entries: [],
         notes: [
-          {
+          Note.make({
             at: T0,
             by: lead,
             kind: "answered",
             text: "is div ever called with 0?",
-          },
+          }),
         ],
-      },
+      }),
       owner: lead,
       prior,
     })
@@ -724,23 +737,24 @@ const at = (path: string, line: number, side: "new" | "old" = "new") =>
     side,
   });
 
-const entry = (id: string, o: Partial<Entry> = {}): Entry => ({
-  anchor: at("src/math.ts", 2),
-  consequence: "Infinity",
-  createdAt: T0,
-  evidence: ["src/math.ts:2"],
-  id,
-  kind: "defect",
-  lens: "c",
-  quote: "  return a / b",
-  raisedBy: scout,
-  severity: "minor",
-  status: "open",
-  title: `title ${id}`,
-  trigger: "b=0",
-  verdicts: [],
-  ...o,
-});
+const entry = (id: string, o: Partial<Entry> = {}) =>
+  Entry.make({
+    anchor: at("src/math.ts", 2),
+    consequence: "Infinity",
+    createdAt: T0,
+    evidence: ["src/math.ts:2"],
+    id,
+    kind: "defect",
+    lens: "c",
+    quote: "  return a / b",
+    raisedBy: scout,
+    severity: "minor",
+    status: "open",
+    title: `title ${id}`,
+    trigger: "b=0",
+    verdicts: [],
+    ...o,
+  });
 
 test("a failed Compliance batch is answered once narrowed retries decide every entry on it", async () => {
   const seal = await local(repo());
@@ -770,19 +784,22 @@ test("a failed Compliance batch is answered once narrowed retries decide every e
   const confirmed = { status: "confirmed" } as const;
 
   assert.deepEqual(
-    failedDispatches(reviewed, {
-      entries: [entry("F1", confirmed), entry("F2")],
-      notes: [],
-    }),
+    failedDispatches(
+      reviewed,
+      Ledger.make({
+        entries: [entry("F1", confirmed), entry("F2")],
+        notes: [],
+      })
+    ),
     [reviewed.children[0]]
   );
   assert.equal(
     assess(
       reviewed,
-      {
+      Ledger.make({
         entries: [entry("F1", confirmed), entry("F2", confirmed)],
         notes: [],
-      },
+      }),
       {},
       "normal"
     ).status,
@@ -1553,7 +1570,11 @@ test("worktree read errors fail the capture; withheld files are never read and s
     present(paths.files.find((f) => f.path === ".env")).excluded ?? "",
     /secret/u
   );
-  const report = await run(finalize(paths, { entries: [], notes: [] }, {}));
+
+  const report = await run(
+    finalize(paths, Ledger.make({ entries: [], notes: [] }), {})
+  );
+
   assert.match(report.md, /1 changed secret-like file was withheld/u);
 
   const localSeal = await capture({ kind: "local", paths: [".env"] });
@@ -2058,7 +2079,7 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
   const F2 = entry("F2", { severity: "important" });
   const F3 = entry("F3", { raisedBy: lead });
   const F4 = entry("F4", { status: "refuted" });
-  const ledger: Ledger = { entries: [F1, F2, F3, F4], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2, F3, F4], notes: [] });
 
   const v = (
     e: Entry,
@@ -2114,14 +2135,14 @@ test("severity follows the current generation: a reopened upgraded entry still n
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         rationale: "",
         severity: "blocking",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
@@ -2137,7 +2158,7 @@ test("severity follows the current generation: a reopened upgraded entry still n
       R1,
       lead,
       { evidence: ["a:1"], verdict: "confirmed" },
-      { entries: [R1], notes: [] }
+      Ledger.make({ entries: [R1], notes: [] })
     ) ?? "",
     /needs directorate_compliance/u
   );
@@ -2147,14 +2168,14 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         rationale: "",
         severity: "minor",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
@@ -2162,14 +2183,14 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
     severity: "blocking",
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         of: "F1",
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
@@ -2178,18 +2199,18 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
   const F4 = entry("F4", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: lead,
         evidence: ["a:1"],
         of: "F3",
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
-  const ledger: Ledger = { entries: [F1, F2, F3, F4], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2, F3, F4], notes: [] });
   assert.equal(currentSeverity(F1), "minor");
   assert.deepEqual(
     unresolved(ledger).map((e) => e.id),
@@ -2259,7 +2280,7 @@ test("freshness: committing the reviewed change is not drift; a real edit is; wi
   );
 
   const refreshed = await run(
-    refreshSeal(seal, { entries: [], notes: [] }).pipe(
+    refreshSeal(seal, Ledger.make({ entries: [], notes: [] })).pipe(
       Effect.map((r) => r.seal)
     )
   );
@@ -2268,7 +2289,7 @@ test("freshness: committing the reviewed change is not drift; a real edit is; wi
   assert.match(
     assess(
       regions(refreshed, () => ({ ownerRead: true })),
-      { entries: [], notes: [] },
+      Ledger.make({ entries: [], notes: [] }),
       {},
       "normal"
     ).reasons.join(","),
@@ -2306,19 +2327,19 @@ test("worktree refresh: new generation, @@-aligned regions, removed '--' lines i
   write(dir, "q.sql", "select 2;\n-- keep me\n-- drop me\n");
   const seal = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         evidence: ["src/math.ts:4"],
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
       entry("F2", {
@@ -2326,18 +2347,18 @@ test("worktree refresh: new generation, @@-aligned regions, removed '--' lines i
         evidence: ["src/other.ts:1"],
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/guard.ts:1"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
     ],
     notes: [],
-  };
+  });
 
   write(dir, "src/guard.ts", "export const ok = false\n");
   write(dir, "q.sql", "select 2;\n-- keep me\n");
@@ -2411,24 +2432,24 @@ test("range: base moved to head is stale; refresh rebuilds the empty target diff
   g(dir, "merge", "-q", "--ff-only", "feat");
   g(dir, "checkout", "-q", "feat");
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         quote: "  return Math.floor(a / b)",
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
     ],
     notes: [],
-  };
+  });
 
   const s0 = await run(loadSeal(seal.id));
 
@@ -2533,7 +2554,7 @@ test("range refresh deltas withhold secrets", async () => {
   write(dir, ".env", "API_KEY=leakme\n");
   g(dir, "add", "-A");
   g(dir, "commit", "-qm", "b");
-  const r = await run(refreshSeal(s, { entries: [], notes: [] }));
+  const r = await run(refreshSeal(s, Ledger.make({ entries: [], notes: [] })));
   assert.ok(r.files.includes(".env"));
   assert.ok(
     !readFileSync(await run(diffFile(r.seal)), "utf-8").includes("leakme")
@@ -2570,7 +2591,7 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
     note: "out of time",
   }));
 
-  const empty = { entries: [], notes: [] };
+  const empty = Ledger.make({ entries: [], notes: [] });
   const a = assess(skipped, empty, {}, "normal");
   assert.equal(a.status, "partial");
   assert.match(
@@ -2579,21 +2600,21 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
   );
   const seal = regions(sealed, () => ({ ownerRead: true }));
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         brief: "Check `source`.\n\n- Keep the original scope.",
         severity: "important",
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "r",
             severity: "blocking",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
       entry("F2"),
@@ -2601,39 +2622,39 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
         severity: "important",
         status: "refuted",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:1"],
             rationale: "guarded by caller",
             verdict: "refuted",
-          },
+          }),
         ],
       }),
       entry("F4", {
         status: "duplicate",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: lead,
             evidence: ["src/math.ts:2"],
             of: "F3",
             rationale: "",
             verdict: "duplicate",
-          },
+          }),
         ],
       }),
       entry("F5", { severity: "important", status: "confirmed" }),
     ],
     notes: [
-      {
+      Note.make({
         at: T0,
         by: lead,
         kind: "unanswered",
         text: "security auditor timed out",
-      },
+      }),
     ],
-  };
+  });
 
   const b = assess(seal, ledger, {}, "normal");
   assert.match(b.reasons.join(","), /2 leads unverified/u);
@@ -2811,7 +2832,7 @@ test("secret filter: data files withheld, source files reviewed; a changed secre
     seal.regions.some((r) => r.file === "src/secrets.ts"),
     "source named 'secrets' is reviewed"
   );
-  const a = assess(seal, { entries: [], notes: [] }, {}, "normal");
+  const a = assess(seal, Ledger.make({ entries: [], notes: [] }), {}, "normal");
   assert.equal(a.status, "partial");
   assert.match(a.reasons.join(","), /secret-like file was withheld/u);
   // Withheld under the lockfile reason, yet its old name is a secret: counted by path, not by the reason's wording.
@@ -2829,7 +2850,12 @@ test("secret filter: data files withheld, source files reviewed; a changed secre
     ]
   );
   assert.match(
-    assess(m, { entries: [], notes: [] }, {}, "normal").reasons.join(","),
+    assess(
+      m,
+      Ledger.make({ entries: [], notes: [] }),
+      {},
+      "normal"
+    ).reasons.join(","),
     /1 changed secret-like file was withheld/u
   );
 });
@@ -2880,7 +2906,11 @@ test("mode-only change after the seal: refresh captures it as a metadata region"
   write(dir, "run.sh", "echo hello\n");
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   makeExecutable(dir, "run.sh");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(
+    refreshSeal(seal, Ledger.make({ entries: [], notes: [] }))
+  );
+
   assert.deepEqual(r.files, ["run.sh"]);
   assert.ok(r.newRegions.length >= 1, "the changed region is unread");
   assert.match(
@@ -2906,7 +2936,11 @@ test("typechange refresh: an exec-bit change unreads only the section whose head
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   assert.equal(seal.regions.filter((x) => x.file === "link").length, 2);
   makeExecutable(dir, "link");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(
+    refreshSeal(seal, Ledger.make({ entries: [], notes: [] }))
+  );
+
   assert.equal(
     r.newRegions.length,
     1,
@@ -2928,7 +2962,7 @@ test("refresh uses the captured generation to reopen dependent findings", async 
   const seal = await local(dir);
   write(dir, "src/math.ts", `${MATH}// second edit\n`);
 
-  const ledger = {
+  const ledger = Ledger.make({
     entries: [
       entry("F1", {
         anchor: at("src/caller.ts", 1),
@@ -2938,7 +2972,7 @@ test("refresh uses the captured generation to reopen dependent findings", async 
       }),
     ],
     notes: [],
-  };
+  });
 
   let attempt = 0;
 
@@ -2976,7 +3010,11 @@ test("worktree refresh rebuilds the full diff: removed lines anchor on the base;
   write(dir, "b.ts", "bee2\n");
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   write(dir, "a.ts", "const one = 1\nconst three = 3\nconst four = 4\n");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(
+    refreshSeal(seal, Ledger.make({ entries: [], notes: [] }))
+  );
+
   assert.deepEqual(
     r.newRegions.map((x) => x.file),
     ["a.ts"],
@@ -3014,7 +3052,11 @@ test("refresh: changing the first hunk keeps receipts for unchanged later hunks 
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   assert.equal(seal.regions.length, 2, "two separated hunks");
   write(dir, "a.ts", edited("const earlier = 2"));
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(
+    refreshSeal(seal, Ledger.make({ entries: [], notes: [] }))
+  );
+
   assert.deepEqual(
     r.newRegions.map((x) => x.newStart),
     [present(seal.regions[0]).newStart],
@@ -3030,19 +3072,19 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: lead,
         evidence: ["a:1"],
         rationale: "",
         severity: "minor",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
   const F2 = entry("F2", { raisedBy: lead, severity: "blocking" });
-  const ledger: Ledger = { entries: [F1, F2], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2], notes: [] });
   assert.match(
     verdictError(
       F2,
@@ -3057,20 +3099,20 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
   const F4 = entry("F4", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         of: "F3",
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
   const r = decide(
-    { entries: [F3, F4], notes: [] },
-    { ...F3, status: "refuted" }
+    Ledger.make({ entries: [F3, F4], notes: [] }),
+    Entry.make({ ...F3, status: "refuted" })
   );
 
   assert.deepEqual(r.reopened, ["F4"]);
@@ -3079,8 +3121,10 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
     ["refuted", "open"]
   );
   assert.deepEqual(
-    decide({ entries: [F3, F4], notes: [] }, { ...F3, status: "confirmed" })
-      .reopened,
+    decide(
+      Ledger.make({ entries: [F3, F4], notes: [] }),
+      Entry.make({ ...F3, status: "confirmed" })
+    ).reopened,
     [],
     "only a refutation reopens them"
   );
@@ -3337,7 +3381,7 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
   const { md } = await runPr(
     finalize(
       await runPr(loadSeal(seal.id)),
-      { entries: [], notes: [] },
+      Ledger.make({ entries: [], notes: [] }),
       { cur: Result.succeed(cur) }
     )
   );
@@ -3378,14 +3422,15 @@ test("budget lines are written for each role", async () => {
 });
 
 // ---------- re-checks ----------
-const confirmedBy = (by: Actor, evidence: string[]): Verdict => ({
-  at: T0,
-  by,
-  evidence,
-  rationale: "",
-  severity: "important",
-  verdict: "confirmed",
-});
+const confirmedBy = (by: Actor, evidence: string[]) =>
+  Verdict.make({
+    at: T0,
+    by,
+    evidence,
+    rationale: "",
+    severity: "important",
+    verdict: "confirmed",
+  });
 
 test("re-check: identical chunks carry only their own read receipts", async () => {
   const dir = repo();
@@ -3401,7 +3446,11 @@ test("re-check: identical chunks carry only their own read receipts", async () =
   });
 
   const next = await run(
-    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+    recheckSeal({
+      ledger: Ledger.make({ entries: [], notes: [] }),
+      owner: lead,
+      prior,
+    })
   );
 
   assert.deepEqual(
@@ -3420,7 +3469,7 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
   write(dir, "src/other.ts", "export const other = 2\n");
   const sealed = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         severity: "important",
@@ -3440,26 +3489,26 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
       entry("F5", {
         status: "duplicate",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             of: "F1",
             rationale: "",
             verdict: "duplicate",
-          },
+          }),
         ],
       }),
     ],
     notes: [
-      {
+      Note.make({
         at: T0,
         by: lead,
         kind: "unanswered",
         text: "is div ever called with 0?",
-      },
+      }),
     ],
-  };
+  });
 
   const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
@@ -3545,7 +3594,7 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
   write(dir, "node_modules/lib/index.js", "module.exports = 1\n");
   const sealed = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         severity: "important",
@@ -3559,7 +3608,7 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
       }),
     ],
     notes: [],
-  };
+  });
 
   const prior = Seal.make({ ...sealed, reportedAt: T0 });
   await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
@@ -3579,24 +3628,24 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
 
 test("re-check verdicts: only carried entries resolve, only Compliance decides carried verified findings, nobody resolves their own", () => {
   const verified = entry("F1", {
-    carried: { id: "F7", status: "confirmed" },
+    carried: Carried.make({ id: "F7", status: "confirmed" }),
   });
 
   const unverified = entry("F2", {
-    carried: { id: "F8", status: "unverified" },
+    carried: Carried.make({ id: "F8", status: "unverified" }),
   });
 
   const own = entry("F3", {
-    carried: { id: "F9", status: "unverified" },
+    carried: Carried.make({ id: "F9", status: "unverified" }),
     raisedBy: lead,
   });
 
   const fresh = entry("F4");
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [verified, unverified, own, fresh],
     notes: [],
-  };
+  });
 
   const v = (
     e: Entry,
@@ -3638,25 +3687,27 @@ test("re-check verdicts: only carried entries resolve, only Compliance decides c
 });
 
 test("resolving an entry reopens its duplicates", () => {
-  const F1 = entry("F1", { carried: { id: "F1", status: "confirmed" } });
+  const F1 = entry("F1", {
+    carried: Carried.make({ id: "F1", status: "confirmed" }),
+  });
 
   const F2 = entry("F2", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         of: "F1",
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
   const { ledger, reopened } = decide(
-    { entries: [F1, F2], notes: [] },
-    { ...F1, status: "resolved" }
+    Ledger.make({ entries: [F1, F2], notes: [] }),
+    Entry.make({ ...F1, status: "resolved" })
   );
 
   assert.deepEqual(reopened, ["F2"]);
@@ -3692,7 +3743,7 @@ test("re-check Directive: names the earlier seal, marks findings still present o
   });
 
   const still = entry("F1", {
-    carried: { id: "F3", status: "confirmed" },
+    carried: Carried.make({ id: "F3", status: "confirmed" }),
     severity: "important",
     status: "confirmed",
     title: "still broken",
@@ -3703,22 +3754,25 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     status: "confirmed",
     title: "introduced by the fix",
     verdicts: [
-      { ...confirmedBy(refuter, ["src/math.ts:2"]), severity: "minor" },
+      Verdict.make({
+        ...confirmedBy(refuter, ["src/math.ts:2"]),
+        severity: "minor",
+      }),
     ],
   });
 
   const fixed = entry("F3", {
-    carried: { id: "F5", status: "confirmed" },
+    carried: Carried.make({ id: "F5", status: "confirmed" }),
     status: "resolved",
     title: "was broken",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["src/math.ts:1"],
         rationale: "guarded now",
         verdict: "resolved",
-      },
+      }),
     ],
   });
 
@@ -3726,7 +3780,12 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     entries: Entry[],
     status: Parameters<typeof renderReport>[0]["status"] = "complete"
   ) =>
-    renderReport({ ledger: { entries, notes: [] }, reasons: [], seal, status });
+    renderReport({
+      ledger: Ledger.make({ entries, notes: [] }),
+      reasons: [],
+      seal,
+      status,
+    });
 
   const md = render([still, fresh, fixed]);
   assert.match(md, new RegExp(`re-check of \`${earlier}\``, "u"));
@@ -3751,7 +3810,7 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     /<Approved\/Tolerated> — Prior Findings Resolved/u
   );
   assert.match(
-    render([{ ...still, status: "open", verdicts: [] }], "partial"),
+    render([Entry.make({ ...still, status: "open", verdicts: [] })], "partial"),
     new RegExp(`verified as F3 in \`${earlier}\`, not re-checked`, "u")
   );
 });

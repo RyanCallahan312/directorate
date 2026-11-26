@@ -5,7 +5,12 @@ import { DateTime } from "effect";
 
 import { Seat } from "../src/feature/agents/agent.ts";
 import { Completed } from "../src/feature/dispatch/lifecycle.ts";
-import type { Entry } from "../src/feature/ledger/entry.ts";
+import {
+  Carried,
+  Entry,
+  Ledger,
+  Verdict,
+} from "../src/feature/ledger/entry.ts";
 import { Seal } from "../src/seal/record.ts";
 import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
 import { Target } from "../src/seal/target.ts";
@@ -63,33 +68,34 @@ const seal = Seal.make({
   target: Target.make({ kind: "local" }),
 });
 
-const entry = (id: string, overrides: Partial<Entry> = {}): Entry => ({
-  anchor: Anchor.make({
-    endLine: 12,
-    line: 12,
-    path: "src/file.ts",
-    side: "new",
-  }),
-  consequence: "The result is incorrect",
-  createdAt: at,
-  evidence: [],
-  fix: `Suggestion for ${id}`,
-  id,
-  kind: "defect",
-  lens: "correctness",
-  quote: "return value",
-  raisedBy: { agent: seal.owner, session: seal.ownerSession },
-  severity: "minor",
-  status: "confirmed",
-  title: `Title for ${id}`,
-  trigger: "The input is absent",
-  verdicts: [],
-  ...overrides,
-});
+const entry = (id: string, overrides: Partial<Entry> = {}) =>
+  Entry.make({
+    anchor: Anchor.make({
+      endLine: 12,
+      line: 12,
+      path: "src/file.ts",
+      side: "new",
+    }),
+    consequence: "The result is incorrect",
+    createdAt: at,
+    evidence: [],
+    fix: `Suggestion for ${id}`,
+    id,
+    kind: "defect",
+    lens: "correctness",
+    quote: "return value",
+    raisedBy: { agent: seal.owner, session: seal.ownerSession },
+    severity: "minor",
+    status: "confirmed",
+    title: `Title for ${id}`,
+    trigger: "The input is absent",
+    verdicts: [],
+    ...overrides,
+  });
 
 const reported = {
   fingerprint: seal.fingerprint,
-  ledger: { entries: [], notes: [] },
+  ledger: Ledger.make({ entries: [], notes: [] }),
   reviews: 1,
   seal,
 };
@@ -189,7 +195,7 @@ test("an empty recheck still decides carried findings and can complete after res
   assert.match(unfinished.text, /wait for the plugin to direct the next step/u);
 
   const resolved = entry("carried", {
-    carried: { id: "F1", status: "confirmed" },
+    carried: Carried.make({ id: "F1", status: "confirmed" }),
     status: "resolved",
   });
 
@@ -198,14 +204,17 @@ test("an empty recheck still decides carried findings and can complete after res
   assert.equal(
     decideShip(state, {
       ...observation,
-      ledger: { entries: [resolved], notes: [] },
+      ledger: Ledger.make({ entries: [resolved], notes: [] }),
     }).status,
     "complete"
   );
   assert.equal(
     decideShip(state, {
       ...observation,
-      ledger: { entries: [{ ...resolved, status: "open" }], notes: [] },
+      ledger: Ledger.make({
+        entries: [Entry.make({ ...resolved, status: "open" })],
+        notes: [],
+      }),
     }).step,
     "finish"
   );
@@ -215,7 +224,7 @@ test("changed target rechecks the exact seal before looking at its findings or o
   const observation = {
     ...reported,
     fingerprint: "updated",
-    ledger: { entries: [entry("F1")], notes: [] },
+    ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
   };
 
   const changed = decideShip(state, observation);
@@ -257,11 +266,11 @@ test("missing panel Seats require a new panel review even with drift or confirme
   for (const observation of [
     reported,
     { ...reported, fingerprint: "drifted" },
-    { ...reported, ledger: { entries: [entry("F1")], notes: [] } },
+    { ...reported, ledger: Ledger.make({ entries: [entry("F1")], notes: [] }) },
     {
       ...reported,
       fingerprint: "drifted",
-      ledger: { entries: [entry("F1")], notes: [] },
+      ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
     },
   ]) {
     const paused = decideShip(state, { ...observation, seal: panelSeal });
@@ -311,7 +320,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
 test("fix includes every severity and separates unverified leads from confirmed findings", () => {
   const observation = {
     ...reported,
-    ledger: {
+    ledger: Ledger.make({
       entries: [
         entry("minor"),
         entry("important", { severity: "important" }),
@@ -320,7 +329,7 @@ test("fix includes every severity and separates unverified leads from confirmed 
         entry("ignored", { status: "refuted" }),
       ],
       notes: [],
-    },
+    }),
     seal: Seal.make({
       ...seal,
       target: Target.make({ kind: "local", paths: ["src/"] }),
@@ -376,7 +385,7 @@ test("fix includes every severity and separates unverified leads from confirmed 
 test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
   const observation = {
     ...reported,
-    ledger: { entries: [entry("F1")], notes: [] },
+    ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
   };
 
   const commit = decideShip(state, {
@@ -409,21 +418,21 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
   const duplicate = entry("unsettled-duplicate", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at,
         by: entry("lead").raisedBy,
         evidence: [],
         of: "lead",
         rationale: "same issue",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
-  const ledger = {
+  const ledger = Ledger.make({
     entries: [entry("lead", { status: "open" }), duplicate],
     notes: [],
-  };
+  });
 
   for (const directive of [
     { reasons: ["2 regions unread"], status: "partial" },
@@ -467,7 +476,10 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
 test("only complete and fresh reports without confirmed findings or unresolved leads complete", () => {
   const decision = decideShip(state, {
     ...reported,
-    ledger: { entries: [entry("old", { status: "resolved" })], notes: [] },
+    ledger: Ledger.make({
+      entries: [entry("old", { status: "resolved" })],
+      notes: [],
+    }),
   });
 
   assert.equal(decision.status, "complete");
@@ -494,7 +506,7 @@ test("review cap only stops new reviews; round cap stops any next action", () =>
 
   const fix = {
     ...reported,
-    ledger: { entries: [entry("F1")], notes: [] },
+    ledger: Ledger.make({ entries: [entry("F1")], notes: [] }),
     reviews: 16,
   };
 

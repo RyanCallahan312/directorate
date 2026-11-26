@@ -8,7 +8,8 @@ import { scopeOf } from "../../exclusions.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
-import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
+import { Ledger } from "../../feature/ledger/entry.ts";
+import type { CarriedStatus, Entry } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
 import { emptyLedger } from "../../records/records.ts";
@@ -248,11 +249,9 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
       );
     });
 
-    const nextLedger = { ...ledger, entries };
-
     return {
       files: [...changed],
-      ledger: nextLedger,
+      ledger: ledger.withEntries(entries),
       newRegions: next.regions.filter((r) => !r.ownerRead && !r.disposition),
       reopened,
       seal: next,
@@ -386,7 +385,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
 
         // What the earlier review left behind: verified findings, and entries filed but never cleared.
         const entries = input.ledger.entries.flatMap((e): Entry[] => {
-          let status: "confirmed" | "unverified" | undefined;
+          let status: CarriedStatus | undefined;
 
           if (e.status === "confirmed") {
             status = "confirmed";
@@ -398,11 +397,10 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             return [];
           }
 
-          const carried: Entry = {
-            ...e,
-            carried: { id: e.id, status },
-            id: `F${reopened.length + kept.length + 1}`,
-          };
+          const carried = e.carriedAs(
+            `F${reopened.length + kept.length + 1}`,
+            status
+          );
 
           const why = moved(e);
           const onDisk = [...depsOf(e)].filter((d) => live.has(d));
@@ -430,7 +428,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           return [reopen(carried, reason)];
         });
 
-        const ledger: Ledger = { entries, notes: [] };
+        const ledger = Ledger.make({ entries, notes: [] });
 
         return {
           ledger,

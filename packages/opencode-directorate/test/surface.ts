@@ -41,7 +41,6 @@ const digest = (text: string) => ({
 });
 
 const decodeJson = Schema.decodeUnknownSync(Schema.Json);
-const decodeJsonObject = Schema.decodeUnknownSync(Schema.JsonObject);
 
 const SkillJson = Schema.Struct({
   autoinvoke: Schema.optionalKey(Schema.Boolean),
@@ -87,7 +86,7 @@ export const captureSurface = async () => {
   const ctx = {
     agent: {
       transform: (register: Parameters<HostContext["agent"]["transform"]>[0]) =>
-        Effect.sync(() => {
+        Effect.gen(function* agentTransform() {
           const added = new Map<string, Types.DeepMutable<Agent.Info>>();
 
           register({
@@ -105,18 +104,20 @@ export const captureSurface = async () => {
           });
 
           for (const agent of added.values()) {
-            const { system, ...fields } = decodeJsonObject(
-              structuredClone(agent)
-            );
+            const { system, ...fields } = yield* Schema.decodeUnknownEffect(
+              Schema.JsonObject
+            )(structuredClone(agent));
 
             agents.push({
               ...fields,
-              system: digest(Schema.decodeUnknownSync(Schema.String)(system)),
+              system: digest(
+                yield* Schema.decodeUnknownEffect(Schema.String)(system)
+              ),
             });
           }
 
           return registration;
-        }),
+        }).pipe(Effect.orDie),
     },
     app: { version: "2.4.1" },
     command: {
@@ -175,7 +176,7 @@ export const captureSurface = async () => {
     },
     skill: {
       transform: (register: Parameters<HostContext["skill"]["transform"]>[0]) =>
-        Effect.sync(() => {
+        Effect.gen(function* skillTransform() {
           const added = new Map<string, Skill.Info>();
 
           register({
@@ -190,7 +191,7 @@ export const captureSurface = async () => {
 
           for (const skill of added.values()) {
             const { content, ...fields } =
-              Schema.decodeUnknownSync(SkillJson)(skill);
+              yield* Schema.decodeUnknownEffect(SkillJson)(skill);
 
             skills.push({
               ...fields,
@@ -200,7 +201,7 @@ export const captureSurface = async () => {
           }
 
           return registration;
-        }),
+        }).pipe(Effect.orDie),
     },
     storage: {
       get: () => Effect.undefined,
