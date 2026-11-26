@@ -1,16 +1,23 @@
 # Vendored anti-slop
 
-- Source: https://github.com/dmmulroy/anti-slop
-- Revision: `13909c9e07590f5a85d93c62712259fe14a883f7`
-- Copied: upstream `src/` and root `LICENSE`.
-- Local change: the CLI smoke test invokes Oxlint through Bun instead of pnpm.
+- Source: https://github.com/K-Mistele/anti-slop
+- Revision: `13b020367525e8c6efe6cede8f387697b2a8d907`
+- Copied: the generic and Effect Oxlint plugins, their shared code, tests,
+  mode wrapper, Stylistic vendor files, and root `LICENSE`. Other rule packs
+  and standalone upstream tools are not vendored.
+- Local changes: the CLI smoke test invokes Oxlint through Bun instead of pnpm.
+  The mode wrapper test covers only the vendored plugins.
+- Retained from `dmmulroy/anti-slop@13909c9`: `no-conditional-empty-object-spread`,
+  `require-readable-spacing`, their tests, and the Stylistic padding rule with
+  custom statement matchers. This keeps the existing narrower spread policy and
+  allows consecutive single-line bindings to stay grouped.
 - Local addition: `effect/rules/throw-new-error.ts` replaces Oxlint's native
   `unicorn/throw-new-error` (disabled in the root config), which exempts only
   `Data.TaggedError` and so reports `Schema.TaggedError<E>()` and `Schema.Error<E>()`.
 - License: MIT. Additional third-party notices are in `vendor/`.
 
-The root Oxlint config enables the generic rules, all six Effect-specific
-rules, and the companion native `oxc/no-accumulating-spread` rule.
+The root Oxlint config keeps its existing rule selections. New upstream rules,
+including the broader `no-conditional-spread`, are available but not enabled.
 
 Run the vendored tests from the repo root with `node --test 'tools/oxlint/anti-slop/**/*.test.ts'`.
 
