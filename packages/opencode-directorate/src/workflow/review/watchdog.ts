@@ -2,7 +2,7 @@
 // across a reload and wakes a standalone review whose Liaison stalled.
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
-import { Clock, DateTime, Effect, Schedule } from "effect";
+import { Clock, DateTime, Effect, Option, Schedule } from "effect";
 
 import { Liaison } from "../../feature/agents/agent.ts";
 import { settleChildren } from "../../feature/dispatch/dispatch.ts";
@@ -12,6 +12,10 @@ import {
   foreign,
   Git,
   Host,
+  idleAt,
+  isOrphaned,
+  isSucceeded,
+  isSynthetic,
   locationKey,
   ProcessIdentity,
 } from "../../platform/platform.ts";
@@ -117,10 +121,11 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
         const act = yield* activity(host, session);
 
         const stalled =
-          act.state === "orphaned" ||
-          (act.state === "idle" &&
-            act.session.outcome === "succeeded" &&
-            act.at >= sealedAt);
+          isOrphaned(act.state) ||
+          Option.exists(
+            idleAt(act),
+            (at) => isSucceeded(act.session.outcome) && at >= sealedAt
+          );
 
         return stalled ? session.id : undefined;
       });
@@ -158,8 +163,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
           const delivered =
             prior &&
             messages.some(
-              (message) =>
-                message.type === "synthetic" && message.id === prior.id
+              (message) => isSynthetic(message) && message.id === prior.id
             );
 
           // A still-queued wake does not need a duplicate, nor does one already handled by this instance.

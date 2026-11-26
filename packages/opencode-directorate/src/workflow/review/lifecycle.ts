@@ -5,10 +5,14 @@ import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
 import { scopeOf } from "../../exclusions.ts";
-import type { Actor } from "../../feature/agents/agent.ts";
+import { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
-import { CarriedStatusSchema, Ledger } from "../../feature/ledger/entry.ts";
+import {
+  CarriedStatusSchema,
+  isUnverifiedCarry,
+  Ledger,
+} from "../../feature/ledger/entry.ts";
 import type { CarriedStatus, Entry } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
 import {
@@ -40,10 +44,10 @@ import { Target } from "../../seal/target.ts";
 import { started } from "./custody.ts";
 import {
   DEFAULT_BUDGET,
+  ModeSchema,
   PANEL_BUDGET_FACTOR,
   recheckMinutes,
 } from "./request.ts";
-import type { Mode } from "./request.ts";
 import { shipped } from "./ship-link.ts";
 import { Window } from "./window.ts";
 
@@ -84,18 +88,24 @@ const hostDirectory = Effect.serviceOption(Host).pipe(
   Effect.map((h) => Option.getOrUndefined(h)?.location.directory)
 );
 
+/** What a new review is asked to seal: the repository and target, its mode, and what the request set. */
+const SealRequestSchema = Schema.Struct({
+  budgetMinutes: Schema.optional(Schema.Finite),
+  lensesOff: Schema.optional(Schema.Array(Schema.String)),
+  mode: ModeSchema,
+  owner: Schema.optionalKey(Actor),
+  panel: Schema.optional(Schema.Array(Schema.String)),
+  question: Schema.optional(Schema.String),
+  repo: Schema.String,
+  target: Schema.toEncoded(Target),
+});
+
+/** `beforeCapture` runs before each capture attempt. */
 export const createSeal = Effect.fn("Directorate.createSeal")(
-  function* createSeal(input: {
-    repo: string;
-    mode: Mode;
-    target: typeof Target.Encoded;
-    owner?: Actor;
-    budgetMinutes?: number | undefined;
-    question?: string | undefined;
-    panel?: readonly string[] | undefined;
-    lensesOff?: readonly string[] | undefined;
-    beforeCapture?: () => Effect.Effect<void>;
-  }) {
+  function* createSeal(
+    input: typeof SealRequestSchema.Type,
+    beforeCapture?: () => Effect.Effect<void>
+  ) {
     const top = yield* (yield* Git).root(input.repo);
     const host = yield* hostDirectory;
     const { pid } = yield* ProcessIdentity;
@@ -135,7 +145,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
             started(input.owner, host, pid)
           ),
           ends.scope,
-          input.beforeCapture
+          beforeCapture
         );
 
         return { ledger: emptyLedger, out: seal, seal };
@@ -244,7 +254,7 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     const entries = ledger.entries.map((e) => {
       const why = moved(e);
 
-      if (!why || (e.status === "refuted" && !why.hit)) {
+      if (!why || (e.isRefuted && !why.hit)) {
         return { entry: e, reopened: false };
       }
 
@@ -279,6 +289,15 @@ export const recheckable = (prior: Seal) =>
         })
       );
 
+/** What a re-check is asked to start from: the reported seal and its ledger, and what the request set. */
+const RecheckRequestSchema = Schema.Struct({
+  budgetMinutes: Schema.optional(Schema.Finite),
+  ledger: Ledger,
+  owner: Schema.optionalKey(Actor),
+  prior: Seal,
+  question: Schema.optional(Schema.String),
+});
+
 /**
  * A new review of a reported seal's target as it stands now, while the reported Directive is left as it was. The base is
  * kept, so committing fixes is not a new change. Regions read in the earlier review whose content did not change keep
@@ -287,14 +306,10 @@ export const recheckable = (prior: Seal) =>
  * re-check runs without a panel: it is a targeted pass, not a second independent review.
  */
 export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
-  function* recheckSeal(input: {
-    prior: Seal;
-    ledger: Ledger;
-    owner?: Actor;
-    budgetMinutes?: number | undefined;
-    question?: string | undefined;
-    beforeCapture?: () => Effect.Effect<void>;
-  }) {
+  function* recheckSeal(
+    input: typeof RecheckRequestSchema.Type,
+    beforeCapture?: () => Effect.Effect<void>
+  ) {
     const { prior } = input;
     yield* recheckable(prior);
     const host = yield* hostDirectory;
@@ -312,30 +327,29 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
       Effect.gen(function* attempt() {
         // A worktree seal keeps its base (committed fixes are not a new change) but records the HEAD it now sits on;
         // only commit pairs re-resolve both ends.
-        const cur =
-          prior.postImage === "worktree"
-            ? {
-                baseSha: prior.baseSha,
-                baseTip: undefined,
-                headSha: yield* (yield* Git).head(prior.repo),
-              }
-            : yield* currentFingerprint(prior).pipe(
-                Effect.mapError(
-                  (e) =>
+        const cur = prior.pinsCommit
+          ? yield* currentFingerprint(prior).pipe(
+              Effect.mapError(
+                (e) =>
+                  new TargetUnresolved({
+                    message: `Cannot re-resolve ${prior.id}'s target: ${e.message}`,
+                  })
+              ),
+              Effect.filterOrElse(
+                (c) => !c.unfetched,
+                (c) =>
+                  Effect.fail(
                     new TargetUnresolved({
-                      message: `Cannot re-resolve ${prior.id}'s target: ${e.message}`,
+                      message: `${c.unfetched}. Ask the user to fetch it, then re-check again.`,
                     })
-                ),
-                Effect.filterOrElse(
-                  (c) => !c.unfetched,
-                  (c) =>
-                    Effect.fail(
-                      new TargetUnresolved({
-                        message: `${c.unfetched}. Ask the user to fetch it, then re-check again.`,
-                      })
-                    )
-                )
-              );
+                  )
+              )
+            )
+          : {
+              baseSha: prior.baseSha,
+              baseTip: undefined,
+              headSha: yield* (yield* Git).head(prior.repo),
+            };
 
         const captured = yield* capture(
           Seal.open(
@@ -357,7 +371,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             started(input.owner, host, pid)
           ),
           scopeOf(prior.target.paths),
-          input.beforeCapture
+          beforeCapture
         );
 
         const changed = new Set(yield* changedBetween(prior, captured));
@@ -373,7 +387,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           yield* Effect.filter(
             new Set(
               input.ledger.entries
-                .filter((e) => e.status === "confirmed")
+                .filter((e) => e.isConfirmed)
                 .flatMap((e) => [...depsOf(e)].filter(inDependencyDir))
             ),
             (d) =>
@@ -387,7 +401,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
 
         // What the earlier review left behind: verified findings, and entries filed but never cleared.
         const carriedStatus = (e: Entry) => {
-          if (e.status === "confirmed") {
+          if (e.isConfirmed) {
             return CarriedStatusSchema.make("confirmed");
           }
 
@@ -401,7 +415,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           const why = moved(e);
           const onDisk = [...depsOf(e)].filter((d) => live.has(d));
 
-          if (status === "unverified") {
+          if (isUnverifiedCarry(status)) {
             return `unverified in ${prior.id}; decide it on the current code`;
           }
 
@@ -450,7 +464,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             unanswered: [
               ...new Set([
                 ...input.ledger.notes
-                  .filter((n) => n.kind === "unanswered")
+                  .filter((n) => n.isUnanswered)
                   .map((n) => n.text),
                 ...unansweredQuestions(prior, input.ledger),
               ]),

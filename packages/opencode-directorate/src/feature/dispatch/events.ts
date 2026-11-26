@@ -1,17 +1,8 @@
 // Dispatch's host-event side: the one ordered session-event consumer, and what OpenCode's session records say about the
 // runs a review dispatched.
 import type { Plugin } from "@opencode/plugin/effect";
-import type { SessionInbox } from "@opencode/schema/session-inbox";
 import type { SessionMessage } from "@opencode/schema/session-message";
-import {
-  DateTime,
-  Effect,
-  Match,
-  Option,
-  Schedule,
-  Schema,
-  Stream,
-} from "effect";
+import { DateTime, Effect, Match, Option, Schedule, Stream } from "effect";
 
 import { ignore, recover } from "../../platform/error.ts";
 import {
@@ -21,7 +12,10 @@ import {
   idleAt,
   isOrphaned,
   isRunning,
+  isShutdown,
   isSucceeded,
+  isUserInput,
+  isUserStop,
   turns,
 } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
@@ -45,24 +39,6 @@ import {
 } from "./lifecycle.ts";
 import type { EndMarker } from "./lifecycle.ts";
 
-/** The message, if the user (or an inbox delivery) sent it. */
-const userMessage = Match.type<SessionMessage.Info>().pipe(
-  Match.when({ type: "user" }, (message) => message),
-  Match.option
-);
-
-/** The text of an inbox item the user (or a follow-up) sent. */
-const userText = Match.type<SessionInbox.Item>().pipe(
-  Match.when({ type: "user" }, (item) => item.payload.text),
-  Match.option
-);
-
-/** OpenCode restores executions it suspended at shutdown. */
-const isShutdown = Schema.is(Schema.Literal("shutdown"));
-
-/** The user stopped the execution. */
-const isUserStop = Schema.is(Schema.Literal("user"));
-
 /** A promoted follow-up belongs to the first terminal marker after that exact input. */
 const recoverFollowUps = (
   seal: Seal,
@@ -76,13 +52,13 @@ const recoverFollowUps = (
 
     const { inbox } = child.followUp;
 
-    const input = messages.findIndex((message) =>
-      Option.exists(userMessage(message), (user) =>
-        inbox
-          ? user.id === inbox
-          : user.text === followUpPrompt(child) &&
-            createdAt(user) >= DateTime.toEpochMillis(child.startedAt)
-      )
+    const input = messages.findIndex(
+      (message) =>
+        isUserInput(message) &&
+        (inbox
+          ? message.id === inbox
+          : message.text === followUpPrompt(child) &&
+            createdAt(message) >= DateTime.toEpochMillis(child.startedAt))
     );
 
     const delivered = messages[input];
@@ -335,17 +311,18 @@ export const consumeSessionEvents = Effect.fnUntraced(
           );
         },
         "session.inbox.enqueued": ({ data: { inboxID, item, sessionID } }) => {
-          const followUp = Option.filter(userText(item), (text) =>
-            text.includes("\n\n[Directorate follow-up: ")
-          );
+          if (
+            !isUserInput(item) ||
+            !item.payload.text.includes("\n\n[Directorate follow-up: ")
+          ) {
+            return Effect.void;
+          }
 
-          return Option.match(followUp, {
-            onNone: () => Effect.void,
-            onSome: (text) =>
-              childEvent(sessionID, (s) =>
-                enqueued(s, sessionID, inboxID, text)
-              ),
-          });
+          const { text } = item.payload;
+
+          return childEvent(sessionID, (s) =>
+            enqueued(s, sessionID, inboxID, text)
+          );
         },
         "session.moved": () => Effect.void,
       })

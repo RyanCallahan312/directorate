@@ -79,6 +79,31 @@ const isCompletedSeat = Schema.is(SeatStatusSchema.pick(["completed"]));
 
 const isCompleteDirective = Schema.is(DirectiveStatusSchema.pick(["complete"]));
 
+/**
+ * The steps the policy takes that name no seal. The others name the seal they act on: `resume:<seal>`,
+ * `fix:<seal>`, and `recheck:<seal>:<fingerprint>`. A ship stores its step as any string.
+ */
+const PlainStepSchema = Schema.Literals(["review", "finish"]);
+
+/** The initial review, before any seal. */
+export const isReviewStep = Schema.is(PlainStepSchema.pick(["review"]));
+
+/** The re-check that finishes an incomplete review. */
+export const isFinishStep = Schema.is(PlainStepSchema.pick(["finish"]));
+
+const resumeStep = (seal: string) => `resume:${seal}`;
+
+const fixStep = (seal: string) => `fix:${seal}`;
+
+const recheckPrefix = (seal: string) => `recheck:${seal}:`;
+
+const recheckStep = (seal: string, fingerprint: string) =>
+  `${recheckPrefix(seal)}${fingerprint}`;
+
+/** Whether `step` re-checks seal `seal`, at any fingerprint. */
+export const rechecks = (step: string | undefined, seal: string) =>
+  step?.startsWith(recheckPrefix(seal)) ?? false;
+
 const GUARDRAILS =
   "Do not commit, push, approve, or merge. If blocked, tell the user what decision or action is needed and stop. End your turn after this one step and wait for the plugin to direct the next step.";
 
@@ -168,7 +193,7 @@ const unfinishedReason = (directive: string, count: number) =>
 const reviewedContent = (seal: Seal, ledger: Ledger) =>
   seal.regions.length > 0 ||
   (Boolean(seal.recheckOf) &&
-    ledger.entries.some((e) => e.carried && e.status === "resolved"));
+    ledger.entries.some((e) => e.carried && e.isResolved));
 
 const reportedMissingSeats = (seal: Seal | undefined) =>
   seal?.reportedAt && seal.regions.length
@@ -264,7 +289,7 @@ export const decideShip = (
 
   if (!seal.reportedAt) {
     return next(
-      `resume:${seal.id}`,
+      resumeStep(seal.id),
       "the Liaison has not reported its Directive.",
       resumeText(seal)
     );
@@ -277,7 +302,7 @@ export const decideShip = (
     );
   }
 
-  const confirmed = ledger.entries.filter((e) => e.status === "confirmed");
+  const confirmed = ledger.entries.filter((e) => e.isConfirmed);
   const leads = unresolved(ledger);
   const directive = directiveDescription(seal);
 
@@ -295,7 +320,7 @@ export const decideShip = (
 
   if (fingerprint !== seal.fingerprint) {
     return next(
-      `recheck:${seal.id}:${fingerprint}`,
+      recheckStep(seal.id, fingerprint),
       "the target changed after the seal.",
       recheckText(),
       true
@@ -303,7 +328,7 @@ export const decideShip = (
   }
 
   if (confirmed.length) {
-    if (seal.target.kind === "commit") {
+    if (seal.target.isCommit) {
       return pause(
         "confirmed findings remain on a fixed commit; its snapshot cannot show fixes.",
         "Start a new ship on a working tree or a moving ref that can include fixes."
@@ -311,7 +336,7 @@ export const decideShip = (
     }
 
     return next(
-      `fix:${seal.id}`,
+      fixStep(seal.id),
       `${confirmed.length} confirmed ${confirmed.length === 1 ? "finding remains" : "findings remain"}.`,
       fixText(seal, confirmed, leads, state.request)
     );

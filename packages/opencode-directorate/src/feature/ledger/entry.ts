@@ -106,6 +106,11 @@ export type CarriedStatus = typeof CarriedStatusSchema.Type;
 
 const isVerifiedCarry = Schema.is(CarriedStatusSchema.pick(["confirmed"]));
 
+/** Filed in the earlier review and never cleared there. */
+export const isUnverifiedCarry = Schema.is(
+  CarriedStatusSchema.pick(["unverified"])
+);
+
 /** A decision on an entry: who made it, on what evidence, and (confirming) at what severity or (duplicate) of what. */
 export class Verdict extends Schema.Class<
   Verdict,

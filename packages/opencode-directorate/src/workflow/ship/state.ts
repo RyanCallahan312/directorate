@@ -224,11 +224,15 @@ export const delivered = (state: ShipState, id: string, at: number) => {
   return isWaiting(state) ? Active.make(fields) : rebuilt(state, fields);
 };
 
+/** What drives a ship's run: the plugin instance's boot, its OpenCode location, and the server process. */
+const RunSchema = Schema.Struct({
+  boot: Schema.String,
+  location: Schema.String,
+  pid: Schema.Finite,
+});
+
 /** A paused ship resumed by this process: a new run, with no step taken and its review allowance counted from now. */
-export const resumed = (
-  ship: Paused,
-  run: { boot: string; location: string; pid: number }
-) => {
+export const resumed = (ship: Paused, run: typeof RunSchema.Type) => {
   const { recovery: _recovery, ...rest } = fieldsOf(ship);
 
   return Active.make({

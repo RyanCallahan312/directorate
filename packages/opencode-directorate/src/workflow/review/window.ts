@@ -43,9 +43,15 @@ export const PHASE_STAGES = Schema.Record(PhaseSchema, Schema.String).make({
   normal: "evacuation",
 });
 
+/** A window's ends in memory: when it opened and when it locks. */
+const WindowEndsSchema = Schema.Struct({
+  createdAt: Schema.DateTimeUtc,
+  deadline: Schema.DateTimeUtc,
+});
+
 /** A window's deadline never precedes its start. Spreading StoredWindow's fields drops it, so the seal root re-applies it. */
 export const windowCheck = Schema.makeFilter(
-  (w: { readonly createdAt: DateTime.Utc; readonly deadline: DateTime.Utc }) =>
+  (w: typeof WindowEndsSchema.Type) =>
     !DateTime.isLessThan(w.deadline, w.createdAt) ||
     "deadline must not precede createdAt"
 );
@@ -64,8 +70,7 @@ export class Window extends Schema.Class<
 >("directorate/Window")(
   Schema.Struct({
     budgetMinutes: Schema.Finite,
-    createdAt: Schema.DateTimeUtc,
-    deadline: Schema.DateTimeUtc,
+    ...WindowEndsSchema.fields,
   }).check(windowCheck)
 ) {
   /** A window of `minutes` opening at `createdAt`. */

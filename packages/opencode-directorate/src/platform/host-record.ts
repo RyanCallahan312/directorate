@@ -81,6 +81,28 @@ export const idleAt = Match.type<Activity>().pipe(
 /** The host's outcome of a session or turn that succeeded. */
 export const isSucceeded = Schema.is(Schema.Literal("succeeded"));
 
+/** The host's outcome of a turn that failed. */
+export const isFailed = Schema.is(Schema.Literal("failed"));
+
+/** The host's outcome of a session or turn that was interrupted. */
+export const isInterrupted = Schema.is(Schema.Literal("interrupted"));
+
+/** An interruption at shutdown: OpenCode restores the executions it suspended then. */
+export const isShutdown = Schema.is(Schema.Literal("shutdown"));
+
+/** An interruption by the user, who stopped the execution. */
+export const isUserStop = Schema.is(Schema.Literal("user"));
+
+/** A message or inbox item the user (or an inbox delivery) sent. */
+export const isUserInput = Schema.is(
+  Schema.Struct({ type: Schema.Literal("user") })
+);
+
+/** A message or inbox item the host or a plugin added on its own: a completion notice, a marker, a wake. */
+export const isSynthetic = Schema.is(
+  Schema.Struct({ type: Schema.Literal("synthetic") })
+);
+
 /**
  * Whether another live server process last drove this record. Servers can share one database, and each sees only its
  * own executions, so recovery leaves such a record to its process.

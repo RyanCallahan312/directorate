@@ -60,6 +60,13 @@ const BareRequestSchema = Schema.Literals(["ask", "defaults"]);
 
 type BareRequest = typeof BareRequestSchema.Type;
 
+/** How the session is told to start a bare request. */
+const BARE_START = Schema.Record(BareRequestSchema, Schema.String).make({
+  ask: "Start a Directorate code review. Before dispatching, use the question tool to offer the mode (configured default, default, code-quality, or full) and panel preference (configured default, single model, or Directorate Seats). If the user cancels, do not start a review.",
+  defaults:
+    "Start a Directorate code review with the configured defaults. Do not ask about mode or panel.",
+});
+
 const SCOPE_FLAG = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u;
 
 /** A review request the command or tool cannot act on, with how to ask instead. */
@@ -104,9 +111,7 @@ const startLine = (
     return `Start a Directorate code review${hasBody ? " using the <user_request> above" : ""}. Interpret it as natural language and carry through the requested target, scope, mode, model preferences, time limit, and any focus or constraints. Use configured defaults for details the user didn't specify. Ask only if a missing or conflicting detail prevents you from honoring the request. Do not silently drop a constraint or widen the target.`;
   }
 
-  return bare === "ask"
-    ? "Start a Directorate code review. Before dispatching, use the question tool to offer the mode (configured default, default, code-quality, or full) and panel preference (configured default, single model, or Directorate Seats). If the user cancels, do not start a review."
-    : "Start a Directorate code review with the configured defaults. Do not ask about mode or panel.";
+  return BARE_START[bare];
 };
 
 /** What the session is told to start the review; `bare` is what a request with no words and no scope does. */

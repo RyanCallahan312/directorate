@@ -987,20 +987,17 @@ test("seal race: an edit during capture forces a retry, so the diff and snapshot
   let edits = 0;
 
   const seal = await run(
-    createSeal({
-      beforeCapture: () =>
+    createSeal(
+      { mode: "default", owner: lead, repo: dir, target: { kind: "local" } },
+      () =>
         Effect.sync(() => {
           edits += 1;
 
           if (edits === 1) {
             write(dir, "src/math.ts", `${MATH}// edit two\n`);
           }
-        }),
-      mode: "default",
-      owner: lead,
-      repo: dir,
-      target: { kind: "local" },
-    })
+        })
+    )
   );
 
   assert.match(
@@ -1010,16 +1007,13 @@ test("seal race: an edit during capture forces a retry, so the diff and snapshot
   assert.match((await run(sealedFile(seal, "src/math.ts"))) ?? "", /edit two/u);
   await assert.rejects(
     run(
-      createSeal({
-        beforeCapture: () =>
+      createSeal(
+        { mode: "default", owner: lead, repo: dir, target: { kind: "local" } },
+        () =>
           Effect.sync(() =>
             write(dir, "src/math.ts", `${MATH}// ${(edits += 1)}\n`)
-          ),
-        mode: "default",
-        owner: lead,
-        repo: dir,
-        target: { kind: "local" },
-      })
+          )
+      )
     ),
     /kept changing/u
   );

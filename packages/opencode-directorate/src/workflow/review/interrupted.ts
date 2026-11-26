@@ -2,7 +2,7 @@
 import type { SessionMessage } from "@opencode/schema/session-message";
 import { DateTime } from "effect";
 
-import { createdAt, turns } from "../../platform/platform.ts";
+import { createdAt, isInterrupted, turns } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 
 /** On resume, ignore old interruptions, not later ones. Older manually resumed seals lack the resume time. */
@@ -18,7 +18,7 @@ export const interruptedReview = (
 
   return turns(messages).some(
     (turn) =>
-      turn.outcome === "interrupted" &&
+      isInterrupted(turn.outcome) &&
       (seal.resumedAt ? createdAt(turn) > since : createdAt(turn) >= since)
   );
 };

@@ -31,6 +31,8 @@ export type PostImage = typeof PostImageSchema.Type;
 /** A post-image pinned at a commit, rather than the working tree snapshotted at sealing. */
 export const isCommitImage = Schema.is(PostImageSchema.pick(["commit"]));
 
+const isCommitKind = Schema.is(TargetKindSchema.pick(["commit"]));
+
 const isPathsKind = Schema.is(TargetKindSchema.pick(["paths"]));
 
 const isPrKind = Schema.is(TargetKindSchema.pick(["pr"]));
@@ -52,6 +54,11 @@ export class Target extends Schema.Class<
   /** Whole files, every line of them, rather than a diff. */
   get wholeFiles() {
     return isPathsKind(this.kind);
+  }
+
+  /** One fixed commit, whose snapshot never moves. */
+  get isCommit() {
+    return isCommitKind(this.kind);
   }
 
   /** A pull request, whose ends GitHub names. */
