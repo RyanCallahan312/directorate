@@ -25,14 +25,24 @@ import {
 import type { Settings, SettingsScope } from "./file.ts";
 import type { SettingsView, WriteInput, WriteResult } from "./rpc.ts";
 
-/** One choice in a select. A host without disabled options leaves disabled ones out. */
-export interface DialogChoice<V> {
-  readonly title: string;
+/** How a choice in a select reads. A host without disabled options leaves disabled ones out. */
+const ChoiceLabelSchema = Schema.Struct({
+  description: Schema.optionalKey(Schema.String),
+  disabled: Schema.optionalKey(Schema.Boolean),
+  group: Schema.optionalKey(Schema.String),
+  title: Schema.String,
+});
+
+/** One choice in a select: how it reads, and the value it stands for. */
+export type DialogChoice<V> = typeof ChoiceLabelSchema.Type & {
   readonly value: V;
-  readonly description?: string;
-  readonly group?: string;
-  readonly disabled?: boolean;
-}
+};
+
+/** A select's title and the hint it shows before a choice. */
+const SelectDialogSchema = Schema.Struct({
+  placeholder: Schema.optionalKey(Schema.String),
+  title: Schema.String,
+});
 
 /** A text prompt: its title, its help, and the text it starts with. */
 const PromptDialogSchema = Schema.Struct({
@@ -70,12 +80,12 @@ const ToastSchema = Schema.Struct({
 
 /** The dialogs the walk needs; each resolves undefined (false for confirm) when the user backs out. */
 export interface Dialogs {
-  select: <V>(options: {
-    readonly title: string;
-    readonly placeholder?: string;
-    readonly current?: V | undefined;
-    readonly options: readonly DialogChoice<V>[];
-  }) => Effect.Effect<V | undefined, SettingsError>;
+  select: <V>(
+    options: typeof SelectDialogSchema.Type & {
+      readonly current?: V | undefined;
+      readonly options: readonly DialogChoice<V>[];
+    }
+  ) => Effect.Effect<V | undefined, SettingsError>;
   prompt: (
     options: typeof PromptDialogSchema.Type
   ) => Effect.Effect<string | undefined, SettingsError>;

@@ -45,6 +45,8 @@ class CaptureDrift extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("CaptureDrift", {}) {}
 
+const isCaptureDrift = Schema.is(CaptureDrift);
+
 /** The target could not be captured consistently. */
 class CaptureFailed extends Schema.TaggedError<
   CaptureFailed,
@@ -58,7 +60,7 @@ export const settled =
     self.pipe(
       Effect.retry({
         times: 2,
-        while: Schema.is(CaptureDrift),
+        while: isCaptureDrift,
       }),
       Effect.catchTag("CaptureDrift", () =>
         Effect.fail(new CaptureFailed({ message }))

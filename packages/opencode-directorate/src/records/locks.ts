@@ -23,6 +23,8 @@ class LockBusy extends Schema.TaggedError<
   }
 }
 
+const isLockBusy = Schema.is(LockBusy);
+
 /** The lock for `id` could not be placed. */
 class LockFailed extends Schema.TaggedError<
   LockFailed,
@@ -182,7 +184,7 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
           Effect.retry({
             schedule: Schedule.spaced("50 millis"),
             times: 800,
-            while: Schema.is(LockBusy),
+            while: isLockBusy,
           })
         ),
         body

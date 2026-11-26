@@ -39,6 +39,8 @@ export const ReviewScopeSchema = Schema.Literals([
 
 export type ReviewScope = typeof ReviewScopeSchema.Type;
 
+const isReviewScope = Schema.is(ReviewScopeSchema);
+
 /** The scope of a review when neither the request nor directorate.json names one. */
 export const DEFAULT_REVIEW_SCOPE = ReviewScopeSchema.make("branch");
 
@@ -94,7 +96,7 @@ export const parseRequest = (text: string) => {
 
   const scope = flag.groups?.value;
 
-  return Schema.is(ReviewScopeSchema)(scope)
+  return isReviewScope(scope)
     ? Result.succeed(
         ReviewRequest.make({ body: text.slice(flag[0].length).trim(), scope })
       )

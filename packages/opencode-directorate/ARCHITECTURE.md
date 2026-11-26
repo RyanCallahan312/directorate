@@ -126,7 +126,7 @@ Rules:
 
 - **Imports point down.** An entry or internal module may import its own slice, any primitive, and the entry of any slice in a lower band. A primitive imports only primitives, in any slice.
 - **Features are siblings.** A feature never imports another feature's entry. Features share through primitives and the seal aggregate; only workflows compose features. `workflow/ship` is one band above `workflow/review` and imports its entry.
-- **No value-import cycles.** `seal/record.ts` imports the field-group modules of its owners (`workflow/review/window.ts`, `feature/dispatch/lifecycle.ts`, …), so those modules take `Seal` by `import type` only. Type-only cycles are fine because they are erased. The modules that need `Seal` as a value (`records/repository.ts` for `SealJson`, `workflow/review/lifecycle.ts`, `workflow/ship/step.ts`) import it and are imported by nothing `seal/record.ts` needs. A class used before its module initializes breaks plugin load.
+- **No value-import cycles.** `seal/record.ts` imports the field-group modules of its owners (`workflow/review/window.ts`, `feature/dispatch/lifecycle.ts`, …), so those modules take `Seal` by `import type` only. Type-only cycles are fine because they are erased. The modules that need `Seal` as a value (`records/repository.ts` for `SealJson`, `seal/sessions.ts` for the door's revision schemas, `feature/report/filing.ts`, `feature/report/render.ts`, `workflow/review/lifecycle.ts`, `workflow/ship/step.ts`) import it and are imported by nothing `seal/record.ts` needs. A class used before its module initializes breaks plugin load.
 - **Package entries stay at `src/`.** `index.ts`, `tui.ts`, `gui.ts`, and `rpc.ts` are the only root modules besides `exclusions.ts`. `index.ts` imports only slice entries and primitives. `tui.ts` and `gui.ts` import only primitives and `rpc.ts`. `rpc.ts` imports only primitives.
 
 ### Ports point up
@@ -285,9 +285,10 @@ A review is one aggregate: the `Seal` root plus its `Ledger`, guarded by one `mu
 mutate(sealId, writer, transition) =>
   records.withLock(sealId, () => {
     const seal = load(sealId); // a ToolCall's session is bound to the seal on the way, if it participates
-    const admitted = admit(seal, writer); // "write" | "read" (run, save nothing) | "skip" (do not run)
+    const admitted = admit(seal, writer); // AdmissionSchema: write, read (run, save nothing), or skip (do not run)
+    if (skips(admitted)) return;
     const revision = transition({ seal, ledger, checkpoint }); // ledger loads only if the transition asks
-    if (admitted === "write") persist(revision); // only the parts the revision returns
+    if (writes(admitted)) persist(revision); // only the parts the revision returns
     return revision.out;
   });
 read(sealId, toolCall, body); // under the lock, the same guards as a ToolCall; writes nothing
@@ -306,13 +307,13 @@ openReview(id, attempt); // a review that does not exist yet: its first seal and
 | `ShipLink` | `shipStamp` stamping the ship's id | written | written |
 | `Takeover` | `directorate_seal resume` by an `Actor` | written | run and nothing saved; the transition refuses it itself |
 
-A `ToolCall` carries three options, each with a default:
+A `ToolCall` carries three options, each with a default. The door reads them through `ToolCall`'s getters `ownerOnly`, `catalogChecked`, and `showsReported`:
 
 - `callers`: `"participants"` (default) or `"owner"`. An owner-only tool needs the session that sealed (`NotOwner`).
 - `lockdown`: `"catalog"` (default) or `"exempt"`. Once the budget locks, a catalog-checked call runs only if the `ToolCatalog` says the caller's agent keeps the tool (`Lockdown`). The door checks this under the seal's lock, because a model step that began before the deadline still offers tools the prefix strips at lockdown.
 - `reported`: `"refused"` (default) or `"shown"`.
 
-**Transitions.** A transition receives the review: the seal as loaded, its ledger (an Effect, loaded only if asked for), and `checkpoint`. It returns a `Revision`: `out` plus an optional `seal` and `ledger`, or a `seal` plus a `report` when the Directive is filed. Only the parts returned are saved: the report with its reported seal, the seal and ledger together, or either alone. A transition that returns neither writes nothing. `checkpoint(next)` saves `next` before the transition goes on to cause an outside effect; the recovery wake uses it to save its intent before sending the wake. The door still saves the final result.
+**Transitions.** A transition receives the review: the seal as loaded, its ledger (an Effect, loaded only if asked for), and `checkpoint`. It returns a `Revision`: `out` plus what it changed, either `RevisedSchema` (an optional `seal` and `ledger`) or, when the Directive is filed, `FiledSchema` (a `seal` plus a `report`). Only the parts returned are saved: the report with its reported seal, the seal and ledger together, or either alone. A transition that returns neither writes nothing. `checkpoint(next)` saves `next` before the transition goes on to cause an outside effect; the recovery wake uses it to save its intent before sending the wake. The door still saves the final result.
 
 **Who reaches the seal without the door.** `directorate_read`, `directorate_ls`, `directorate_grep`, `directorate_history`, and `directorate_ledger_list` resolve the seal with `Sessions.sealFor`, without the lock or the door's guards, because they write nothing. At lockdown they are withheld from callers by tool stripping in the session prefix, not refused by the door.
 
@@ -341,7 +342,8 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
     // Spreading StoredWindow's fields drops its check; the root re-applies it.
   ).check(windowCheck)
 ) {
-  static open(pins, window, custody) {} // a new review at generation 0, before capture
+  static open(pins, window, custody) {} // a new review at generation 0, before capture: Containment's Pins, nothing Captured
+  get pinsCommit() {} // its post-image is a commit, not the working tree
   get window() {} // the Window value object
   withContainment(containment) {} // seal: capture, re-pin, coverage marks
   withWindow(window) {} // workflow/review
@@ -485,7 +487,7 @@ What is **not** mechanically checked:
 ## Where new code goes
 
 - **A new tool:** in the slice that owns what it changes, registered from that slice's tool registration and added to the tool list in `index.ts` (its position is part of the prompt prefix). Declare its `lockdown` agents. Write through `Sessions.mutate` with a `ToolCall`, and update `test/stored/surface.json`.
-- **A new stored field on the seal:** in the owning field group (`Containment` in `seal/record.ts`, `StoredWindow`, `Custody`, `Protocol`, or `StoredDispatch`), optional or with `since` so older seals decode. Change it only through that owner's transitions and its `with<Group>` method, and add it to `test/stored/seal.json` (the first current fixture must set every encoded field).
+- **A new stored field on the seal:** in the owning field group (`Containment` in `seal/record.ts`, under `Pins` if the review sets it at sealing or `Captured` if capture writes it; `StoredWindow`, `Custody`, `Protocol`, or `StoredDispatch`), optional or with `since` so older seals decode. Change it only through that owner's transitions and its `with<Group>` method, and add it to `test/stored/seal.json` (the first current fixture must set every encoded field).
 - **A new host hook:** in the slice that owns the behavior, registered from its entry. If it needs a higher slice or a sibling, take a registration parameter and wire it in `index.ts`. Work on the session prefix goes into `sessionPrefix`'s order, not a new prefix hook. Update `test/stored/surface.json`.
 - **A new setting:** in `SettingsSchema` (`feature/settings/file.ts`, a GUI-safe primitive). The owning slice publishes its default; settings only resolves precedence. Add fixtures under `test/stored/`.
 - **A new agent rule:** on `Agent` in `feature/agents/agent.ts`, as data (`orders`, `dispatches`, `launchableIn`) or a method, with permission checks in `feature/agents/access.ts`. Never keep a name-keyed table beside it.

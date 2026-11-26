@@ -21,15 +21,11 @@ import { isCommitImage, PostImageSchema, Target } from "./target.ts";
 const list = Schema.Array;
 const opt = Schema.optional;
 
-/** The Containment field group of seal.json. */
-export const Containment = Schema.Struct({
+/** What a review pins at sealing: its identity, its target and the commits that fix it, and what was asked. */
+const Pins = Schema.Struct({
   baseSha: Schema.String,
   baseTip: opt(Schema.String),
-  deleted: since(list(Schema.String), []),
   description: Schema.String,
-  files: since(list(FileEntry), []),
-  fingerprint: Schema.String,
-  gen: since(Count, 0),
   headSha: Schema.String,
   id: Schema.String,
   /** Lenses the settings turned off for this review. */
@@ -41,15 +37,28 @@ export const Containment = Schema.Struct({
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
   recheckOf: opt(Schema.String),
-  refreshes: since(Count, 0),
-  regions: since(list(Region), []),
   repo: Schema.String,
-  sigs: opt(Schema.Record(Schema.String, Schema.String)),
   target: Target,
 });
 
 /** What capture writes; a new review starts with none of it. */
-type Captured = "deleted" | "files" | "fingerprint" | "regions" | "sigs";
+const Captured = Schema.Struct({
+  deleted: since(list(Schema.String), []),
+  files: since(list(FileEntry), []),
+  fingerprint: Schema.String,
+  regions: since(list(Region), []),
+  sigs: opt(Schema.Record(Schema.String, Schema.String)),
+});
+
+/** The Containment field group of seal.json: the pins, what capture wrote, and how often it was re-contained. */
+export const Containment = Schema.Struct(
+  sortedFields({
+    ...Pins.fields,
+    ...Captured.fields,
+    gen: since(Count, 0),
+    refreshes: since(Count, 0),
+  })
+);
 
 export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
   "directorate/Seal"
@@ -73,7 +82,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
    * gate has pushed back.
    */
   static open(
-    pins: Omit<typeof Containment.Type, Captured | "gen" | "refreshes">,
+    pins: typeof Pins.Type,
     window: Window,
     custody: typeof Custody.Type
   ) {

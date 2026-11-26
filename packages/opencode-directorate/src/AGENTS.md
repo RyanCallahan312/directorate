@@ -18,7 +18,16 @@ Why branding and re-construction matter: nominal brands block plain objects from
 ### Branching & Membership
 
 - **Tagged unions**: branch exhaustively with `Union.match` (or `Match.tag` + `Match.exhaustive`), test variants on decoded values with `Union.isAnyOf([...])`, and reserve `Union.guards.Tag` for validating `unknown` input (it validates the whole variant). Never read `_tag` at runtime.
-- **Literals**: prefer total `Schema.Record` lookups for per-name data, `Match.value(x).pipe(..., Match.exhaustive)` for computation, and `Schema.is(LiteralsSchema)` for membership checks. Never keep bare name constants (`REVIEWER`), `Set<string>`, or `Map<string, ...>` beside the schema that owns those names.
+- **Names are never compared raw.** A name is a member of a literal schema, a host union's discriminant, or a marker we invented. Never compare one with `===` or `!==`, `switch`/`case`, or `[...].includes(...)`. Ask its owner instead:
+  - a **predicate**: `export const isLocked = Schema.is(PhaseSchema.pick(["locked"]))` (`workflow/review/window.ts`);
+  - a **getter or method** on the owning class, built on a predicate: `ToolCall.ownerOnly` (`seal/sessions.ts`), `Seal.pinsCommit`;
+  - exhaustive **`Match`** for multi-way branching: `stateFor` in `feature/dispatch/lifecycle.ts` (`Match.value(status).pipe(Match.when("launching", () => Launching), ..., Match.exhaustive)`);
+  - a total **`Schema.Record(...).make`** for per-name data: `SCOPE_TITLES` in `feature/settings/configure-flow.ts`.
+- **Host unions** branch with `Match` on the discriminant (`idleAt`: `Match.when({ state: "idle" }, ...)`) or a named predicate (`isUserInput`: `Schema.is(Schema.Struct({ type: Schema.Literal("user") }))`). Predicates over host records that several slices use live in `platform/host-record.ts`.
+- **Where predicates live**: beside the schema that owns the name. Reuse the owner's predicate; never define a second one elsewhere. Build each once at module level, never inside a loop, a function body, or a getter.
+- **Plain text is not a name** and may be compared directly: `""`, `"."`, `".."`, path separators, and git's literal output lines (`rel === ".."` in `seal/content.ts`, `line === "GIT binary patch"` in `seal/diff.ts`).
+- Never keep bare name constants (`REVIEWER`), `Set<string>`, or `Map<string, ...>` beside the schema that owns those names.
+- **Agent ids** never appear inside a string. Interpolate the `Agent`'s id (`` `Only ${Liaison.id} runs a Directorate review` ``), so the ids are written only in `feature/agents/agent.ts`.
 
 ## 2. Derive Data Types
 
@@ -28,8 +37,10 @@ A hand-written data type means a schema is missing.
 - **Non-class schemas** (`Schema.Literals`, `Schema.Union`, `Schema.Struct`) use a `Schema` suffix with a derived alias (`export type Phase = typeof PhaseSchema.Type`), because lint enforces `no-redeclare`. Omit the alias when nothing would use it.
 - **Stored field groups and stored codecs** are the exception: they are named for the stored shape and take no `Schema` suffix (`Containment`, `Custody`, `StoredWindow`, `Protocol`, `StoredDispatch`, `StoredShipState`).
 - Annotate function parameters with the class or derived type (`Agent`, `Window`, `Phase`); let locals, return types, and generators infer. Do not narrow locals with annotations (`const phase: Phase = ...`) or type assertions (`as T`, `!`, `any`). `as const` and `satisfies` are fine, though prefer `PhaseSchema.literals` over separate `as const` arrays.
-- Derive service interfaces from their constructor: `Context.Service<Records, Effect.Success<typeof make>>()`.
-- **Exempt** (non-data): `@opencode/*` host types, host seams with no `make` (`Host`), function types, function option bags and other anonymous parameter objects (`createSeal`'s `input`), generic helper types (the door's `Revision<A>`), host-dialog ports (`Dialogs`, `Backend` in `feature/settings/configure-flow.ts`), and value-derived types (`ReturnType`, `Effect.Success`, `Layer.Success`).
+- **Argument objects** are a named `Schema.Struct` or derived from one: `createSeal`'s `input` is `typeof SealRequestSchema.Type`, and `Dialogs.prompt` takes `typeof PromptDialogSchema.Type`. With at most three simple parameters, pass them positionally instead.
+- **Generic types** let a schema own every non-generic field and add only the generic slot: `DialogChoice<V>` is `ChoiceLabelSchema`'s type plus `{ readonly value: V }`, and the door's `Revision<A>` is `RevisedSchema`'s or `FiledSchema`'s type plus `{ readonly out: A }`.
+- **Ports** are pure function bags (`Dialogs`, `ActiveSeal`) or derived from their constructor: `Backend` is `ReturnType<typeof backend>`, and services are `Context.Service<Records, Effect.Success<typeof make>>()`.
+- **Exempt** (non-data): `@opencode/*` host types, host seams with no `make` (`Host`), function types (including `DefineTool` and its tool spec), and value-derived types (`ReturnType`, `Effect.Success`, `Layer.Success`).
 
 ## 3. Primitives → Factories → Composition
 

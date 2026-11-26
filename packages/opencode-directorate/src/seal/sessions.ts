@@ -20,12 +20,12 @@ import {
   Liaison,
 } from "../feature/agents/agent.ts";
 import { outstandingDispatches } from "../feature/dispatch/lifecycle.ts";
-import type { Ledger } from "../feature/ledger/entry.ts";
+import { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
 import { ActiveSeal, Records } from "../records/records.ts";
 import { budget, isLocked } from "../workflow/review/window.ts";
-import type { Seal } from "./record.ts";
+import { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
@@ -182,23 +182,24 @@ type Writer = typeof WriterSchema.Type;
 /** Writers that leave a reported seal alone: the door returns nothing for them then. */
 type Quiet = HostEvent | Watchdog | RecoveryWake | AutoReport;
 
-/**
- * What a transition hands the door: its output, and the seal and ledger it rebuilt (absent: unchanged, nothing written).
- * Filing the Directive hands its report instead of a ledger: the report and the reported seal are written together.
- */
-type Revision<A> =
-  | {
-      readonly out: A;
-      readonly seal?: Seal | undefined;
-      readonly ledger?: Ledger | undefined;
-      readonly report?: undefined;
-    }
-  | {
-      readonly out: A;
-      readonly seal: Seal;
-      readonly report: string;
-      readonly ledger?: undefined;
-    };
+/** What a transition changed: the seal and ledger it rebuilt (absent: unchanged, nothing written). */
+const RevisedSchema = Schema.Struct({
+  ledger: Schema.optional(Ledger),
+  report: Schema.optional(Schema.Undefined),
+  seal: Schema.optional(Seal),
+});
+
+/** Filing the Directive: the reported seal and its report, written together. It hands back no ledger. */
+const FiledSchema = Schema.Struct({
+  ledger: Schema.optional(Schema.Undefined),
+  report: Schema.String,
+  seal: Seal,
+});
+
+/** What a transition hands the door: what it changed or filed, and its output. */
+type Revision<A> = (typeof RevisedSchema.Type | typeof FiledSchema.Type) & {
+  readonly out: A;
+};
 
 /**
  * How the door admits a writer: "write" runs the transition and saves what it hands back, "read" runs it and saves
@@ -653,6 +654,9 @@ export const done = Effect.fnUntraced(function* done(
   };
 });
 
+/** A new review's first seal and ledger. */
+const OpenedSchema = Schema.Struct({ ledger: Ledger, seal: Seal });
+
 /**
  * Opens review `id`, the door's sibling for a review that does not exist yet: `attempt` captures into the new seal's
  * directory and hands back the first seal and ledger, written together. If it fails before they are, the directory goes.
@@ -660,11 +664,7 @@ export const done = Effect.fnUntraced(function* done(
  */
 export const openReview = <A, E, R>(
   id: string,
-  attempt: Effect.Effect<
-    { readonly seal: Seal; readonly ledger: Ledger; readonly out: A },
-    E,
-    R
-  >
+  attempt: Effect.Effect<typeof OpenedSchema.Type & { readonly out: A }, E, R>
 ) =>
   Effect.flatMap(Effect.service(Records), (store) =>
     store.create(
