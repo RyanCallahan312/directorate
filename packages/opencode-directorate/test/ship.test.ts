@@ -5,7 +5,9 @@ import { DateTime } from "effect";
 
 import { Seat } from "../src/feature/agents/agent.ts";
 import type { Entry } from "../src/feature/ledger/entry.ts";
-import type { Seal } from "../src/seal/record.ts";
+import { Seal } from "../src/seal/record.ts";
+import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
+import { Target } from "../src/seal/target.ts";
 import { decideShip, shipKickoff } from "../src/workflow/ship/step.ts";
 
 const state = {
@@ -17,7 +19,7 @@ const state = {
 
 const at = DateTime.makeUnsafe(0);
 
-const seal: Seal = {
+const seal = Seal.make({
   baseSha: "base",
   budgetMinutes: 20,
   children: [],
@@ -26,7 +28,14 @@ const seal: Seal = {
   deleted: [],
   description: "working tree changes",
   directive: { reasons: [], status: "complete" },
-  files: [{ added: 1, path: "src/file.ts", removed: 0, status: "modified" }],
+  files: [
+    FileEntry.make({
+      added: 1,
+      path: "src/file.ts",
+      removed: 0,
+      status: "modified",
+    }),
+  ],
   fingerprint: "original",
   gates: {},
   gen: 0,
@@ -38,7 +47,7 @@ const seal: Seal = {
   postImage: "worktree",
   refreshes: 0,
   regions: [
-    {
+    Region.make({
       file: "src/file.ts",
       id: "R1",
       newEnd: 1,
@@ -46,15 +55,20 @@ const seal: Seal = {
       patchEnd: 1,
       patchStart: 0,
       readBy: [],
-    },
+    }),
   ],
   repo: "/repo",
   reportedAt: at,
-  target: { kind: "local" },
-};
+  target: Target.make({ kind: "local" }),
+});
 
 const entry = (id: string, overrides: Partial<Entry> = {}): Entry => ({
-  anchor: { endLine: 12, line: 12, path: "src/file.ts", side: "new" },
+  anchor: Anchor.make({
+    endLine: 12,
+    line: 12,
+    path: "src/file.ts",
+    side: "new",
+  }),
   consequence: "The result is incorrect",
   createdAt: at,
   evidence: [],
@@ -106,7 +120,11 @@ test("kickoff assigns only the first review turn; the no-seal retry preserves th
 });
 
 test("unfinished review resumes the Liaison and exact seal only once without progress", () => {
-  const observation = { reviews: 1, seal: { ...seal, reportedAt: undefined } };
+  const observation = {
+    reviews: 1,
+    seal: Seal.make({ ...seal, reportedAt: undefined }),
+  };
+
   const decision = decideShip(state, observation);
   assert.equal(decision.status, "active");
   assert.equal(decision.step, `resume:${seal.id}`);
@@ -128,7 +146,7 @@ test("empty initial targets and unreadable reported reviews never report complet
   for (const reportedAt of [at, undefined]) {
     const result = decideShip(state, {
       ...reported,
-      seal: { ...seal, files: [], regions: [], reportedAt },
+      seal: Seal.make({ ...seal, files: [], regions: [], reportedAt }),
     });
 
     assert.equal(result.status, "paused");
@@ -148,17 +166,17 @@ test("empty initial targets and unreadable reported reviews never report complet
 });
 
 test("an empty recheck still decides carried findings and can complete after resolving them", () => {
-  const recheck: Seal = {
+  const recheck = Seal.make({
     ...seal,
     files: [],
     id: "directorate-next",
     recheckOf: seal.id,
     regions: [],
-  };
+  });
 
   const unfinished = decideShip(state, {
     reviews: 2,
-    seal: { ...recheck, reportedAt: undefined },
+    seal: Seal.make({ ...recheck, reportedAt: undefined }),
   });
 
   assert.equal(unfinished.status, "active");
@@ -229,11 +247,11 @@ test("changed target rechecks the exact seal before looking at its findings or o
 test("missing panel Seats require a new panel review even with drift or confirmed findings", () => {
   const model = "provider/seat";
 
-  const panelSeal: Seal = {
+  const panelSeal = Seal.make({
     ...seal,
     directive: { reasons: ["a Seat never launched"], status: "partial" },
     panel: [model],
-  };
+  });
 
   for (const observation of [
     reported,
@@ -258,7 +276,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
     );
   }
 
-  const completed: Seal = {
+  const completed = Seal.make({
     ...panelSeal,
     children: [
       {
@@ -272,8 +290,10 @@ test("missing panel Seats require a new panel review even with drift or confirme
       },
     ],
     directive: seal.directive,
-    regions: seal.regions.map((r) => ({ ...r, readBy: ["ses_seat"] })),
-  };
+    regions: seal.regions.map((r) =>
+      Region.make({ ...r, readBy: ["ses_seat"] })
+    ),
+  });
 
   assert.equal(
     decideShip(state, { ...reported, seal: completed }).status,
@@ -282,7 +302,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
   assert.equal(
     decideShip(state, {
       ...reported,
-      seal: { ...panelSeal, reportedAt: undefined },
+      seal: Seal.make({ ...panelSeal, reportedAt: undefined }),
     }).step,
     `resume:${seal.id}`
   );
@@ -301,10 +321,10 @@ test("fix includes every severity and separates unverified leads from confirmed 
       ],
       notes: [],
     },
-    seal: {
+    seal: Seal.make({
       ...seal,
-      target: { kind: "local", paths: ["src/"] },
-    } satisfies Seal,
+      target: Target.make({ kind: "local", paths: ["src/"] }),
+    }),
   };
 
   const request = "--scope local\nKeep public interfaces unchanged.";
@@ -361,11 +381,11 @@ test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
 
   const commit = decideShip(state, {
     ...observation,
-    seal: {
+    seal: Seal.make({
       ...seal,
       postImage: "commit",
-      target: { commit: "head", kind: "commit" },
-    },
+      target: Target.make({ commit: "head", kind: "commit" }),
+    }),
   });
 
   assert.equal(commit.status, "paused");
@@ -373,7 +393,11 @@ test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
 
   const pr = decideShip(state, {
     ...observation,
-    seal: { ...seal, postImage: "commit", target: { kind: "pr", pr: "123" } },
+    seal: Seal.make({
+      ...seal,
+      postImage: "commit",
+      target: Target.make({ kind: "pr", pr: "123" }),
+    }),
   });
 
   assert.equal(pr.step, `fix:${seal.id}`);
@@ -407,7 +431,12 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
     undefined,
     seal.directive,
   ] as const) {
-    const observation = { ...reported, ledger, seal: { ...seal, directive } };
+    const observation = {
+      ...reported,
+      ledger,
+      seal: Seal.make({ ...seal, directive }),
+    };
+
     const finish = decideShip(state, observation);
     assert.equal(finish.status, "active");
     assert.equal(finish.step, "finish");
@@ -422,7 +451,11 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
 
     const another = {
       ...observation,
-      seal: { ...observation.seal, id: "directorate-next", recheckOf: seal.id },
+      seal: Seal.make({
+        ...observation.seal,
+        id: "directorate-next",
+        recheckOf: seal.id,
+      }),
     };
 
     const paused = decideShip({ ...state, step: finish.step }, another);
@@ -444,7 +477,7 @@ test("only complete and fresh reports without confirmed findings or unresolved l
   for (const status of ["stale", "partial"] as const) {
     const incomplete = decideShip(state, {
       ...reported,
-      seal: { ...seal, directive: { reasons: [], status } },
+      seal: Seal.make({ ...seal, directive: { reasons: [], status } }),
     });
 
     assert.equal(incomplete.step, "finish");
@@ -467,8 +500,10 @@ test("review cap only stops new reviews; round cap stops any next action", () =>
 
   assert.equal(decideShip(almost, fix).step, `fix:${seal.id}`);
   assert.equal(
-    decideShip(almost, { ...fix, seal: { ...seal, reportedAt: undefined } })
-      .step,
+    decideShip(almost, {
+      ...fix,
+      seal: Seal.make({ ...seal, reportedAt: undefined }),
+    }).step,
     `resume:${seal.id}`
   );
   const capped = { ...almost, rounds: 30 };

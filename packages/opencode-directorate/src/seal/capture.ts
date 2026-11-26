@@ -20,7 +20,7 @@ import type { Piece } from "./diff.ts";
 import { endsFingerprint } from "./ends.ts";
 import type { Current } from "./ends.ts";
 import type { Seal } from "./record.ts";
-import type { FileEntry, Region } from "./region.ts";
+import { FileEntry, Region } from "./region.ts";
 
 const FILE_REGION_LINES = 300;
 const IO_CONCURRENCY = 16;
@@ -368,12 +368,12 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
         const status = changed.has(path) ? "modified" : "unchanged";
 
         const deleted = {
-          file: {
+          file: FileEntry.make({
             added: 0,
             path,
             removed: 0,
             status: "deleted",
-          } satisfies FileEntry,
+          }),
           regions: [],
         };
 
@@ -382,13 +382,13 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
         if (excluded) {
           return (yield* wt.present(top, path))
             ? {
-                file: {
+                file: FileEntry.make({
                   added: 0,
                   excluded,
                   path,
                   removed: 0,
                   status,
-                } satisfies FileEntry,
+                }),
                 regions: [],
               }
             : deleted;
@@ -402,13 +402,13 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
 
         if (mode === "gitlink" || binary(buf)) {
           return {
-            file: {
+            file: FileEntry.make({
               added: 0,
               excluded: mode === "gitlink" ? "submodule" : "binary",
               path,
               removed: 0,
               status,
-            } satisfies FileEntry,
+            }),
             regions: [],
           };
         }
@@ -416,25 +416,31 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
         const text = decodeUtf8(buf);
         const lines = text.split("\n");
         const n = text.replace(/\n$/u, "").split("\n").length;
-        const regions: Omit<Region, "id">[] = [];
 
-        for (let s = 1; s <= n; s += FILE_REGION_LINES) {
-          const end = Math.min(n, s + FILE_REGION_LINES - 1);
-          regions.push({
-            file: path,
-            key: yield* sha256(
+        // Numbered once every file's chunks are in, in path order.
+        const regions = yield* Effect.forEach(
+          Array.from(
+            { length: Math.ceil(n / FILE_REGION_LINES) },
+            (_, i) => i * FILE_REGION_LINES + 1
+          ),
+          (s) => {
+            const end = Math.min(n, s + FILE_REGION_LINES - 1);
+
+            return sha256(
               `${path}\0${s}\0${lines.slice(s - 1, end).join("\n")}`
-            ),
-            newEnd: end,
-            newStart: s,
-            patchEnd: 0,
-            patchStart: 0,
-            readBy: [],
-          });
-        }
+            ).pipe(
+              Effect.map((key) => ({
+                file: path,
+                key,
+                newEnd: end,
+                newStart: s,
+              }))
+            );
+          }
+        );
 
         return {
-          file: { added: n, path, removed: 0, status } satisfies FileEntry,
+          file: FileEntry.make({ added: n, path, removed: 0, status }),
           regions,
         };
       }),
@@ -442,10 +448,18 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
     );
 
     return {
-      files: perFile.map((x): FileEntry => x.file),
+      files: perFile.map((x) => x.file),
       regions: perFile
         .flatMap((x) => x.regions)
-        .map((r, i) => ({ id: `R${i + 1}`, ...r })),
+        .map((r, i) =>
+          Region.make({
+            ...r,
+            id: `R${i + 1}`,
+            patchEnd: 0,
+            patchStart: 0,
+            readBy: [],
+          })
+        ),
       text: "",
     } satisfies Captured;
   }
@@ -538,12 +552,23 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
         patchStart: _patchStart,
         patchEnd: _patchEnd,
         ...file
-      }): FileEntry => file
+      }) => FileEntry.make(file)
     ),
     regions,
     text,
   } satisfies Captured;
 });
+
+/** The seal's next generation, re-pinned to ends that moved; capture fills it. */
+export const repinned = (
+  seal: Seal,
+  ends: Pick<Seal, "baseSha" | "baseTip" | "description" | "headSha">
+) =>
+  seal.withContainment({
+    ...ends,
+    gen: seal.gen + 1,
+    refreshes: seal.refreshes + 1,
+  });
 
 /**
  * The seal's ends captured into its current generation: signatures and snapshot, then the diff, file list, regions, and
@@ -632,7 +657,7 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
     return yield* new CaptureDrift();
   }
 
-  return { ...seal, deleted, files, fingerprint, regions, sigs } satisfies Seal;
+  return seal.withContainment({ deleted, files, fingerprint, regions, sigs });
 });
 
 const changedSignatures = (

@@ -5,15 +5,15 @@ import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
 import { scopeOf } from "../../exclusions.ts";
-import { Liaison } from "../../feature/agents/agent.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
 import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
+import { driftCleared } from "../../feature/report/directive.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
 import { emptyLedger, Store } from "../../records/records.ts";
-import { isRead } from "../../seal/coverage.ts";
-import type { Seal } from "../../seal/record.ts";
+import { carryMarks } from "../../seal/coverage.ts";
+import { Seal } from "../../seal/record.ts";
 import type { Region } from "../../seal/region.ts";
 import {
   capture,
@@ -22,11 +22,13 @@ import {
   depsOf,
   inDependencyDir,
   readable,
+  repinned,
   resolveEnds,
   settled,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
-import type { Target } from "../../seal/target.ts";
+import { Target } from "../../seal/target.ts";
+import { started } from "./custody.ts";
 import type { Mode } from "./request.ts";
 import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, Window } from "./window.ts";
 
@@ -73,7 +75,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
   function* createSeal(input: {
     repo: string;
     mode: Mode;
-    target: Target;
+    target: typeof Target.Encoded;
     owner?: Actor;
     budgetMinutes?: number | undefined;
     question?: string | undefined;
@@ -99,36 +101,27 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     return yield* store.create(
       id,
       Effect.gen(function* attempt() {
-        const ends = yield* resolveEnds(top, input.target);
+        const ends = yield* resolveEnds(top, Target.make(input.target));
 
         const seal = yield* capture(
-          {
-            baseSha: ends.baseSha,
-            baseTip: ends.baseTip,
-            ...window.toStored(),
-            children: [],
-            deleted: [],
-            description: ends.description,
-            files: [],
-            fingerprint: "",
-            gates: {},
-            gen: 0,
-            headSha: ends.headSha,
-            host,
-            id,
-            lensesOff: input.lensesOff,
-            mode: input.mode,
-            owner: input.owner?.agent ?? Liaison.id,
-            ownerSession: input.owner?.session ?? "",
-            panel,
-            pid,
-            postImage: ends.postImage,
-            question: input.question,
-            refreshes: 0,
-            regions: [],
-            repo: top,
-            target: ends.target,
-          },
+          Seal.open(
+            {
+              baseSha: ends.baseSha,
+              baseTip: ends.baseTip,
+              description: ends.description,
+              headSha: ends.headSha,
+              id,
+              lensesOff: input.lensesOff,
+              mode: input.mode,
+              panel,
+              postImage: ends.postImage,
+              question: input.question,
+              repo: top,
+              target: ends.target,
+            },
+            window,
+            started(input.owner, host, pid)
+          ),
           ends.scope,
           input.beforeCapture
         );
@@ -167,46 +160,6 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
       ? { files: hit.join(", ") || "base moved", gone, hit: hit.length > 0 }
       : undefined;
   };
-};
-
-/** Captured regions, with the receipts and dispositions of the `from` regions (those `keep` accepts) whose content they repeat. */
-const carryRegions = (
-  from: readonly Region[],
-  onto: readonly Region[],
-  keep: (r: Region) => boolean = () => true
-) => {
-  const byKey = Map.groupBy(from, (r) => r.key);
-  const matches = new Map<Region, Region>();
-
-  for (const [key, regions] of Map.groupBy(onto, (r) => r.key)) {
-    const previous = key ? byKey.get(key) : undefined;
-
-    // Identical chunks have the same key. Pair occurrences in order, including unread ones;
-    // if their counts changed, none can be matched unambiguously.
-    if (previous?.length === regions.length) {
-      for (const [i, r] of regions.entries()) {
-        const p = previous[i];
-
-        if (p && keep(p)) {
-          matches.set(r, p);
-        }
-      }
-    }
-  }
-
-  return onto.map((r): Region => {
-    const p = matches.get(r);
-
-    return p
-      ? {
-          ...r,
-          disposition: p.disposition,
-          note: p.note,
-          ownerRead: p.ownerRead,
-          readBy: p.readBy,
-        }
-      : r;
-  });
 };
 
 interface RefreshResult {
@@ -255,17 +208,14 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     }
 
     const captured = yield* capture(
-      {
-        ...seal,
-        baseSha: cur.baseSha,
-        baseTip: cur.baseTip ?? seal.baseTip,
-        description: describedAt(seal, cur),
-        gates: {},
-        gen: seal.gen + 1,
-        headSha: cur.headSha,
-        refreshes: seal.refreshes + 1,
-        staleFiles: undefined,
-      },
+      driftCleared(
+        repinned(seal, {
+          baseSha: cur.baseSha,
+          baseTip: cur.baseTip ?? seal.baseTip,
+          description: describedAt(seal, cur),
+          headSha: cur.headSha,
+        })
+      ),
       scopeOf(seal.target.paths),
       beforeCapture
     ).pipe(
@@ -279,7 +229,7 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     }
 
     const changed = new Set(yield* changedBetween(seal, captured));
-    const regions = carryRegions(seal.regions, captured.regions);
+    const next = carryMarks(captured, seal);
     const moved = movedUnder(seal, captured, changed);
     const reopened: string[] = [];
 
@@ -300,14 +250,13 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
       );
     });
 
-    const next = { ...captured, regions };
     const nextLedger = { ...ledger, entries };
     yield* (yield* Store).saveBoth(next, nextLedger);
 
     return {
       files: [...changed],
       ledger: nextLedger,
-      newRegions: regions.filter((r) => !r.ownerRead && !r.disposition),
+      newRegions: next.regions.filter((r) => !r.ownerRead && !r.disposition),
       reopened,
       seal: next,
     };
@@ -390,43 +339,31 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
               );
 
         const captured = yield* capture(
-          {
-            baseSha: cur.baseSha,
-            baseTip: cur.baseTip ?? prior.baseTip,
-            ...window.toStored(),
-            children: [],
-            deleted: [],
-            description: describedAt(prior, cur),
-            files: [],
-            fingerprint: "",
-            gates: {},
-            gen: 0,
-            headSha: cur.headSha,
-            host,
-            id,
-            lensesOff: prior.lensesOff,
-            mode: prior.mode,
-            owner: input.owner?.agent ?? Liaison.id,
-            ownerSession: input.owner?.session ?? "",
-            pid,
-            postImage: prior.postImage,
-            question: input.question ?? prior.question,
-            recheckOf: prior.id,
-            refreshes: 0,
-            regions: [],
-            repo: prior.repo,
-            target: prior.target,
-          },
+          Seal.open(
+            {
+              baseSha: cur.baseSha,
+              baseTip: cur.baseTip ?? prior.baseTip,
+              description: describedAt(prior, cur),
+              headSha: cur.headSha,
+              id,
+              lensesOff: prior.lensesOff,
+              mode: prior.mode,
+              postImage: prior.postImage,
+              question: input.question ?? prior.question,
+              recheckOf: prior.id,
+              repo: prior.repo,
+              target: prior.target,
+            },
+            window,
+            started(input.owner, host, pid)
+          ),
           scopeOf(prior.target.paths),
           input.beforeCapture
         );
 
         const changed = new Set(yield* changedBetween(prior, captured));
 
-        const seal: Seal = {
-          ...captured,
-          regions: carryRegions(prior.regions, captured.regions, isRead),
-        };
+        const seal = carryMarks(captured, prior, (r) => r.isRead);
 
         const moved = movedUnder(prior, captured, changed);
         const open = new Set(unresolved(input.ledger));

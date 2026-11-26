@@ -25,7 +25,7 @@ import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
 import type { Body } from "../platform/platform.ts";
 import { ActiveSeal, Store } from "../records/records.ts";
-import { budget, windowOf } from "../workflow/review/window.ts";
+import { budget } from "../workflow/review/window.ts";
 import type { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
@@ -354,7 +354,7 @@ export const done = Effect.fnUntraced(function* done(
   return {
     content: seal.reportedAt
       ? text
-      : `${text}\n\n${yield* budgetLine(agentNamed(agent) ?? Liaison, windowOf(seal))}`,
+      : `${text}\n\n${yield* budgetLine(agentNamed(agent) ?? Liaison, seal.window)}`,
   };
 });
 
@@ -403,7 +403,7 @@ export const unlocked = Effect.fnUntraced(function* unlocked(
   if (
     !seal.reportedAt &&
     !(yield* catalog.keeps(c.agent, name)) &&
-    (yield* budget(windowOf(seal))).phase === "locked"
+    (yield* budget(seal.window)).phase === "locked"
   ) {
     return yield* new Lockdown({ agent: c.agent, seal: seal.id, tool: name });
   }

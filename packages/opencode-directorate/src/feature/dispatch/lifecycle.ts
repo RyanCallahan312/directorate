@@ -194,22 +194,21 @@ export const unansweredQuestions = (seal: Seal, ledger: Ledger) => [
   ),
 ];
 
-export const update = (
-  seal: Seal,
-  step: (c: Child) => Child
-): Seal | undefined => {
+export const update = (seal: Seal, step: (c: Child) => Child) => {
   const children = seal.children.map(step);
 
   return children.some((c, i) => c !== seal.children[i])
-    ? { ...seal, children }
+    ? seal.withChildren(children)
     : undefined;
 };
 
 /** The Liaison launched an Auditor, Seat, or Compliance run. */
-export const launched = (seal: Seal, child: Child): Seal => ({
-  ...seal,
-  children: [...seal.children, child],
-});
+export const launched = (seal: Seal, child: Child) =>
+  seal.withChildren([...seal.children, child]);
+
+/** A launch the subagent tool rejected before it ran: there is no child, and no failure to report. */
+export const withdrawn = (seal: Seal, launch: Child) =>
+  seal.withChildren(seal.children.filter((c) => c !== launch));
 
 export const launchTitle = (
   child: Pick<Child, "description" | "agent" | "call">

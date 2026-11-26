@@ -15,6 +15,7 @@ import {
   resumed,
   returned,
   seatName,
+  withdrawn,
 } from "./lifecycle.ts";
 import type { Child } from "./lifecycle.ts";
 
@@ -238,10 +239,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
           // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
           // registered, so there is no child, and no failure to report.
           if (ev.status === "error" && launch.status === "launching") {
-            return {
-              ...s,
-              children: s.children.filter((x) => x !== launch),
-            };
+            return withdrawn(s, launch);
           }
 
           child = meta.sessionID ?? launch.session;

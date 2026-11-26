@@ -4,6 +4,7 @@ export {
   capture,
   changedBetween,
   changedSinceSeal,
+  repinned,
   settled,
 } from "./capture.ts";
 

@@ -2,6 +2,7 @@
 import { DateTime, Effect, Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
+import type { Seal } from "../../seal/record.ts";
 import { ModeSchema } from "./request.ts";
 
 export const PhaseSchema = Schema.Literals(["normal", "drain", "locked"]);
@@ -99,24 +100,11 @@ export class Window extends Schema.Class<
       ) / 10
     );
   }
-
-  /** The seal.json fields this window stores. */
-  toStored() {
-    return {
-      budgetMinutes: this.budgetMinutes,
-      createdAt: this.createdAt,
-      deadline: this.deadline,
-    };
-  }
 }
 
-/** A stored seal's window. */
-export const windowOf = (seal: typeof StoredWindow.Type) =>
-  Window.make({
-    budgetMinutes: seal.budgetMinutes,
-    createdAt: seal.createdAt,
-    deadline: seal.deadline,
-  });
+/** A resumed review's new clock: a takeover's restart, or the budget its caller named. */
+export const restarted = (seal: Seal, window: Window) =>
+  seal.withWindow(window);
 
 const BudgetSchema = Schema.Struct({
   minutesLeft: Schema.Finite,

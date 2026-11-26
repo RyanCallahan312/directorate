@@ -9,7 +9,7 @@ import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, locked, writable } from "../../seal/seal.ts";
 import type { Sessions } from "../../seal/seal.ts";
-import { budget, windowOf } from "../../workflow/review/window.ts";
+import { budget } from "../../workflow/review/window.ts";
 import { childName, childOutstanding, perSession } from "./lifecycle.ts";
 import type { Child } from "./lifecycle.ts";
 
@@ -28,7 +28,7 @@ export const waitTool = (
         return seal;
       });
 
-      const { phase } = yield* budget(windowOf(start));
+      const { phase } = yield* budget(start.window);
       const waiting = childOutstanding(start);
 
       if (!waiting.length) {
@@ -56,7 +56,7 @@ export const waitTool = (
       // The session events and the deadline watchdog write the seal; poll it until something the Liaison acts on changed.
       const { seal, phaseNow } = yield* Effect.gen(function* poll() {
         const current = yield* store.load(start.id);
-        const next = yield* budget(windowOf(current));
+        const next = yield* budget(current.window);
 
         return { phaseNow: next.phase, seal: current };
       }).pipe(

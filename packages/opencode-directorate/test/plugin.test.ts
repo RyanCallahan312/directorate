@@ -50,7 +50,7 @@ import { LENSES } from "../src/feature/ledger/entry.ts";
 import { Worktree } from "../src/platform/worktree.ts";
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/records/export.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
-import { SealJson } from "../src/seal/record.ts";
+import { Seal, SealJson } from "../src/seal/record.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
@@ -1682,15 +1682,17 @@ test("directorate_export archives every generation and available session trace f
 
   writeFileSync(
     path.join(reviewDir, "seal.json"),
-    Schema.encodeSync(SealJson)({
-      ...s,
-      children: [
-        { ...run, session: child },
-        { ...run, call: "call-2", session: child },
-        { ...run, call: "call-3", session: absent },
-      ],
-      reportedAt: s.createdAt,
-    })
+    Schema.encodeSync(SealJson)(
+      Seal.make({
+        ...s,
+        children: [
+          { ...run, session: child },
+          { ...run, call: "call-2", session: child },
+          { ...run, call: "call-3", session: absent },
+        ],
+        reportedAt: s.createdAt,
+      })
+    )
   );
   writeFileSync(path.join(reviewDir, "report.md"), "# Saved Directive\n");
   writeFileSync(
@@ -1774,17 +1776,19 @@ test("/directorate-export forwards the request and the agent can list review dat
     mkdirSync(directory);
     writeFileSync(
       path.join(directory, "seal.json"),
-      Schema.encodeSync(SealJson)({
-        ...template,
-        createdAt,
-        id,
-        ownerSession: "",
-        repo: execFileSync(
-          "git",
-          ["-C", location, "rev-parse", "--show-toplevel"],
-          { encoding: "utf-8" }
-        ).trim(),
-      })
+      Schema.encodeSync(SealJson)(
+        Seal.make({
+          ...template,
+          createdAt,
+          id,
+          ownerSession: "",
+          repo: execFileSync(
+            "git",
+            ["-C", location, "rev-parse", "--show-toplevel"],
+            { encoding: "utf-8" }
+          ).trim(),
+        })
+      )
     );
     writeFileSync(path.join(directory, "diff.patch"), `patch for ${id}`);
 
@@ -1797,7 +1801,7 @@ test("/directorate-export forwards the request and the agent can list review dat
   const unrelated = seed("000004", repo(), 5);
   writeFileSync(
     path.join(state, first, "seal.json"),
-    Schema.encodeSync(SealJson)({ ...template, ownerSession: "" })
+    Schema.encodeSync(SealJson)(Seal.make({ ...template, ownerSession: "" }))
   );
 
   const exportCommand = present(commands.get("directorate-export"));
@@ -1905,7 +1909,9 @@ test("directorate_export_list pages by nextBefore through every review once, new
     mkdirSync(path.join(state, id));
     writeFileSync(
       path.join(state, id, "seal.json"),
-      Schema.encodeSync(SealJson)({ ...template, id, ownerSession: "" })
+      Schema.encodeSync(SealJson)(
+        Seal.make({ ...template, id, ownerSession: "" })
+      )
     );
 
     return id;

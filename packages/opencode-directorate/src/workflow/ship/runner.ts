@@ -41,6 +41,7 @@ import type { Activity, Worktree } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { currentFingerprint, FreshnessUnchecked } from "../../seal/seal.ts";
+import { shipped } from "../review/custody.ts";
 import { parseRequest, reviewRequest } from "../review/request.ts";
 import type { ReviewScope } from "../review/request.ts";
 import { interruptedReview } from "../review/review.ts";
@@ -532,10 +533,7 @@ export const registerShip = Effect.fn("Ship.register")(
           yield* store.withLock(
             seal.id,
             Effect.gen(function* own() {
-              yield* store.save({
-                ...(yield* store.load(seal.id)),
-                ship: state.id,
-              });
+              yield* store.save(shipped(yield* store.load(seal.id), state.id));
             })
           );
           yield* write(parentID, {

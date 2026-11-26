@@ -1,6 +1,7 @@
 // The protocol gates' memory and the filed Directive: the Protocol & Directive field group of seal.json, and the
 // Directive's status and reasons.
 import { Schema } from "effect";
+import type { DateTime } from "effect";
 
 import { isSecret } from "../../exclusions.ts";
 import { orLegacyTrue, since, Time } from "../../platform/stored.ts";
@@ -39,16 +40,19 @@ export const DirectiveStatusSchema = Schema.Literals([
 
 export type DirectiveStatus = typeof DirectiveStatusSchema.Type;
 
+/** A filed Directive's status and the reasons for it. */
+const DirectiveSchema = Schema.Struct({
+  reasons: list(Schema.String),
+  status: DirectiveStatusSchema,
+});
+
+type Directive = typeof DirectiveSchema.Type;
+
 /** The Protocol & Directive field group of seal.json. */
 export const Protocol = Schema.Struct({
   autoReported: opt(Schema.Boolean),
   /** What the reported Directive stated, so a ship reads it from the seal; seals reported by older versions omit it. */
-  directive: opt(
-    Schema.Struct({
-      reasons: list(Schema.String),
-      status: DirectiveStatusSchema,
-    })
-  ),
+  directive: opt(DirectiveSchema),
   freshnessUnverified: opt(Schema.String),
   gates: since(GatesSchema, {}),
   reportedAt: opt(Time),
@@ -59,6 +63,34 @@ export interface Freshness {
   stale?: readonly string[] | undefined;
   unverified?: string | undefined;
 }
+
+/** A gate pushed back: it remembers what it pushed back on, so it fires again only for something new. */
+export const pushedBack = (seal: Seal, gates: Gates) =>
+  seal.withProtocol({ gates: { ...seal.gates, ...gates } });
+
+/** A refreshed seal: the gates start over and the drift is gone. */
+export const driftCleared = (seal: Seal) =>
+  seal.withProtocol({ gates: {}, staleFiles: undefined });
+
+/** What the freshness check at filing found. */
+export const freshnessChecked = (seal: Seal, fresh: Freshness) =>
+  seal.withProtocol({
+    freshnessUnverified: fresh.unverified,
+    staleFiles: fresh.stale,
+  });
+
+/** The filed Directive: the seal is reported from then on. */
+export const directiveFiled = (
+  seal: Seal,
+  directive: Directive,
+  at: DateTime.Utc,
+  auto: boolean | undefined
+) =>
+  seal.withProtocol({
+    autoReported: auto || undefined,
+    directive,
+    reportedAt: at,
+  });
 
 /** Status and reasons from everything except gates. */
 interface Assessment {

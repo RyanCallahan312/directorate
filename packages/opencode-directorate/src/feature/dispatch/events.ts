@@ -9,6 +9,7 @@ import { activity, createdAt, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
+import { halted } from "../../workflow/review/custody.ts";
 import { childNamed } from "../agents/agent.ts";
 import {
   childOutstanding,
@@ -302,7 +303,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
 
         // The user stopped the Liaison itself: a later successful turn must not read as the review's own.
         return stopped && s.ownerSession === sessionID && !s.halted
-          ? { ...(next ?? s), halted: true }
+          ? halted(next ?? s)
           : next;
       });
     };

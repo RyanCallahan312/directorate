@@ -6,7 +6,7 @@ import { Effect } from "effect";
 import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { budget, windowOf } from "../../workflow/review/window.ts";
+import { budget } from "../../workflow/review/window.ts";
 import { agentNamed, budgetNotice, childNamed, Liaison } from "./agent.ts";
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
@@ -38,7 +38,7 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
   event: SessionContext,
   seal: Seal
 ) {
-  const b = yield* budget(windowOf(seal));
+  const b = yield* budget(seal.window);
 
   if (b.phase !== "locked") {
     return;
@@ -109,7 +109,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
         return;
       }
 
-      const b = yield* budget(windowOf(seal));
+      const b = yield* budget(seal.window);
 
       // Any other subagent launches only while the budget is normal, as Auditors and Seats do.
       const launchable = child

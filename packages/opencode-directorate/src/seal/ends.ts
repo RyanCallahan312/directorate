@@ -11,7 +11,8 @@ import type {
   UnreadableFile,
 } from "../platform/platform.ts";
 import type { Seal } from "./record.ts";
-import type { Target, TargetKind } from "./target.ts";
+import { Target } from "./target.ts";
+import type { TargetKind } from "./target.ts";
 
 /** A review target that cannot be resolved to two ends to compare. */
 export class InvalidTarget extends Schema.TaggedError<
@@ -68,7 +69,7 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
       });
     }
 
-    return yield* localEnds(repo, { kind: "local" });
+    return yield* localEnds(repo, Target.make({ kind: "local" }));
   }
 
   // Without a known base, the branch's commits cannot be found: sealing local-only would silently drop them.
@@ -107,11 +108,11 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
       headSha: head,
       kind: "local",
       postImage: "worktree",
-      target: { kind: "local" },
+      target: Target.make({ kind: "local" }),
     } satisfies Ends;
   }
 
-  return yield* localEnds(repo, { kind: "local" });
+  return yield* localEnds(repo, Target.make({ kind: "local" }));
 });
 
 const prMergeBase = (
@@ -188,7 +189,7 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
           headSha: c,
           kind: "commit",
           postImage: "commit",
-          target: { ...target, commit: c },
+          target: Target.make({ ...target, commit: c }),
         };
       }
 
@@ -219,7 +220,7 @@ export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
           headSha: h,
           kind: "range",
           postImage: "commit",
-          target: { ...target, base },
+          target: Target.make({ ...target, base }),
         };
       }
 
@@ -296,7 +297,9 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
     return {
       baseSha: seal.baseSha,
       fingerprint: yield* endsFingerprint(seal.repo, {
-        ...seal,
+        baseSha: seal.baseSha,
+        headSha: seal.headSha,
+        postImage: seal.postImage,
         scope: scopeOf(t.paths),
       }),
       headSha: seal.headSha,

@@ -14,14 +14,15 @@ export const TargetKindSchema = Schema.Literals([
 
 export type TargetKind = typeof TargetKindSchema.Type;
 
-/** As stored. The directorate_seal tool input declares its own keys with optionalKey: Schema.optional renders as anyOf-null for the model. */
-export const TargetSchema = Schema.Struct({
+/** What a review seals, as stored. The directorate_seal tool input declares its own keys with optionalKey: Schema.optional renders as anyOf-null for the model. */
+export class Target extends Schema.Class<
+  Target,
+  { readonly brand: unique symbol }
+>("directorate/Target")({
   base: opt(Schema.String),
   commit: opt(Schema.String),
   head: opt(Schema.String),
   kind: TargetKindSchema,
   paths: opt(Schema.Array(Schema.String)),
   pr: opt(Schema.String),
-});
-
-export type Target = typeof TargetSchema.Type;
+}) {}

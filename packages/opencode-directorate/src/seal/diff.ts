@@ -5,7 +5,8 @@ import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 import { exclusionReason } from "../exclusions.ts";
 import { sha256 } from "../platform/hash.ts";
 import { invalid } from "../platform/stored.ts";
-import type { FileEntry, Region } from "./region.ts";
+import { Region } from "./region.ts";
+import type { FileEntry } from "./region.ts";
 
 const REGION_MAX_PATCH_LINES = 400;
 
@@ -121,7 +122,8 @@ interface Hunk {
   readonly sectionStart: number;
 }
 
-type ParsedFile = FileEntry & {
+/** A file of the assembled diff: its entry's fields, and where it and its hunks sit in the diff text. */
+type ParsedFile = typeof FileEntry.Encoded & {
   readonly hunks: readonly Hunk[];
   readonly patchStart: number;
   readonly patchEnd: number;
@@ -270,20 +272,22 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
         sha256(`${header}\0${hunk}\0${lines.slice(start - 1, end).join("\n")}`);
 
       if (!f.hunks.length) {
-        regions.push({
-          file: f.path,
-          id: `R${(k += 1)}`,
-          key: yield* key(
-            headerOf(f.patchStart, f.patchEnd + 1),
-            f.patchStart,
-            f.patchEnd
-          ),
-          newEnd: 0,
-          newStart: 0,
-          patchEnd: f.patchEnd,
-          patchStart: f.patchStart,
-          readBy: [],
-        });
+        regions.push(
+          Region.make({
+            file: f.path,
+            id: `R${(k += 1)}`,
+            key: yield* key(
+              headerOf(f.patchStart, f.patchEnd + 1),
+              f.patchStart,
+              f.patchEnd
+            ),
+            newEnd: 0,
+            newStart: 0,
+            patchEnd: f.patchEnd,
+            patchStart: f.patchStart,
+            readBy: [],
+          })
+        );
         continue;
       }
 
@@ -318,20 +322,22 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
             (l) => l.startsWith("-") || l.startsWith(" ")
           ).length;
 
-          regions.push({
-            file: f.path,
-            hunkStart: h.patchStart,
-            id: `R${(k += 1)}`,
-            key: yield* key(header, s, e, hunkHeader),
-            newEnd: count ? next + count - 1 : h.newStart,
-            newLine: next,
-            newStart: count ? next : h.newStart,
-            oldLine,
-            patchEnd: e,
-            patchStart: s,
-            readBy: [],
-            sectionStart: h.sectionStart,
-          });
+          regions.push(
+            Region.make({
+              file: f.path,
+              hunkStart: h.patchStart,
+              id: `R${(k += 1)}`,
+              key: yield* key(header, s, e, hunkHeader),
+              newEnd: count ? next + count - 1 : h.newStart,
+              newLine: next,
+              newStart: count ? next : h.newStart,
+              oldLine,
+              patchEnd: e,
+              patchStart: s,
+              readBy: [],
+              sectionStart: h.sectionStart,
+            })
+          );
           next += count;
           oldLine += oldCount;
         }

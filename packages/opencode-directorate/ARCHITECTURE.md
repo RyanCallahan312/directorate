@@ -265,7 +265,7 @@ Nothing lints this. Transitions live in their owner's modules, `Seal.make` and `
 
 ### The composed record
 
-`seal/record.ts` spreads each owner's stored field group, so `seal.json` stays flat:
+`seal/record.ts` spreads each owner's stored field group, so `seal.json` stays flat. Each group has one rebuild method on `Seal`; the owner's transitions take the seal by `import type` and return `seal.with<Group>(…)`, so no field-group module needs a value import of `record.ts`:
 
 ```ts
 export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
@@ -279,20 +279,29 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
     children: since(Schema.Array(StoredDispatch), []), // feature/dispatch
     ship: Schema.optional(Schema.String), // workflow/ship
   }).check(windowCheck) // spreading .fields drops owner checks; the root re-applies them
-) {}
+) {
+  static open(pins, window, custody) {} // a new review at generation 0
+  get window() {} // the Window value object
+  withContainment(containment) {} // seal: capture, re-pin, coverage marks
+  withWindow(window) {} // workflow/review
+  withCustody(custody) {} // workflow/review
+  withProtocol(protocol) {} // feature/report
+  withChildren(children) {} // feature/dispatch
+  withShip(ship) {} // stamped by workflow/review
+}
 ```
 
 ### Field groups
 
 | Field group | Owner | Fields | Changed only by |
 | --- | --- | --- | --- |
-| Containment | `seal` | `id` `repo` `target` `baseSha` `baseTip` `headSha` `postImage` `fingerprint` `sigs` `files` `deleted` `regions` (geometry) `gen` `refreshes` `description` `mode` `lensesOff` `panel` `question` `recheckOf` | capture and re-pin, called by review's create, refresh, and re-check |
-| Coverage marks | `seal` | `regions[].readBy` `disposition` `note` `ownerRead` | mark shown, dispose, carry on refresh |
-| Window | `workflow/review` | `createdAt` `deadline` `budgetMinutes` | `Window.open`, `window.takeover` |
-| Custody | `workflow/review` | `owner` `ownerSession` `previousOwnerSessions` `resumedAt` `halted` `abandoned` `host` `pid` `recovery` | start, resume, take over, halt, abandon, wake |
-| Dispatches | `feature/dispatch` | `children` | launch, claim, finish, resume, follow up |
-| Protocol & Directive | `feature/report` | `gates` `directive` `reportedAt` `autoReported` `freshnessUnverified` `staleFiles` | gate push-back, file, clear drift (called by refresh) |
-| Ship link | `workflow/ship` | `ship` | stamped once by review at sealing |
+| Containment | `seal` | `id` `repo` `target` `baseSha` `baseTip` `headSha` `postImage` `fingerprint` `sigs` `files` `deleted` `regions` (geometry) `gen` `refreshes` `description` `mode` `lensesOff` `panel` `question` `recheckOf` | `Seal.open`, `capture`, `repinned`, called by review's create, refresh, and re-check |
+| Coverage marks | `seal` | `regions[].readBy` `disposition` `note` `ownerRead` | `markShown`, `dispose`, `carryMarks` (on refresh and re-check) |
+| Window | `workflow/review` | `createdAt` `deadline` `budgetMinutes` | `Window.open` at sealing; `restarted` (with `window.takeover`) on resume |
+| Custody | `workflow/review` | `owner` `ownerSession` `previousOwnerSessions` `resumedAt` `halted` `abandoned` `host` `pid` `recovery` | `started`, `resumedBy`, `halted`, `abandoned`, `waking`, `woken` |
+| Dispatches | `feature/dispatch` | `children` | `launched`, `claimed`, `finished`, `resumed`, `returned`, `withdrawn`, follow-ups |
+| Protocol & Directive | `feature/report` | `gates` `directive` `reportedAt` `autoReported` `freshnessUnverified` `staleFiles` | `pushedBack`, `freshnessChecked`, `directiveFiled`, `driftCleared` (called by refresh) |
+| Ship link | `workflow/ship` | `ship` | `shipped` (in review's `custody.ts`), with the id the ship hands it |
 
 ### Artifacts
 

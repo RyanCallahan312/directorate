@@ -22,7 +22,7 @@ import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, mutate, RepoScope, Sessions } from "../../seal/seal.ts";
 import { TargetKindSchema } from "../../seal/target.ts";
-import { AbandonRefused } from "./custody.ts";
+import { AbandonRefused, resumedBy } from "./custody.ts";
 import {
   createSeal,
   recheckable,
@@ -38,7 +38,7 @@ import {
   ReviewScopeSchema,
 } from "./request.ts";
 import type { ReviewScope } from "./request.ts";
-import { budget, Window, windowOf } from "./window.ts";
+import { budget, restarted, Window } from "./window.ts";
 
 /** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
 const RECHECK_FIXED = [
@@ -274,7 +274,7 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
 
                   // A spent budget gets more time (Window.takeover), unless the caller names a budget.
                   const now = yield* DateTime.now;
-                  const window = windowOf(s);
+                  const { window } = s;
                   const { phase } = yield* budget(window);
 
                   const takeover =
@@ -282,38 +282,17 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
                       ? undefined
                       : window.takeover(now);
 
-                  const restarted =
+                  const restart =
                     input.budget_minutes === undefined
                       ? takeover
                       : Window.open(now, input.budget_minutes);
 
-                  // An explicit resume continues a review the user had interrupted.
-                  const resumedSeal: Seal = {
-                    ...s,
-                    halted: false,
-                    owner: a.agent,
-                    ownerSession: a.session,
-                    pid,
-                    resumedAt: now,
-                  };
-
-                  const taken: Seal =
-                    restarted === undefined
-                      ? resumedSeal
-                      : { ...resumedSeal, ...restarted.toStored() };
+                  const resumed = resumedBy(s, a, pid, now);
 
                   const updated =
-                    s.ownerSession && s.ownerSession !== a.session
-                      ? {
-                          ...taken,
-                          previousOwnerSessions: [
-                            ...new Set([
-                              ...(s.previousOwnerSessions ?? []),
-                              s.ownerSession,
-                            ]),
-                          ],
-                        }
-                      : taken;
+                    restart === undefined
+                      ? resumed
+                      : restarted(resumed, restart);
 
                   yield* store.save(updated);
 

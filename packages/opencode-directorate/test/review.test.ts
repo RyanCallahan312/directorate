@@ -60,9 +60,11 @@ import {
 } from "../src/seal/coverage.ts";
 import { assemble, buildRegions, RawDiff } from "../src/seal/diff.ts";
 import { currentFingerprint } from "../src/seal/ends.ts";
-import type { Seal } from "../src/seal/record.ts";
+import { Seal } from "../src/seal/record.ts";
+import { Anchor, Region } from "../src/seal/region.ts";
 import { RepoPath, RepoScope } from "../src/seal/repo-path.ts";
 import { changedSinceSeal } from "../src/seal/seal.ts";
+import { Target } from "../src/seal/target.ts";
 import {
   grepSealed,
   history,
@@ -133,7 +135,11 @@ const loadLedger = (id: string) =>
 const regions = (
   s: Seal,
   f: (r: Seal["regions"][number], i: number) => Partial<Seal["regions"][number]>
-): Seal => ({ ...s, regions: s.regions.map((r, i) => ({ ...r, ...f(r, i) })) });
+): Seal =>
+  Seal.make({
+    ...s,
+    regions: s.regions.map((r, i) => Region.make({ ...r, ...f(r, i) })),
+  });
 
 const settingsFile = (env: Record<string, string>) =>
   Effect.runPromise(
@@ -580,7 +586,12 @@ test("only a subsequent successful retry clears a failed question", async () => 
     status: "failed",
   } as const;
 
-  const reviewed = { ...seal, children: [first, failed], regions: [] };
+  const reviewed = Seal.make({
+    ...seal,
+    children: [first, failed],
+    regions: [],
+  });
+
   assert.deepEqual(childFailures(reviewed, { entries: [], notes: [] }), [
     failed,
   ]);
@@ -590,10 +601,10 @@ test("only a subsequent successful retry clears a failed question", async () => 
   );
   assert.equal(
     assess(
-      {
+      Seal.make({
         ...reviewed,
         children: [...reviewed.children, { ...first, call: "retry" }],
-      },
+      }),
       { entries: [], notes: [] },
       {},
       "normal"
@@ -613,7 +624,7 @@ test("the Liaison's answer settles a twice-failed Auditor question", async () =>
     status: "failed",
   } as const;
 
-  const reviewed = { ...seal, children: [failed], regions: [] };
+  const reviewed = Seal.make({ ...seal, children: [failed], regions: [] });
 
   const answered = (text: string) => ({
     entries: [],
@@ -647,7 +658,7 @@ test("re-check: carries an Auditor question the earlier review never answered", 
     status: "failed",
   } as const;
 
-  const prior: Seal = {
+  const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
     children: [
       run1,
@@ -666,7 +677,7 @@ test("re-check: carries an Auditor question the earlier review never answered", 
       },
     ],
     reportedAt: T0,
-  };
+  });
 
   const r = await run(
     recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
@@ -700,12 +711,13 @@ test("re-check: carries an Auditor question the earlier review never answered", 
   assert.deepEqual(settled.unanswered, ["still running"]);
 });
 
-const at = (path: string, line: number, side: "new" | "old" = "new") => ({
-  endLine: line,
-  line,
-  path,
-  side,
-});
+const at = (path: string, line: number, side: "new" | "old" = "new") =>
+  Anchor.make({
+    endLine: line,
+    line,
+    path,
+    side,
+  });
 
 const entry = (id: string, o: Partial<Entry> = {}): Entry => ({
   anchor: at("src/math.ts", 2),
@@ -737,7 +749,7 @@ test("a failed Compliance batch is answered once narrowed retries decide every e
       status,
     }) as const;
 
-  const reviewed = {
+  const reviewed = Seal.make({
     ...seal,
     children: [
       batch("batch", "F1, F2", "failed"),
@@ -745,7 +757,7 @@ test("a failed Compliance batch is answered once narrowed retries decide every e
       batch("second", "F2", "completed"),
     ],
     regions: [],
-  };
+  });
 
   const confirmed = { status: "confirmed" } as const;
 
@@ -1591,13 +1603,13 @@ test(
 
     const legacy = await run(
       renderRegions(regionsResult, [
-        {
+        Region.make({
           ...mid,
           hunkStart: undefined,
           newLine: undefined,
           oldLine: undefined,
           sectionStart: undefined,
-        },
+        }),
       ])
     );
 
@@ -2176,7 +2188,7 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
     ["F4"]
   );
 
-  const seal: Seal = {
+  const seal = Seal.make({
     baseSha: "base",
     budgetMinutes: 10,
     children: [],
@@ -2197,8 +2209,8 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
     refreshes: 0,
     regions: [],
     repo: "/test",
-    target: { kind: "auto" },
-  };
+    target: Target.make({ kind: "auto" }),
+  });
 
   const md = renderReport({ ledger, reasons: [], seal, status: "complete" });
   assert.match(
@@ -3355,12 +3367,12 @@ test("re-check: identical chunks carry only their own read receipts", async () =
   const sealed = await local(dir);
   assert.equal(sealed.regions.length, 3);
 
-  const prior = {
+  const prior = Seal.make({
     ...regions(sealed, (_, i) =>
       i < 2 ? { ownerRead: true, readBy: ["owner"] } : {}
     ),
     reportedAt: T0,
-  };
+  });
 
   const next = await run(
     recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
@@ -3423,10 +3435,10 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
     ],
   };
 
-  const prior = {
+  const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
     reportedAt: T0,
-  };
+  });
 
   await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
 
@@ -3523,7 +3535,7 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
     notes: [],
   };
 
-  const prior = { ...sealed, reportedAt: T0 };
+  const prior = Seal.make({ ...sealed, reportedAt: T0 });
   await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
 
   // Only the installed dependency changes: Git sees nothing.
@@ -3628,7 +3640,7 @@ test("resolving an entry reopens its duplicates", () => {
 test("re-check Directive: names the earlier seal, marks findings still present or new, and lists what was resolved", () => {
   const earlier = "directorate-20260101000000-aaaaaa";
 
-  const seal: Seal = {
+  const seal = Seal.make({
     baseSha: "base",
     budgetMinutes: 10,
     children: [],
@@ -3650,8 +3662,8 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     refreshes: 0,
     regions: [],
     repo: "/test",
-    target: { kind: "auto" },
-  };
+    target: Target.make({ kind: "auto" }),
+  });
 
   const still = entry("F1", {
     carried: { id: "F3", status: "confirmed" },

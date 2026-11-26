@@ -7,7 +7,8 @@ import { Git } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Store } from "../records/records.ts";
 import type { Seal } from "./record.ts";
-import type { Anchor, Side } from "./region.ts";
+import { Anchor } from "./region.ts";
+import type { Side } from "./region.ts";
 import { LineRef } from "./repo-path.ts";
 
 const IO_CONCURRENCY = 16;
@@ -195,7 +196,11 @@ const longEnough = (line: string) => line.replaceAll(/\s/gu, "").length >= 8;
 
 /** Checks the quote against the sealed side; returns the anchor snapped to the nearest place the quote really is, or fails saying why not. */
 export const checkQuote = Effect.fn("Directorate.checkQuote")(
-  function* checkQuote(seal: Seal, anchor: Anchor, quote: string) {
+  function* checkQuote(
+    seal: Seal,
+    anchor: Pick<Anchor, "endLine" | "line" | "path" | "side">,
+    quote: string
+  ) {
     if (anchor.side === "new" && outsideWorktreeScope(seal, anchor.path)) {
       return yield* new AnchorRejected({
         message: `${anchor.path} is outside the sealed scope; only the base is available. Use side:"old" to anchor to the base.`,
@@ -279,7 +284,7 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
       const j = matchAt(i);
 
       if (j !== undefined) {
-        return { ...anchor, endLine: j + 1, line: i + 1 } satisfies Anchor;
+        return Anchor.make({ ...anchor, endLine: j + 1, line: i + 1 });
       }
     }
 

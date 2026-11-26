@@ -2,7 +2,7 @@
 import { Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
-import { AnchorSchema } from "../../seal/region.ts";
+import { Anchor } from "../../seal/region.ts";
 import { ActorSchema } from "../agents/agent.ts";
 
 const list = Schema.Array;
@@ -73,7 +73,7 @@ const VerdictSchema = Schema.Struct({
 export type Verdict = typeof VerdictSchema.Type;
 
 const EntrySchema = Schema.Struct({
-  anchor: AnchorSchema,
+  anchor: Anchor,
   brief: opt(Schema.String),
   /** In a re-check: the entry this one continues in the earlier review, and its status when that review reported. */
   carried: opt(

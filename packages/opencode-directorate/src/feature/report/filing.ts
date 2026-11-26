@@ -15,11 +15,16 @@ import {
   writable,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
-import { AbandonRefused } from "../../workflow/review/custody.ts";
-import { budget, GRACE_MS, windowOf } from "../../workflow/review/window.ts";
+import { abandoned, AbandonRefused } from "../../workflow/review/custody.ts";
+import { budget, GRACE_MS } from "../../workflow/review/window.ts";
 import { Liaison } from "../agents/agent.ts";
 import type { Ledger } from "../ledger/entry.ts";
-import { assess } from "./directive.ts";
+import {
+  assess,
+  directiveFiled,
+  freshnessChecked,
+  pushedBack,
+} from "./directive.ts";
 import type { Freshness } from "./directive.ts";
 import {
   coverageGate,
@@ -93,13 +98,8 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     opts.cur ?? (yield* Effect.result(currentFingerprint(seal)))
   );
 
-  const assessed = {
-    ...seal,
-    freshnessUnverified: unverified,
-    staleFiles: stale,
-  };
-
-  const { phase } = yield* budget(windowOf(seal));
+  const assessed = freshnessChecked(seal, { stale, unverified });
+  const { phase } = yield* budget(seal.window);
 
   const a = assess(assessed, ledger, { stale, unverified }, phase);
 
@@ -115,12 +115,12 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     synthesis: opts.synthesis,
   });
 
-  const reported: Seal = {
-    ...assessed,
-    autoReported: opts.auto || undefined,
-    directive: { reasons, status },
-    reportedAt: yield* DateTime.now,
-  };
+  const reported = directiveFiled(
+    assessed,
+    { reasons, status },
+    yield* DateTime.now,
+    opts.auto
+  );
 
   yield* (yield* Store).publish(reported, md);
 
@@ -166,7 +166,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
         }
 
         return yield* finalize(
-          abandonedBy ? { ...seal, abandoned: true } : seal,
+          abandonedBy ? abandoned(seal) : seal,
           yield* store.loadLedger(id),
           { auto: true, extraReasons: [reason] }
         );
@@ -206,11 +206,11 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
 
             yield* writable(seal, c, "directorate_report", true);
             const ledger = yield* store.loadLedger(seal.id);
-            const { phase } = yield* budget(windowOf(seal));
+            const { phase } = yield* budget(seal.window);
 
             const pushBack = (gates: Seal["gates"], message: string) =>
               store
-                .save({ ...seal, gates: { ...seal.gates, ...gates } })
+                .save(pushedBack(seal, gates))
                 .pipe(
                   Effect.andThen(Effect.fail(new ProtocolHold({ message })))
                 );

@@ -17,10 +17,6 @@ const regionSize = (r: Region) =>
     ? r.newEnd - r.newStart + 1
     : r.patchEnd - r.patchStart + 1;
 
-/** Read by the lead, or reviewed by disposition: a region that counts as observed. */
-export const isRead = (r: Region) =>
-  (!r.disposition && Boolean(r.ownerRead)) || r.disposition === "reviewed";
-
 export const coverageSummary = (seal: Seal) => {
   const total = seal.regions.length;
   const skipped = seal.regions.filter((r) => r.disposition === "skipped");
@@ -30,7 +26,7 @@ export const coverageSummary = (seal: Seal) => {
     (r) => r.disposition === "reviewed" && !r.ownerRead
   );
 
-  const read = seal.regions.filter(isRead);
+  const read = seal.regions.filter((r) => r.isRead);
   const unread = seal.regions.filter((r) => !r.disposition && !r.ownerRead);
 
   return {
@@ -94,36 +90,18 @@ export const markShown = (
   seal: Seal,
   shown: readonly Shown[],
   reader: { key: string; owner: boolean }
-): Seal => {
+) => {
   const byId = new Map(
     shown.flatMap((s) => (s.missing ? [] : [[s.id, s] as const]))
   );
 
-  return {
-    ...seal,
+  return seal.withContainment({
     regions: seal.regions.map((r) => {
       const s = byId.get(r.id);
 
-      if (!s) {
-        return r;
-      }
-
-      const offsets = { ...r.offsets, [reader.key]: s.next };
-
-      if (!s.complete) {
-        return { ...r, offsets };
-      }
-
-      return {
-        ...r,
-        offsets,
-        ownerRead: reader.owner || r.ownerRead,
-        readBy: r.readBy.includes(reader.key)
-          ? r.readBy
-          : [...r.readBy, reader.key],
-      };
+      return s ? r.shown(reader, s.next, s.complete) : r;
     }),
-  };
+  });
 };
 
 /** Records a disposition for regions; "reviewed" needs someone to have read the region through directorate_diff, else it is skimmed. */
@@ -146,8 +124,53 @@ export const dispose = (
       coerced.push(r.id);
     }
 
-    return { ...r, disposition: unread ? "skimmed" : disposition, note };
+    return r.disposed(unread ? "skimmed" : disposition, note);
   });
 
-  return { coerced, seal: { ...seal, regions } };
+  return { coerced, seal: seal.withContainment({ regions }) };
 };
+
+/**
+ * Regions just captured, carrying the receipts and dispositions of the `from` regions (those `keep` accepts) whose content
+ * they repeat.
+ */
+const carryRegions = (
+  from: readonly Region[],
+  onto: readonly Region[],
+  keep: (r: Region) => boolean = () => true
+) => {
+  const byKey = Map.groupBy(from, (r) => r.key);
+  const matches = new Map<Region, Region>();
+
+  for (const [key, regions] of Map.groupBy(onto, (r) => r.key)) {
+    const previous = key ? byKey.get(key) : undefined;
+
+    // Identical chunks have the same key. Pair occurrences in order, including unread ones;
+    // if their counts changed, none can be matched unambiguously.
+    if (previous?.length === regions.length) {
+      for (const [i, r] of regions.entries()) {
+        const p = previous[i];
+
+        if (p && keep(p)) {
+          matches.set(r, p);
+        }
+      }
+    }
+  }
+
+  return onto.map((r) => {
+    const p = matches.get(r);
+
+    return p ? r.carrying(p) : r;
+  });
+};
+
+/** A fresh capture of `seal`, carrying the coverage marks of `earlier`'s regions (those `keep` accepts) onto it. */
+export const carryMarks = (
+  seal: Seal,
+  earlier: Seal,
+  keep?: (r: Region) => boolean
+) =>
+  seal.withContainment({
+    regions: carryRegions(earlier.regions, seal.regions, keep),
+  });

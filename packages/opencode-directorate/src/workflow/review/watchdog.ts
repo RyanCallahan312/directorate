@@ -18,6 +18,7 @@ import {
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
+import { halted, shipped, waking, woken } from "./custody.ts";
 import { interruptedReview } from "./interrupted.ts";
 import type { AutoReport } from "./tools.ts";
 import { GRACE_MS } from "./window.ts";
@@ -149,7 +150,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
           const messages = yield* host.session.context({ sessionID });
 
           if (interruptedReview(current, messages)) {
-            return yield* store.save({ ...current, halted: true });
+            return yield* store.save(halted(current));
           }
 
           const prior =
@@ -179,12 +180,10 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
             ownerSession: sessionID,
           };
 
-          const mine = { ...current, pid };
-
           // The intent is saved before the wake, and the wake's ID is reused until its admission is saved: the host
           // keeps the first admission of an ID, so neither a lost wake nor a lost acknowledgement repeats or drops it.
           if (!retry) {
-            yield* store.save({ ...mine, recovery });
+            yield* store.save(waking(current, pid, recovery));
           }
 
           if (!delivered || !retry) {
@@ -196,14 +195,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
             });
           }
 
-          yield* store.save({
-            ...mine,
-            recovery: {
-              ...recovery,
-              admitted: true,
-              admittedAt: yield* DateTime.now,
-            },
-          });
+          yield* store.save(woken(current, pid, recovery, yield* DateTime.now));
         }).pipe(Effect.uninterruptible)
       );
     }
@@ -251,7 +243,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
                   // Older seals stored membership only on the Ship. Retain it even if Ship is stopped later.
                   return yield* sessions.update(seal.id, (current) =>
                     current.ship === undefined
-                      ? { ...current, ship: shipID }
+                      ? shipped(current, shipID)
                       : undefined
                   );
                 }
