@@ -2,7 +2,7 @@
 // from the user's words and a leading --scope flag.
 import { Effect, Result, Schema } from "effect";
 
-import { failure } from "../../error.ts";
+import { failure } from "../../platform/error.ts";
 import type { TargetKind } from "../../seal/target.ts";
 
 export const ModeSchema = Schema.Literals(["default", "code-quality", "full"]);

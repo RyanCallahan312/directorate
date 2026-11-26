@@ -2,10 +2,10 @@
 // into review regions.
 import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
-import { exclusionReason } from "./exclusions.ts";
-import { sha256 } from "./hash.ts";
-import { invalid } from "./platform/stored.ts";
-import type { FileEntry, Region } from "./seal/region.ts";
+import { exclusionReason } from "../exclusions.ts";
+import { sha256 } from "../platform/hash.ts";
+import { invalid } from "../platform/stored.ts";
+import type { FileEntry, Region } from "./region.ts";
 
 const REGION_MAX_PATCH_LINES = 400;
 

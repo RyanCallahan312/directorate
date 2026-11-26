@@ -1,6 +1,6 @@
 // Directorate coverage: which regions the Liaison and each reader have read, and the dispositions recorded for the rest.
-import type { Seal } from "./seal/record.ts";
-import type { Disposition, Region } from "./seal/region.ts";
+import type { Seal } from "./record.ts";
+import type { Disposition, Region } from "./region.ts";
 
 const CHUNK_MAX_LINES = 600;
 

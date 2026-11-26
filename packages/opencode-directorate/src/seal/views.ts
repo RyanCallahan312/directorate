@@ -2,6 +2,11 @@
 // tool result.
 import { Effect, FileSystem, Option, Path } from "effect";
 
+import { inScope, isSecret, scopeOf } from "../exclusions.ts";
+import { failure } from "../platform/error.ts";
+import { Git } from "../platform/platform.ts";
+import { encodeUtf8 } from "../platform/utf8.ts";
+import { Store } from "../records/records.ts";
 import {
   inDependencyDir,
   installed,
@@ -11,13 +16,8 @@ import {
   sealedFile,
 } from "./content.ts";
 import type { Shown } from "./coverage.ts";
-import { failure } from "./error.ts";
-import { inScope, isSecret, scopeOf } from "./exclusions.ts";
-import { Git } from "./git.ts";
-import type { Seal } from "./seal/record.ts";
-import type { Region, Side } from "./seal/region.ts";
-import { Store } from "./store.ts";
-import { encodeUtf8 } from "./utf8.ts";
+import type { Seal } from "./record.ts";
+import type { Region, Side } from "./region.ts";
 
 /**
  * OpenCode cuts any tool result over 2,000 lines or 50 KiB and shows the model only a preview, so The Directorate pages its own

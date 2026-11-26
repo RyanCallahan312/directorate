@@ -23,18 +23,20 @@ src/
 ├── platform/               seams + the OpenCode anti-corruption layer
 │   ├── platform.ts         entry
 │   ├── stored.ts*          since · orLegacyTrue · Time · Count · invalid
+│   ├── error.ts* · utf8.ts* · hash.ts*
 │   ├── git.ts · command.ts · worktree.ts · host.ts · process-identity.ts
 │   ├── host-record.ts      activity · turns · locationKey
 │   └── tool.ts             DefineTool adapter · ToolCatalog · error → model text
 ├── records/                the repository and records management
 │   ├── records.ts          entry: Records, ActiveSeal port, export tools
 │   ├── repository.ts · locks.ts · retention.ts · state-root.ts
+│   ├── active-seal.ts      the ActiveSeal port
 │   └── export.ts · archive.ts
 ├── seal/                   Containment: the Review aggregate root
 │   ├── seal.ts             entry: Sessions, read tools, capture
 │   ├── record.ts* · target.ts* · region.ts* · coverage.ts*
 │   ├── sessions.ts         session ↔ seal bindings + the door
-│   └── capture.ts · content.ts · views.ts · tools.ts
+│   └── capture.ts · ends.ts · diff.ts · content.ts · views.ts · tools.ts · repo-path.ts
 ├── feature/
 │   ├── agents/             agents.ts · agent.ts* · access.ts · registration.ts
 │   ├── dispatch/           dispatch.ts · lifecycle.ts* · seat.ts* · events.ts
@@ -42,7 +44,7 @@ src/
 │   ├── report/             report.ts · directive.ts* · gates.ts* · render.ts*
 │   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts*
 └── workflow/
-    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · watchdog.ts
+    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts · watchdog.ts
     └── ship/               ship.ts · state.ts* · step.ts* · runner.ts
 ```
 

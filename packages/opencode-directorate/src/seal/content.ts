@@ -1,15 +1,15 @@
 // Directorate sealed content: a file as the seal pinned it, and the checks that tie quotes and evidence to that content.
 import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
-import { failure, ReviewError } from "./error.ts";
-import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "./exclusions.ts";
-import type { Entry } from "./feature/ledger/entry.ts";
-import { Git } from "./git.ts";
+import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "../exclusions.ts";
+import type { Entry } from "../feature/ledger/entry.ts";
+import { failure, ReviewError } from "../platform/error.ts";
+import { Git } from "../platform/platform.ts";
+import { decodeUtf8 } from "../platform/utf8.ts";
+import { Store } from "../records/records.ts";
+import type { Seal } from "./record.ts";
+import type { Anchor, Side } from "./region.ts";
 import { LineRef } from "./repo-path.ts";
-import type { Seal } from "./seal/record.ts";
-import type { Anchor, Side } from "./seal/region.ts";
-import { Store } from "./store.ts";
-import { decodeUtf8 } from "./utf8.ts";
 
 const IO_CONCURRENCY = 16;
 

@@ -1,7 +1,7 @@
 import * as NodePath from "@effect/platform-node/NodePath";
 import { Effect, Option, Path, Schema, SchemaTransformation } from "effect";
 
-import { invalid } from "./platform/stored.ts";
+import { invalid } from "../platform/stored.ts";
 
 /** The repository-relative form of `input`, or none if it is absolute or climbs out; the root itself is "". */
 const inRepo = (input: string) =>

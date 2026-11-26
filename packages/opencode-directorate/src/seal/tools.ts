@@ -1,38 +1,37 @@
 // Directorate reading tools: how the Liaison, Auditors, Seats, and Compliance read the sealed code, and how the Liaison accounts for what it did not.
 import { Schema } from "effect";
+import type { FileSystem, Path } from "effect";
 
+import { failure } from "../platform/error.ts";
+import {
+  actor,
+  optional,
+  positiveInt,
+  str,
+  strArr,
+} from "../platform/platform.ts";
+import type { DefineTool, Git } from "../platform/platform.ts";
+import { Store } from "../records/records.ts";
 import {
   coverageSummary,
   dispose,
   markShown,
   nextRegions,
 } from "./coverage.ts";
-import { failure } from "./error.ts";
+import { DispositionSchema, SideSchema } from "./region.ts";
+import { RepoPath, RepoScope } from "./repo-path.ts";
+import { done, locked, mutate, Sessions, unlocked } from "./sessions.ts";
 import {
   grepSealed,
   history,
   listFiles,
   readLines,
   renderRegions,
-} from "./inspect.ts";
-import { RepoPath, RepoScope } from "./repo-path.ts";
-import { DispositionSchema, SideSchema } from "./seal/region.ts";
-import { Sessions } from "./session.ts";
-import { Store } from "./store.ts";
-import {
-  actor,
-  done,
-  locked,
-  mutate,
-  optional,
-  positiveInt,
-  str,
-  strArr,
-  unlocked,
-} from "./tool.ts";
-import type { DefineTool } from "./tool.ts";
+} from "./views.ts";
 
-export const readTools = (tool: DefineTool) => {
+export const readTools = (
+  tool: DefineTool<Sessions | Store | Git | FileSystem.FileSystem | Path.Path>
+) => {
   tool({
     description:
       "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",

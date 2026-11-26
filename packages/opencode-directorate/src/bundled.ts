@@ -3,7 +3,7 @@ import { Data, Effect, FileSystem, Path, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
 import { ROLES } from "./feature/agents/agent.ts";
-import { Host } from "./session.ts";
+import { Host } from "./platform/platform.ts";
 
 const AgentFrontmatter = Schema.Struct({
   color: Agent.Info.fields.color,

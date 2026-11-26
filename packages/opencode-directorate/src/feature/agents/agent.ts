@@ -25,6 +25,21 @@ export const CHILD_ROLES = [SCOUT, PANELIST, REFUTER] as const;
 export const ROLE_SET: ReadonlySet<string> = new Set(ROLES);
 export const CHILD_ROLE_SET: ReadonlySet<string> = new Set(CHILD_ROLES);
 
+/** What each role may still call once the budget is locked. */
+export const LOCKED_TOOLS = new Map([
+  [
+    REVIEWER,
+    new Set([
+      "directorate_report",
+      "directorate_ledger_list",
+      "directorate_note",
+    ]),
+  ],
+  [SCOUT, new Set(["directorate_ledger_add", "directorate_note"])],
+  [PANELIST, new Set(["directorate_ledger_add", "directorate_note"])],
+  [REFUTER, new Set(["directorate_ledger_verdict", "directorate_ledger_list"])],
+]);
+
 export const ActorSchema = Schema.Struct({
   agent: Schema.String,
   session: Schema.String,

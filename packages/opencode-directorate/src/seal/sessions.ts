@@ -1,5 +1,7 @@
-// Directorate sessions: which seal each OpenCode session works on, and the host operations on those sessions.
+// Directorate sessions: which seal each OpenCode session works on, the host operations on those sessions, and the door
+// every tool change to an open seal goes through.
 import { Session } from "@opencode/schema/session";
+import type { Tool } from "@opencode/schema/tool";
 import {
   Context,
   Effect,
@@ -12,14 +14,19 @@ import {
   Schema,
 } from "effect";
 
-import { childOutstanding } from "./children.ts";
-import { ignore } from "./error.ts";
-import { CHILD_ROLE_SET } from "./feature/agents/agent.ts";
-import { Host } from "./host.ts";
-import type { Seal } from "./seal/record.ts";
-import { Store } from "./store.ts";
-
-export { Host } from "./host.ts";
+import { childOutstanding } from "../children.ts";
+import {
+  budgetLine,
+  CHILD_ROLE_SET,
+  LOCKED_TOOLS,
+  REVIEWER,
+} from "../feature/agents/agent.ts";
+import { failure, ignore } from "../platform/error.ts";
+import { Host } from "../platform/platform.ts";
+import type { Body } from "../platform/platform.ts";
+import { ActiveSeal, Store } from "../records/records.ts";
+import { budget } from "../workflow/review/window.ts";
+import type { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
@@ -289,3 +296,89 @@ export class Sessions extends Context.Service<
 >()("directorate/Sessions") {
   static readonly layer = Layer.effect(Sessions, make);
 }
+
+/** Sessions, answering records' ActiveSeal port. */
+export const sealLayer = Layer.effect(
+  ActiveSeal,
+  Effect.map(Effect.service(Sessions), (sessions) =>
+    ActiveSeal.of({ active: sessions.active, directory: sessions.directory })
+  )
+).pipe(Layer.provideMerge(Sessions.layer));
+
+/** A tool result; while the seal is open, it ends with the caller's budget line. */
+export const done = Effect.fnUntraced(function* done(
+  seal: Seal,
+  text: string,
+  agent?: string
+) {
+  return {
+    content: seal.reportedAt
+      ? text
+      : `${text}\n\n${yield* budgetLine(seal, agent)}`,
+  };
+});
+
+/** A reported seal accepts no changes; an owner-only tool also needs the session that sealed it. */
+export const writable = (
+  seal: Seal,
+  c: Tool.Context,
+  name: string,
+  ownerOnly = false
+) => {
+  if (seal.reportedAt) {
+    return failure(
+      `${seal.id} was already reported${seal.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`
+    );
+  }
+
+  return ownerOnly && seal.ownerSession !== c.sessionID
+    ? failure(
+        `Only the session that sealed ${seal.id} may call ${name}. To take over an interrupted review, call directorate_seal with resume: "${seal.id}".`
+      )
+    : Effect.void;
+};
+
+/** Runs body under the seal's lock, on a freshly loaded seal. */
+export const locked = <A, R>(
+  c: Tool.Context,
+  sealId: string,
+  body: Body<[seal: Seal], A, R>
+) =>
+  Effect.flatMap(Effect.service(Sessions), (sessions) =>
+    sessions.locked(c.sessionID, sealId, (seal) => Effect.gen(() => body(seal)))
+  );
+
+/**
+ * Once an open seal's budget locks, only the caller's locked tools run: a model step that began before the deadline still
+ * sees the tools stripped at lockdown, and the lock may have been held past it. Check under the seal's lock.
+ */
+export const unlocked = Effect.fnUntraced(function* unlocked(
+  seal: Seal,
+  c: Tool.Context,
+  name: string
+) {
+  if (
+    !seal.reportedAt &&
+    !LOCKED_TOOLS.get(c.agent)?.has(name) &&
+    (yield* budget(seal)).phase === "locked"
+  ) {
+    return yield* failure(
+      `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
+    );
+  }
+});
+
+/** A change to an open seal, under its lock; once the budget locks, only the caller's locked tools run. */
+export const mutate = <A, R>(
+  c: Tool.Context,
+  sealId: string,
+  name: string,
+  body: Body<[seal: Seal], A, R>,
+  ownerOnly = false
+) =>
+  locked(c, sealId, function* mutateSeal(seal) {
+    yield* writable(seal, c, name, ownerOnly);
+    yield* unlocked(seal, c, name);
+
+    return yield* body(seal);
+  });

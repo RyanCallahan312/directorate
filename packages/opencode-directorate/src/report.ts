@@ -11,19 +11,18 @@ import {
   panelSeats,
   seatName,
 } from "./children.ts";
-import { coverageSummary } from "./coverage.ts";
-import { failure } from "./error.ts";
-import type { ReviewError } from "./error.ts";
 import { isSecret } from "./exclusions.ts";
 import type { Entry, Ledger, Severity } from "./feature/ledger/entry.ts";
 import type { DirectiveStatus } from "./feature/report/directive.ts";
 import { currentSeverity, RANK, resolvedTarget, unresolved } from "./ledger.ts";
-import { changedSinceSeal } from "./seal.ts";
+import { failure } from "./platform/error.ts";
+import type { ReviewError } from "./platform/error.ts";
+import { Store } from "./records/records.ts";
+import { coverageSummary } from "./seal/coverage.ts";
 import type { Seal } from "./seal/record.ts";
 import type { Region } from "./seal/region.ts";
-import { Store } from "./store.ts";
-import { currentFingerprint } from "./target.ts";
-import type { Current } from "./target.ts";
+import { changedSinceSeal, currentFingerprint } from "./seal/seal.ts";
+import type { Current } from "./seal/seal.ts";
 import { budget } from "./workflow/review/window.ts";
 import type { Phase } from "./workflow/review/window.ts";
 

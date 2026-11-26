@@ -1,4 +1,5 @@
-// Directorate review services on the Node platform: the one layer the plugin entry and the tests build.
+// Platform: process and host capabilities with no review policy, and the OpenCode adapter. The slice's entry: the Node
+// layer, Git, Worktree, Host, ProcessIdentity, the host-record readers, and the tool adapter.
 import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
@@ -6,11 +7,31 @@ import * as NodePath from "@effect/platform-node/NodePath";
 import { Effect, FileSystem, Layer, Option } from "effect";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 
-import { Git } from "./git.ts";
 import { nodeProcessIdentity } from "./process-identity.ts";
-import { SettingsStore } from "./settings.ts";
-import { StateRoot, Store } from "./store.ts";
-import { Worktree } from "./worktree.ts";
+
+export { command } from "./command.ts";
+
+export { Git } from "./git.ts";
+
+export { Host } from "./host.ts";
+
+export {
+  activity,
+  createdAt,
+  foreign,
+  locationKey,
+  turns,
+} from "./host-record.ts";
+
+export type { Activity } from "./host-record.ts";
+
+export { ProcessIdentity } from "./process-identity.ts";
+
+export { actor, adapter, optional, positiveInt, str, strArr } from "./tool.ts";
+
+export type { Body, DefineTool } from "./tool.ts";
+
+export { Worktree } from "./worktree.ts";
 
 const processLayer = Layer.unwrap(
   Effect.serviceOption(ChildProcessSpawner).pipe(
@@ -34,19 +55,9 @@ const fileSystemLayer = Layer.unwrap(
   )
 );
 
-const nodeLayer = Layer.mergeAll(
+/** Node's process, filesystem, path, and crypto services, and this process's identity. */
+export const nodeLayer = Layer.mergeAll(
   processLayer,
   NodeCrypto.layer,
   nodeProcessIdentity
 ).pipe(Layer.provideMerge(Layer.merge(fileSystemLayer, NodePath.layer)));
-
-export const platformLayer = Layer.mergeAll(
-  Store.layer,
-  Worktree.layer,
-  SettingsStore.layer
-).pipe(
-  Layer.provideMerge(Layer.merge(Git.layer, StateRoot.layer)),
-  Layer.provideMerge(nodeLayer)
-);
-
-export type Platform = Layer.Success<typeof platformLayer>;

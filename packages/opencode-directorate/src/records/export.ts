@@ -1,13 +1,11 @@
 import { DateTime, Effect, FileSystem, Path, Result, Schema } from "effect";
 
+import { failure } from "../platform/error.ts";
+import { Git, Host, command } from "../platform/platform.ts";
+import { decodeUtf8 } from "../platform/utf8.ts";
+import { ActiveSeal } from "./active-seal.ts";
 import { writeArchive } from "./archive.ts";
-import { command } from "./command.ts";
-import { failure } from "./error.ts";
-import { Git } from "./git.ts";
-import { Host } from "./host.ts";
-import { Sessions } from "./session.ts";
-import { Store } from "./store.ts";
-import { decodeUtf8 } from "./utf8.ts";
+import { Store } from "./repository.ts";
 
 const TIMEOUT = 120_000;
 const SESSION_ID = /^ses[\w-]+$/u;
@@ -43,7 +41,7 @@ export const PAGE_SIZE = 50;
 export const listExportReviews = Effect.fn("Directorate.listExportReviews")(
   function* listExportReviews(sessionID: string, before: string | undefined) {
     const store = yield* Store;
-    const sessions = yield* Sessions;
+    const sessions = yield* ActiveSeal;
     const git = yield* Git;
 
     const directory =
@@ -181,7 +179,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
           seal.ownerSession,
           ...(seal.previousOwnerSessions ?? []),
           ...seal.children.map((child) => child.session),
-          // Owners' reads are recorded as "owner" (read-tools.ts); the owner sessions are already listed above.
+          // Owners' reads are recorded as "owner" (seal/tools.ts); the owner sessions are already listed above.
           ...seal.regions.flatMap((region) =>
             region.readBy.filter((reader) => reader !== "owner")
           ),

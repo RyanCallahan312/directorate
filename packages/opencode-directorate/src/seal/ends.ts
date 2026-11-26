@@ -2,13 +2,12 @@
 // to tell whether the sealed code moved.
 import { Effect } from "effect";
 
-import { failure, ReviewError } from "./error.ts";
-import { scopeOf } from "./exclusions.ts";
-import { Git } from "./git.ts";
-import { sha256 } from "./hash.ts";
-import type { Seal } from "./seal/record.ts";
-import type { Target, TargetKind } from "./seal/target.ts";
-import { Worktree } from "./worktree.ts";
+import { scopeOf } from "../exclusions.ts";
+import { failure, ReviewError } from "../platform/error.ts";
+import { sha256 } from "../platform/hash.ts";
+import { Git, Worktree } from "../platform/platform.ts";
+import type { Seal } from "./record.ts";
+import type { Target, TargetKind } from "./target.ts";
 
 export interface Ends {
   readonly kind: Exclude<TargetKind, "auto">;

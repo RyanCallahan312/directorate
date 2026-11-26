@@ -3,8 +3,8 @@ import { Bytes, Context, Effect, FileSystem, Layer, Path } from "effect";
 import { Digest } from "effect/crypto";
 import type { PlatformError } from "effect/PlatformError";
 
+import { isSecret } from "../exclusions.ts";
 import { ReviewError } from "./error.ts";
-import { isSecret } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { encodeUtf8 } from "./utf8.ts";

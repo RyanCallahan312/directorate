@@ -2,7 +2,7 @@ import { ByteSize, Effect, FileSystem, Option, Path, Stream } from "effect";
 import { Zip } from "effect/encoding";
 import type { PlatformError } from "effect/PlatformError";
 
-import { failure, ReviewError } from "./error.ts";
+import { failure, ReviewError } from "../platform/error.ts";
 
 type ArchiveEntry = Zip.ContentEntry | Zip.Entry<PlatformError>;
 

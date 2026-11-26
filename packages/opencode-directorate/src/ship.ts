@@ -20,27 +20,27 @@ import {
 } from "effect";
 import { SecureRandom } from "effect/crypto";
 
-import { failure, recover } from "./error.ts";
 import { REVIEWER, ROLE_SET } from "./feature/agents/agent.ts";
-import { Git } from "./git.ts";
-import { Host } from "./host.ts";
-import type { Platform } from "./platform.ts";
-import { ProcessIdentity } from "./process-identity.ts";
+import type { Platform } from "./index.ts";
+import { failure, recover } from "./platform/error.ts";
 import {
   activity,
   createdAt,
   foreign,
-  interruptedReview,
+  Git,
+  Host,
   locationKey,
+  ProcessIdentity,
   turns,
-} from "./recovery.ts";
-import type { Activity } from "./recovery.ts";
+} from "./platform/platform.ts";
+import type { Activity } from "./platform/platform.ts";
+import { Store } from "./records/records.ts";
 import type { Seal } from "./seal/record.ts";
+import { currentFingerprint } from "./seal/seal.ts";
 import { decideShip, shipKickoff } from "./ship-step.ts";
-import { Store } from "./store.ts";
-import { currentFingerprint } from "./target.ts";
 import { parseRequest, reviewRequest } from "./workflow/review/request.ts";
 import type { ReviewScope } from "./workflow/review/request.ts";
+import { interruptedReview } from "./workflow/review/review.ts";
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 

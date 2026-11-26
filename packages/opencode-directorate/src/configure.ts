@@ -4,7 +4,6 @@
 // key is rejected when read; tool input drops unknown keys, so the tool's result shows exactly what was stored.
 import { Effect, Schema } from "effect";
 
-import { failure, ignore } from "./error.ts";
 import { ROLE_SET } from "./feature/agents/agent.ts";
 import { DEFAULT_PANEL } from "./feature/dispatch/seat.ts";
 import { LENSES } from "./feature/ledger/entry.ts";
@@ -14,11 +13,12 @@ import {
   SettingsScopeSchema,
 } from "./feature/settings/file.ts";
 import type { Settings, SettingsScope } from "./feature/settings/file.ts";
+import { failure, ignore } from "./platform/error.ts";
+import { Host, optional, str } from "./platform/platform.ts";
+import type { DefineTool } from "./platform/platform.ts";
 import { DirectorateRpc } from "./rpc.ts";
-import { Host, Sessions } from "./session.ts";
+import { Sessions } from "./seal/seal.ts";
 import { describe, SettingsStore } from "./settings.ts";
-import { optional, str } from "./tool.ts";
-import type { DefineTool } from "./tool.ts";
 
 const show = (label: string, file: string, s: Settings) =>
   `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;
@@ -99,7 +99,9 @@ const make = Effect.gen(function* make() {
   return { load: store.load, models, save };
 });
 
-export const configureTool = (tool: DefineTool) => {
+export const configureTool = (
+  tool: DefineTool<Sessions | Host | SettingsStore>
+) => {
   tool({
     description:
       "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",

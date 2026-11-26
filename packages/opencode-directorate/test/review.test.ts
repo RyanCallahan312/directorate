@@ -25,26 +25,41 @@ import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { childFailures } from "../src/children.ts";
-import { command } from "../src/command.ts";
+import { isSecret } from "../src/exclusions.ts";
+import { budgetLine } from "../src/feature/agents/agent.ts";
+import type { Actor } from "../src/feature/agents/agent.ts";
+import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
+import { platformLayer } from "../src/index.ts";
+import type { Platform } from "../src/index.ts";
+import {
+  currentSeverity,
+  decide,
+  reopen,
+  unresolved,
+  verdictError,
+} from "../src/ledger.ts";
+import { command } from "../src/platform/command.ts";
+import { Git } from "../src/platform/git.ts";
+import { StateRoot, Store } from "../src/records/records.ts";
+import { assess, finalize, renderReport } from "../src/report.ts";
 import {
   checkEvidence,
   checkQuote,
   depsOf,
   readable,
   sealedFile,
-} from "../src/content.ts";
+} from "../src/seal/content.ts";
 import {
   coverageSummary,
   dispose,
   markShown,
   nextRegions,
-} from "../src/coverage.ts";
-import { assemble, buildRegions, RawDiff } from "../src/diff.ts";
-import { isSecret } from "../src/exclusions.ts";
-import { budgetLine } from "../src/feature/agents/agent.ts";
-import type { Actor } from "../src/feature/agents/agent.ts";
-import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
-import { Git } from "../src/git.ts";
+} from "../src/seal/coverage.ts";
+import { assemble, buildRegions, RawDiff } from "../src/seal/diff.ts";
+import { currentFingerprint } from "../src/seal/ends.ts";
+import type { Seal } from "../src/seal/record.ts";
+import { RepoPath, RepoScope } from "../src/seal/repo-path.ts";
+import { changedSinceSeal } from "../src/seal/seal.ts";
 import {
   grepSealed,
   history,
@@ -53,29 +68,14 @@ import {
   OUTPUT_MAX_LINES,
   readLines,
   renderRegions,
-} from "../src/inspect.ts";
+} from "../src/seal/views.ts";
+import { SettingsStore } from "../src/settings.ts";
+import type { Mode } from "../src/workflow/review/request.ts";
 import {
-  currentSeverity,
-  decide,
-  reopen,
-  unresolved,
-  verdictError,
-} from "../src/ledger.ts";
-import { platformLayer } from "../src/platform.ts";
-import type { Platform } from "../src/platform.ts";
-import { RepoPath, RepoScope } from "../src/repo-path.ts";
-import { assess, finalize, renderReport } from "../src/report.ts";
-import {
-  changedSinceSeal,
   createSeal,
   recheckSeal,
   refreshSeal,
-} from "../src/seal.ts";
-import type { Seal } from "../src/seal/record.ts";
-import { SettingsStore } from "../src/settings.ts";
-import { StateRoot, Store } from "../src/store.ts";
-import { currentFingerprint } from "../src/target.ts";
-import type { Mode } from "../src/workflow/review/request.ts";
+} from "../src/workflow/review/review.ts";
 import { budget } from "../src/workflow/review/window.ts";
 import { commandFixture } from "./fixtures.ts";
 
@@ -3196,8 +3196,8 @@ test("mutation lock excludes a separate process", async () => {
         "-e",
         `
     import { Effect } from "effect"
-    import { platformLayer } from "./src/platform.ts"
-    import { Store } from "./src/store.ts"
+    import { platformLayer } from "./src/index.ts"
+    import { Store } from "./src/records/records.ts"
     console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Store), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
       Effect.timeoutOrElse({ duration: ${ms}, orElse: () => Effect.succeed("waiting") }),
       Effect.provide(platformLayer),

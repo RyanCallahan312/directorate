@@ -84,25 +84,3 @@ export const turns = (messages: readonly SessionMessage.Info[]) =>
 
 export const createdAt = (message: SessionMessage.Info) =>
   DateTime.toEpochMillis(message.time.created);
-
-/** On resume, ignore old interruptions, not later ones. Older manually resumed seals lack the resume time. */
-export const interruptedReview = (
-  seal: {
-    readonly createdAt: DateTime.Utc;
-    readonly halted?: boolean | undefined;
-    readonly resumedAt?: DateTime.Utc | undefined;
-  },
-  messages: readonly SessionMessage.Info[]
-) => {
-  if (seal.halted || (!seal.resumedAt && seal.halted === false)) {
-    return seal.halted === true;
-  }
-
-  const since = DateTime.toEpochMillis(seal.resumedAt ?? seal.createdAt);
-
-  return turns(messages).some(
-    (turn) =>
-      turn.outcome === "interrupted" &&
-      (seal.resumedAt ? createdAt(turn) > since : createdAt(turn) >= since)
-  );
-};

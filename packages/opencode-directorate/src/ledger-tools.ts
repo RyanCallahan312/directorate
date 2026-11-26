@@ -1,4 +1,5 @@
 import { DateTime, Effect, Function, Schema } from "effect";
+import type { FileSystem, Path } from "effect";
 
 import {
   actorName,
@@ -6,9 +7,6 @@ import {
   childQuestion,
   questionText,
 } from "./children.ts";
-import { checkEvidence, checkQuote } from "./content.ts";
-import { coverageSummary } from "./coverage.ts";
-import { failure, ReviewError } from "./error.ts";
 import { PANELIST, REVIEWER, SCOUT } from "./feature/agents/agent.ts";
 import {
   EntryStatus,
@@ -19,7 +17,6 @@ import {
   VerdictKind,
 } from "./feature/ledger/entry.ts";
 import type { Entry } from "./feature/ledger/entry.ts";
-import { Git } from "./git.ts";
 import {
   currentSeverity,
   decide,
@@ -27,23 +24,35 @@ import {
   unresolved,
   verdictError,
 } from "./ledger.ts";
-// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
-import { RepoPath } from "./repo-path.ts";
-import { SideSchema } from "./seal/region.ts";
-import { Host, Sessions } from "./session.ts";
-import { Store } from "./store.ts";
+import { failure, ReviewError } from "./platform/error.ts";
 import {
   actor,
-  done,
-  mutate,
+  Git,
+  Host,
   optional,
   positiveInt,
   str,
   strArr,
-} from "./tool.ts";
-import type { DefineTool } from "./tool.ts";
+} from "./platform/platform.ts";
+import type { DefineTool } from "./platform/platform.ts";
+import { Store } from "./records/records.ts";
+import { coverageSummary } from "./seal/coverage.ts";
+// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
+import { SideSchema } from "./seal/region.ts";
+import {
+  RepoPath,
+  Sessions,
+  checkEvidence,
+  checkQuote,
+  done,
+  mutate,
+} from "./seal/seal.ts";
 
-export const ledgerTools = (tool: DefineTool) => {
+export const ledgerTools = (
+  tool: DefineTool<
+    Sessions | Store | Git | Host | FileSystem.FileSystem | Path.Path
+  >
+) => {
   tool({
     description:
       "File a candidate finding to the dossier the moment you find it. The quote must contain at least one complete line (8+ non-space characters) of the code at the anchor on the sealed side; the anchor snaps to the nearest place it is. Evidence is path:line refs you read. Entries stay unverified until a different session clears them.",

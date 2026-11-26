@@ -1,7 +1,7 @@
 // The Directorate: the review workflow, as its state chart. A Liaison session seals a target (directorate_seal), works
 // through the budget's phases (normal → drain → locked), and leaves through directorate_report's protocol gates, or
 // the deadline watchdog reports for it. Auditors, Seats, and Compliance run beside it: launching → running → completed | failed.
-// Tools used inside a state are in read-tools.ts and ledger-tools.ts; the state itself is the seal (store.ts).
+// Tools used inside a state are in seal/tools.ts and ledger-tools.ts; the state itself is the seal (records/repository.ts).
 import { Plugin } from "@opencode/plugin/effect";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
@@ -38,13 +38,11 @@ import {
   seatName,
 } from "./children.ts";
 import { configureRpc, configureTool } from "./configure.ts";
-import { coverageSummary } from "./coverage.ts";
-import { failure, ignore, recover } from "./error.ts";
-import { exportReview, listExportReviews } from "./export.ts";
 import {
   budgetNotice,
   CHILD_ROLE_SET,
   CHILD_ROLES,
+  LOCKED_TOOLS,
   PANELIST,
   REFUTER,
   REVIEWER,
@@ -52,39 +50,47 @@ import {
 } from "./feature/agents/agent.ts";
 import type { Child } from "./feature/dispatch/lifecycle.ts";
 import { ModelRef } from "./feature/dispatch/seat.ts";
-import { Git } from "./git.ts";
 import { ledgerTools } from "./ledger-tools.ts";
 import { currentSeverity, unresolved } from "./ledger.ts";
-import { platformLayer } from "./platform.ts";
-import { ProcessIdentity } from "./process-identity.ts";
-import { readTools } from "./read-tools.ts";
+import { failure, ignore, recover } from "./platform/error.ts";
 import {
   activity,
-  foreign,
-  interruptedReview,
-  locationKey,
-} from "./recovery.ts";
-import { RepoScope } from "./repo-path.ts";
-import { finalize } from "./report.ts";
-import { createSeal, recheckable, recheckSeal, refreshSeal } from "./seal.ts";
-import type { Seal } from "./seal/record.ts";
-import { TargetKindSchema } from "./seal/target.ts";
-import { Host, Sessions } from "./session.ts";
-import { describe, resolve, SettingsStore } from "./settings.ts";
-import { registerShip } from "./ship.ts";
-import { Store } from "./store.ts";
-import { currentFingerprint } from "./target.ts";
-import {
   actor,
   adapter,
+  foreign,
+  Git,
+  Host,
+  locationKey,
+  nodeLayer,
+  optional,
+  ProcessIdentity,
+  str,
+  Worktree,
+} from "./platform/platform.ts";
+import {
+  exportReview,
+  listExportReviews,
+  StateRoot,
+  Store,
+} from "./records/records.ts";
+import type { ActiveSeal } from "./records/records.ts";
+import { finalize } from "./report.ts";
+import { coverageSummary } from "./seal/coverage.ts";
+import type { Seal } from "./seal/record.ts";
+import {
+  currentFingerprint,
   done,
   locked,
-  LOCKED_TOOLS,
   mutate,
-  optional,
-  str,
+  readTools,
+  RepoScope,
+  sealLayer,
+  Sessions,
   writable,
-} from "./tool.ts";
+} from "./seal/seal.ts";
+import { TargetKindSchema } from "./seal/target.ts";
+import { describe, resolve, SettingsStore } from "./settings.ts";
+import { registerShip } from "./ship.ts";
 import {
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
@@ -92,6 +98,13 @@ import {
   ReviewScopeSchema,
   reviewRequest,
 } from "./workflow/review/request.ts";
+import {
+  createSeal,
+  interruptedReview,
+  recheckable,
+  recheckSeal,
+  refreshSeal,
+} from "./workflow/review/review.ts";
 import { budget } from "./workflow/review/window.ts";
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
@@ -241,7 +254,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
   const sessions = yield* Sessions;
   const store = yield* Store;
   const settings = yield* SettingsStore;
-  const { hook, tools } = yield* adapter;
+  const { hook, tools } = yield* adapter<Services>();
   const loadedAt = yield* Clock.currentTimeMillis;
   const { pid } = yield* ProcessIdentity;
 
@@ -1797,12 +1810,27 @@ const register = Effect.fn("Directorate.register")(function* register() {
   );
 });
 
+/** Directorate review services on the Node platform: the one layer the plugin entry and the tests build. */
+export const platformLayer = Layer.mergeAll(
+  Store.layer,
+  Worktree.layer,
+  SettingsStore.layer
+).pipe(
+  Layer.provideMerge(Layer.merge(Git.layer, StateRoot.layer)),
+  Layer.provideMerge(nodeLayer)
+);
+
+export type Platform = Layer.Success<typeof platformLayer>;
+
+/** The services tool and hook bodies run with. */
+type Services = Platform | Host | Sessions | ActiveSeal;
+
 export default Plugin.define({
   // Layer.build ties the services' resources to the plugin's scope; tools and hooks receive exactly these services,
   // never the host's request context.
   effect: (ctx) =>
     Layer.build(
-      Sessions.layer.pipe(
+      sealLayer.pipe(
         Layer.provideMerge(Layer.succeed(Host, ctx)),
         Layer.provideMerge(platformLayer)
       )

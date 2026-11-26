@@ -8,7 +8,7 @@ import { PANELIST, REFUTER, SCOUT } from "./feature/agents/agent.ts";
 import type { Actor } from "./feature/agents/agent.ts";
 import type { Child } from "./feature/dispatch/lifecycle.ts";
 import type { Ledger } from "./feature/ledger/entry.ts";
-import { createdAt } from "./recovery.ts";
+import { createdAt } from "./platform/platform.ts";
 import type { Seal } from "./seal/record.ts";
 
 export const childOutstanding = (seal: Seal) =>

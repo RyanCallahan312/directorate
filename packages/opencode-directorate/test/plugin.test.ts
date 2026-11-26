@@ -46,15 +46,15 @@ import { Yaml, Zip } from "effect/encoding";
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
-import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
 import { LENSES } from "../src/feature/ledger/entry.ts";
+import { Worktree } from "../src/platform/worktree.ts";
+import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/records/export.ts";
 import type { SettingsView, WriteResult } from "../src/rpc.ts";
 import { SealJson } from "../src/seal/record.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
 } from "../src/workflow/review/window.ts";
-import { Worktree } from "../src/worktree.ts";
 import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {
