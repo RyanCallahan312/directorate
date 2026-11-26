@@ -3,7 +3,12 @@
 import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
 import { exclusionReason } from "../exclusions.ts";
-import { sha256 } from "../platform/platform.ts";
+import {
+  ChangeCodeSchema,
+  isRenameOrCopy,
+  isTypechange,
+  sha256,
+} from "../platform/platform.ts";
 import { Count, invalid } from "../platform/stored.ts";
 import { FileEntry, FileStatusSchema, Region } from "./region.ts";
 
@@ -20,7 +25,7 @@ const PieceSchema = Schema.Struct({
 export type Piece = typeof PieceSchema.Type;
 
 /** Patch sections a raw record owns: a typechange (a file that became a symlink, or back) has two. */
-const sectionsOf = (code: string) => (code === "T" ? 2 : 1);
+const sectionsOf = (code: string) => (isTypechange(code) ? 2 : 1);
 
 /**
  * `git diff --raw -z -p` as one piece per file, after OpenCode's own split (packages/core/src/vcs/patch.ts). The raw
@@ -42,7 +47,7 @@ export const RawDiff = Schema.String.pipe(
 
           while (field?.startsWith(":")) {
             const code = field.split(" ")[4]?.[0] ?? "M";
-            const renamed = code === "R" || code === "C";
+            const renamed = isRenameOrCopy(code);
             const path = fields[i + (renamed ? 2 : 1)];
             const oldPath = renamed ? fields[i + 1] : undefined;
 
@@ -147,10 +152,20 @@ class ParsedFile extends Schema.Class<
   }
 }
 
-/** The raw-record status letters git writes for a changed file, other than those it never writes for a diff. */
-const ChangeCodeSchema = Schema.Literals(["A", "C", "D", "M", "R", "T"]);
-
 const isChangeCode = Schema.is(ChangeCodeSchema);
+
+const isModified = Schema.is(FileStatusSchema.pick(["modified"]));
+
+const isBinary = Schema.is(FileStatusSchema.pick(["binary"]));
+
+/** A hunk whose end is not known yet: where it starts, and the mark after its header, where the next one begins. */
+const OpenHunkSchema = Schema.Struct({
+  newLines: Count,
+  newStart: Count,
+  next: Count,
+  patchStart: Count,
+  sectionStart: Count,
+});
 
 const STATUS = Schema.Record(ChangeCodeSchema, FileStatusSchema).make({
   A: "added",
@@ -213,13 +228,7 @@ export const assemble = (pieces: readonly Piece[]) => {
     // Section and hunk headers, by line number; each hunk ends just before the next one.
     const marks: number[] = [];
 
-    const opened: {
-      newStart: number;
-      newLines: number;
-      patchStart: number;
-      next: number;
-      sectionStart: number;
-    }[] = [];
+    const opened = Array.of<typeof OpenHunkSchema.Type>();
 
     let sectionStart = patchStart;
 
@@ -268,7 +277,7 @@ export const assemble = (pieces: readonly Piece[]) => {
       patchStart,
       path: piece.path,
       removed,
-      status: status === "modified" && !hunks.length ? "mode" : status,
+      status: isModified(status) && !hunks.length ? "mode" : status,
     });
   });
 
@@ -283,7 +292,7 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
     let k = 0;
 
     for (const f of files) {
-      if (f.status === "binary" || f.excluded) {
+      if (isBinary(f.status) || f.excluded) {
         continue;
       }
 

@@ -1,10 +1,17 @@
 import { DateTime, Effect, FileSystem, Path, Result, Schema } from "effect";
 
-import { Git, Host, command } from "../platform/platform.ts";
+import {
+  Git,
+  Host,
+  command,
+  isDirectory,
+  isFile,
+} from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
+import { isOwnerMark } from "../seal/region.ts";
 import { ActiveSeal } from "./active-seal.ts";
 import { ExportFailed, writeArchive } from "./archive.ts";
-import { Records } from "./repository.ts";
+import { isRecordFile, Records } from "./repository.ts";
 
 const TIMEOUT = 120_000;
 const SESSION_ID = /^ses[\w-]+$/u;
@@ -95,11 +102,11 @@ const copyArtifact: (
     const paths = yield* Path.Path;
     const { type } = yield* fs.lstat(source);
 
-    if (type === "File") {
+    if (isFile(type)) {
       return yield* fs.copyFile(source, dest);
     }
 
-    if (type !== "Directory") {
+    if (!isDirectory(type)) {
       return yield* new ExportFailed({
         message: `Not a regular export artifact: ${source}`,
       });
@@ -124,7 +131,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
 
   const source = paths.join(store.root, id);
 
-  if ((yield* fs.lstat(source)).type !== "Directory") {
+  if (!isDirectory((yield* fs.lstat(source)).type)) {
     return yield* new ExportFailed({
       message: `Not a seal directory: ${source}`,
     });
@@ -141,10 +148,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
 
       const names = (yield* fs.readDirectory(source))
         .filter(
-          (name) =>
-            ["seal.json", "ledger.json", "report.md"].includes(name) ||
-            DIFF.test(name) ||
-            SNAPSHOT.test(name)
+          (name) => isRecordFile(name) || DIFF.test(name) || SNAPSHOT.test(name)
         )
         .toSorted();
 
@@ -162,9 +166,9 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
   const missingArtifacts = [
     "ledger.json",
     seal.gen ? `diff.g${seal.gen}.patch` : "diff.patch",
-    ...(seal.postImage === "worktree"
-      ? [seal.gen ? `snapshot.g${seal.gen}` : "snapshot"]
-      : []),
+    ...(seal.pinsCommit
+      ? []
+      : [seal.gen ? `snapshot.g${seal.gen}` : "snapshot"]),
     ...(seal.reportedAt ? ["report.md"] : []),
   ].filter((name) => !files.includes(name));
 
@@ -184,7 +188,7 @@ const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
           ...seal.children.map((child) => child.session),
           // Owners' reads are recorded as "owner" (seal/tools.ts); the owner sessions are already listed above.
           ...seal.regions.flatMap((region) =>
-            region.readBy.filter((reader) => reader !== "owner")
+            region.readBy.filter((reader) => !isOwnerMark(reader))
           ),
         ].filter((value): value is string => Boolean(value))
       ),

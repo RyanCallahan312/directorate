@@ -6,7 +6,11 @@ import { Effect } from "effect";
 import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { budget, PHASE_STAGES } from "../../workflow/review/window.ts";
+import {
+  budget,
+  isLocked,
+  PHASE_STAGES,
+} from "../../workflow/review/window.ts";
 import {
   agentNamed,
   budgetNotice,
@@ -15,8 +19,7 @@ import {
 } from "./agent.ts";
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
-const LIAISON_ONLY =
-  "Only directorate_liaison runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch directorate_liaison with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another. To re-check after fixes, send that session a follow-up asking for a re-check, or dispatch a new Liaison with the seal id from the Directive's Containment line.";
+const LIAISON_ONLY = `Only ${Liaison.id} runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch ${Liaison.id} with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another. To re-check after fixes, send that session a follow-up asking for a re-check, or dispatch a new Liaison with the seal id from the Directive's Containment line.`;
 
 /** True for a request of an agent outside The Directorate, whose tools then keep only those to configure and export. */
 export const withholdHarness = Effect.fnUntraced(function* withholdHarness(
@@ -45,7 +48,7 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
 ) {
   const b = yield* budget(seal.window);
 
-  if (b.phase !== "locked") {
+  if (!isLocked(b.phase)) {
     return;
   }
 

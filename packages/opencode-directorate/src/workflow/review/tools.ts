@@ -2,6 +2,7 @@
 // by abandoning) and directorate_refresh, and what each tells the Liaison.
 import { DateTime, Effect, Schema, Semaphore } from "effect";
 
+import { Compliance, Seat } from "../../feature/agents/agent.ts";
 import { seatName } from "../../feature/dispatch/lifecycle.ts";
 import { ModelRef } from "../../feature/dispatch/seat.ts";
 import { currentSeverity, unresolved } from "../../feature/ledger/decide.ts";
@@ -77,12 +78,12 @@ const sealSummary = (seal: Seal) => {
 
   return [
     `Containment sealed \`${seal.id}\`: ${seal.description}.`,
-    `base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
+    `base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
     seal.lensesOff
       ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
       : undefined,
     seal.panel && seal.regions.length
-      ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} directorate_seat subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
+      ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} ${Seat.id} subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
       : undefined,
     "",
     "| File | Status | Lines | Regions | Excluded |",
@@ -121,7 +122,7 @@ const recheckSummary = (
 
   return [
     `Containment sealed \`${r.seal.id}\`, a re-check of \`${earlier.id}\` (${r.seal.mode}): ${r.seal.description}.`,
-    `base ${r.seal.baseSha.slice(0, 12)} · head ${r.seal.postImage === "commit" ? r.seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${r.seal.regions.length} regions, ${cov.read} already read in the earlier review and unchanged · ${cov.unread.length} to read · budget ${r.seal.budgetMinutes} min.`,
+    `base ${r.seal.baseSha.slice(0, 12)} · head ${r.seal.pinsCommit ? r.seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${r.seal.regions.length} regions, ${cov.read} already read in the earlier review and unchanged · ${cov.unread.length} to read · budget ${r.seal.budgetMinutes} min.`,
     earlier.panel
       ? "The earlier review had a panel; a re-check runs without Directorate Seats."
       : undefined,
@@ -133,16 +134,16 @@ const recheckSummary = (
       ? `Changed since the earlier review: ${r.files.join(", ")}`
       : "Nothing changed since the earlier review: its findings stand unless a change elsewhere fixes one.",
     r.reopened.length
-      ? `\nReopened for re-decision (route to directorate_compliance):\n${carried(r.reopened)}`
+      ? `\nReopened for re-decision (route to ${Compliance.id}):\n${carried(r.reopened)}`
       : undefined,
     r.kept.length
-      ? `\nStill confirmed (nothing they rest on changed; route one to directorate_compliance only if a change elsewhere may fix it):\n${carried(r.kept)}`
+      ? `\nStill confirmed (nothing they rest on changed; route one to ${Compliance.id} only if a change elsewhere may fix it):\n${carried(r.kept)}`
       : undefined,
     r.unanswered.length
       ? `\nUnanswered in the earlier review (answer them if the change touched them, else note them again):\n${r.unanswered.map((t) => `- ${t}`).join("\n")}`
       : undefined,
     "",
-    "Next: read the unread regions with directorate_diff, look for new defects only in code changed since the earlier review, and route the reopened findings to directorate_compliance: confirmed (re-anchored) if still present, resolved with the fixing lines if fixed, refuted if it never held.",
+    `Next: read the unread regions with directorate_diff, look for new defects only in code changed since the earlier review, and route the reopened findings to ${Compliance.id}: confirmed (re-anchored) if still present, resolved with the fixing lines if fixed, refuted if it never held.`,
   ]
     .filter((line) => line !== undefined)
     .join("\n");

@@ -10,6 +10,18 @@ export const SideSchema = Schema.Literals(["new", "old"]);
 
 export type Side = typeof SideSchema.Type;
 
+/** The base side: the code before the change. */
+export const isBaseSide = Schema.is(SideSchema.pick(["old"]));
+
+/** The sealed side: the post-image the review pinned. */
+export const isSealedSide = Schema.is(SideSchema.pick(["new"]));
+
+/** Each side's name in messages. */
+export const SIDE_NAMES = Schema.Record(SideSchema, Schema.String).make({
+  new: "sealed",
+  old: "base",
+});
+
 export const DispositionSchema = Schema.Literals([
   "reviewed",
   "skimmed",
@@ -17,6 +29,8 @@ export const DispositionSchema = Schema.Literals([
 ]);
 
 export type Disposition = typeof DispositionSchema.Type;
+
+export const isReviewed = Schema.is(DispositionSchema.pick(["reviewed"]));
 
 export const FileStatusSchema = Schema.Literals([
   "added",
@@ -29,6 +43,19 @@ export const FileStatusSchema = Schema.Literals([
 ]);
 
 export type FileStatus = typeof FileStatusSchema.Type;
+
+const isDeletedStatus = Schema.is(FileStatusSchema.pick(["deleted"]));
+
+/** The reader key the lead's reads are recorded under; every other reader is recorded by its session. */
+export const isOwnerMark = Schema.is(Schema.Literal("owner"));
+
+/** Who is reading regions: the key its reads are recorded under, and whether it is the lead. */
+export const ReaderSchema = Schema.Struct({
+  key: Schema.String,
+  owner: Schema.Boolean,
+});
+
+export type Reader = typeof ReaderSchema.Type;
 
 /** A chunk of the sealed diff (or of a whole file, for a paths target): its geometry, and who read or disposed of it. */
 export class Region extends Schema.Class<
@@ -58,16 +85,12 @@ export class Region extends Schema.Class<
   get isRead() {
     return (
       (!this.disposition && Boolean(this.ownerRead)) ||
-      this.disposition === "reviewed"
+      isReviewed(this.disposition)
     );
   }
 
   /** Shown to `reader` up to `next`; read through when `complete`. */
-  shown(
-    reader: { key: string; owner: boolean },
-    next: number,
-    complete: boolean
-  ) {
+  shown(reader: Reader, next: number, complete: boolean) {
     const offsets = { ...this.offsets, [reader.key]: next };
 
     if (!complete) {
@@ -112,7 +135,12 @@ export class FileEntry extends Schema.Class<
   path: Schema.String,
   removed: Count,
   status: FileStatusSchema,
-}) {}
+}) {
+  /** Gone from the post-image. */
+  get isDeleted() {
+    return isDeletedStatus(this.status);
+  }
+}
 
 /** Where an entry points: a line span on one side of the sealed code. Stored in ledger.json entries. */
 export class Anchor extends Schema.Class<

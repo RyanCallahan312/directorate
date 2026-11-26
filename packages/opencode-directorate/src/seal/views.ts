@@ -3,7 +3,12 @@
 import { Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 
 import { inScope, isSecret, scopeOf } from "../exclusions.ts";
-import { Git, IO_CONCURRENCY } from "../platform/platform.ts";
+import {
+  Git,
+  IO_CONCURRENCY,
+  isDeletedSignature,
+  isDirectory,
+} from "../platform/platform.ts";
 import { encodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import {
@@ -18,6 +23,7 @@ import {
 } from "./content.ts";
 import { Shown } from "./coverage.ts";
 import type { Seal } from "./record.ts";
+import { isBaseSide } from "./region.ts";
 import type { Region, Side } from "./region.ts";
 
 /**
@@ -297,11 +303,11 @@ const readSourceLabel = (
     return "installed dependency on disk (not part of the sealed change)";
   }
 
-  if (side === "old") {
+  if (isBaseSide(side)) {
     return `base ${seal.baseSha.slice(0, 10)}`;
   }
 
-  if (seal.postImage === "commit") {
+  if (seal.pinsCommit) {
     return `head ${seal.headSha.slice(0, 10)}`;
   }
 
@@ -365,19 +371,22 @@ export const readLines = Effect.fn("Directorate.readLines")(function* readLines(
   return `${path}:${s}-${e} of ${all.length} · ${src}\n${out.join("\n")}${cut}${e < all.length ? `\n… ${all.length - e} more lines (pass start: ${e + 1})` : ""}`;
 });
 
+/** Where and how directorate_grep searches: these paths, a fixed string rather than a regex, ignoring case. */
+const GrepSearchSchema = Schema.Struct({
+  fixed: Schema.optional(Schema.Boolean),
+  ignoreCase: Schema.optional(Schema.Boolean),
+  paths: Schema.optional(Schema.Array(Schema.String)),
+});
+
 export const grepSealed = Effect.fn("Directorate.grepSealed")(
   function* grepSealed(
     seal: Seal,
     pattern: string,
-    opts: {
-      paths?: readonly string[] | undefined;
-      fixed?: boolean | undefined;
-      ignoreCase?: boolean | undefined;
-    } = {}
+    opts: typeof GrepSearchSchema.Type = {}
   ) {
     const scope = scopeOf(opts.paths) ?? [];
     const translate = !opts.fixed && /\\\|/u.test(pattern);
-    const commit = seal.postImage === "commit";
+    const commit = seal.pinsCommit;
 
     // --null ends each file name with NUL, so names containing ":" are split correctly.
     const args = [
@@ -456,7 +465,7 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
           yield* Effect.option(fs.readLink(entry))
         );
 
-        const shown = `${name}${info?.type === "Directory" ? "/" : ""}`;
+        const shown = `${name}${isDirectory(info?.type) ? "/" : ""}`;
 
         if (link === undefined) {
           return shown;
@@ -521,22 +530,19 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
 
   const gone = new Set(seal.deleted);
 
-  const names =
-    seal.postImage === "commit"
-      ? yield* tree(seal.headSha)
-      : [
-          ...new Set([
-            ...(yield* tree(seal.baseSha)),
-            ...Object.entries(seal.sigs ?? {}).flatMap(([p, sig]) =>
-              sig === "deleted" ? [] : [p]
-            ),
-            ...seal.files.flatMap((f) =>
-              f.status === "deleted" ? [] : [f.path]
-            ),
-          ]),
-        ]
-          .filter((p) => inScope(p, scope) && !gone.has(p))
-          .toSorted();
+  const names = seal.pinsCommit
+    ? yield* tree(seal.headSha)
+    : [
+        ...new Set([
+          ...(yield* tree(seal.baseSha)),
+          ...Object.entries(seal.sigs ?? {}).flatMap(([p, sig]) =>
+            isDeletedSignature(sig) ? [] : [p]
+          ),
+          ...seal.files.flatMap((f) => (f.isDeleted ? [] : [f.path])),
+        ]),
+      ]
+        .filter((p) => inScope(p, scope) && !gone.has(p))
+        .toSorted();
 
   if (!names.length && dir && inDependencyDir(dir)) {
     return yield* listInstalled(seal, dir);
@@ -557,6 +563,9 @@ class InvalidRead extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("InvalidRead", { message: Schema.String }) {}
 
+/** git's object type for a file (`cat-file -t`). */
+const isBlob = Schema.is(Schema.Literal("blob"));
+
 const REV = /^(?!-)[0-9A-Za-z._/~^@{}-]+$/u;
 
 const historyShow = Effect.fnUntraced(function* historyShow(
@@ -575,7 +584,7 @@ const historyShow = Effect.fnUntraced(function* historyShow(
     const isFile = (commit: string) =>
       git
         .run(repo, ["cat-file", "-t", `${commit}:${path}`], [0, 128])
-        .pipe(Effect.map((type) => type.trim() === "blob"));
+        .pipe(Effect.map((type) => isBlob(type.trim())));
 
     if (!(yield* isFile(rev)) && !(yield* isFile(`${rev}^`))) {
       return yield* new InvalidRead({
@@ -614,18 +623,22 @@ const historyShow = Effect.fnUntraced(function* historyShow(
 /** What directorate_history shows: a log, a blame, or one commit. */
 export const HistoryKindSchema = Schema.Literals(["log", "blame", "show"]);
 
-type HistoryKind = typeof HistoryKindSchema.Type;
+/** Blame and show print a file's content; a log prints only commits. */
+const printsContent = Schema.is(HistoryKindSchema.pick(["blame", "show"]));
+
+/** A directorate_history request: what to show, and for which file, revision, lines, or number of commits. */
+const HistoryRequestSchema = Schema.Struct({
+  end: Schema.optionalKey(Schema.Finite),
+  kind: HistoryKindSchema,
+  limit: Schema.optionalKey(Schema.Finite),
+  path: Schema.optionalKey(Schema.String),
+  rev: Schema.optionalKey(Schema.String),
+  start: Schema.optionalKey(Schema.Finite),
+});
 
 export const history = Effect.fn("Directorate.history")(function* history(
   seal: Seal,
-  input: {
-    kind: HistoryKind;
-    path?: string;
-    rev?: string;
-    start?: number;
-    end?: number;
-    limit?: number;
-  }
+  input: typeof HistoryRequestSchema.Type
 ) {
   const git = yield* Git;
   const { path } = input;
@@ -637,7 +650,7 @@ export const history = Effect.fn("Directorate.history")(function* history(
   }
 
   // Blame and show would print the content it was renamed or copied from.
-  if (path && input.kind !== "log" && isWithheld(seal, path)) {
+  if (path && printsContent(input.kind) && isWithheld(seal, path)) {
     return yield* new Withheld({
       message: `${path} was renamed or copied from a secret-like path; withheld.`,
     });

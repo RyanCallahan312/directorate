@@ -19,6 +19,27 @@ import { encodeUtf8 } from "./utf8.ts";
 /** How many filesystem operations (reads, stats, removals) one fan-out runs at once. */
 export const IO_CONCURRENCY = 16;
 
+/** What kind of entry the filesystem reports a path as (`FileSystem.File.Type`). */
+const FileTypeSchema = Schema.Literals([
+  "File",
+  "Directory",
+  "SymbolicLink",
+  "BlockDevice",
+  "CharacterDevice",
+  "FIFO",
+  "Socket",
+  "Unknown",
+]);
+
+export const isFile = Schema.is(FileTypeSchema.pick(["File"]));
+
+export const isDirectory = Schema.is(FileTypeSchema.pick(["Directory"]));
+
+const isSymbolicLink = Schema.is(FileTypeSchema.pick(["SymbolicLink"]));
+
+/** A file or a symlink: what a review reads, as opposed to a directory or a special file. */
+const isFileOrLink = Schema.is(FileTypeSchema.pick(["File", "SymbolicLink"]));
+
 /** What a working-tree path is: absent, a symlink, an executable or plain file, or a checked-out submodule. */
 const EntryModeSchema = Schema.Literals([
   "absent",
@@ -29,6 +50,8 @@ const EntryModeSchema = Schema.Literals([
 ]);
 
 export type EntryMode = typeof EntryModeSchema.Type;
+
+const isGitlink = Schema.is(EntryModeSchema.pick(["gitlink"]));
 
 /** The git file mode of each kind of entry; an absent path diffs as a plain file. */
 const GIT_MODES = Schema.Record(EntryModeSchema, Schema.String).make({
@@ -51,9 +74,17 @@ export class LiveEntry extends Schema.Class<
   get gitMode() {
     return GIT_MODES[this.mode];
   }
+
+  /** A checked-out submodule, recorded as its commit. */
+  get isSubmodule() {
+    return isGitlink(this.mode);
+  }
 }
 
 const absent = LiveEntry.make({ mode: "absent" });
+
+/** The signature of a path gone from the post-image; any other signature is a mode and hash, or withheld. */
+export const isDeletedSignature = Schema.is(Schema.Literal("deleted"));
 
 /** Missing is a fact about the worktree; any other filesystem error is not. */
 const orMissing = <A, R>(self: Effect.Effect<A, PlatformError, R>) =>
@@ -84,7 +115,7 @@ const make = Effect.gen(function* make() {
         fs.lstat(paths.join(repo, ...parts.slice(0, i)))
       );
 
-      if (st?.type !== "Directory") {
+      if (!isDirectory(st?.type)) {
         return { abs: "", st: undefined };
       }
     }
@@ -97,9 +128,7 @@ const make = Effect.gen(function* make() {
   /** Whether a file or symlink exists under the path policy, without reading it. */
   const present = (repo: string, path: string) =>
     stat(repo, path).pipe(
-      Effect.map(
-        ({ st }) => st?.type === "File" || st?.type === "SymbolicLink"
-      ),
+      Effect.map(({ st }) => isFileOrLink(st?.type)),
       unreadable(path)
     );
 
@@ -125,7 +154,7 @@ const make = Effect.gen(function* make() {
       const { abs, st } = yield* stat(repo, path);
 
       // An untracked nested repository is listed as `dir/`; only a tracked gitlink names its directory bare.
-      if (st?.type === "Directory" && !path.endsWith("/")) {
+      if (isDirectory(st?.type) && !path.endsWith("/")) {
         const head = yield* submodule(abs);
 
         return head === undefined
@@ -136,7 +165,7 @@ const make = Effect.gen(function* make() {
             });
       }
 
-      if (st?.type === "SymbolicLink") {
+      if (isSymbolicLink(st?.type)) {
         const link = yield* orMissing(fs.readLink(abs));
 
         return link === undefined
@@ -147,7 +176,7 @@ const make = Effect.gen(function* make() {
             });
       }
 
-      if (st?.type !== "File") {
+      if (!isFile(st?.type)) {
         return absent;
       }
 

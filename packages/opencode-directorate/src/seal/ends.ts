@@ -4,8 +4,10 @@ import { Effect, Match, Schema } from "effect";
 
 import { scopeOf } from "../exclusions.ts";
 import { Git, sha256, Worktree } from "../platform/platform.ts";
+import type { PullRequest } from "../platform/platform.ts";
 import type { Seal } from "./record.ts";
 import {
+  isCommitImage,
   PostImageSchema,
   ResolvedKindSchema,
   Target,
@@ -118,15 +120,7 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   return yield* localEnds(repo, Target.make({ kind: "local" }));
 });
 
-const prMergeBase = (
-  repo: string,
-  m: {
-    readonly baseRefName: string;
-    readonly baseRefOid: string;
-    readonly headRefName: string;
-    readonly headRefOid: string;
-  }
-) =>
+const prMergeBase = (repo: string, m: PullRequest) =>
   Git.use((git) =>
     git.mergeBase(repo, m.baseRefOid, m.headRefOid, {
       base: m.baseRefName,
@@ -275,9 +269,9 @@ export const endsFingerprint = (
   repo: string,
   e: Pick<Ends, "postImage" | "baseSha" | "headSha" | "scope">
 ) =>
-  e.postImage === "worktree"
-    ? Worktree.use((wt) => wt.fingerprint(repo, e.baseSha, e.scope))
-    : commitPrint(e.baseSha, e.headSha);
+  isCommitImage(e.postImage)
+    ? commitPrint(e.baseSha, e.headSha)
+    : Worktree.use((wt) => wt.fingerprint(repo, e.baseSha, e.scope));
 
 /** A sealed target's ends as they are now, and their fingerprint; `unfetched` when the PR head moved out of reach. */
 export class Current extends Schema.Class<
@@ -297,7 +291,7 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
 ) {
   const t = seal.target;
 
-  if (seal.postImage === "worktree") {
+  if (!seal.pinsCommit) {
     return Current.make({
       baseSha: seal.baseSha,
       fingerprint: yield* endsFingerprint(seal.repo, {
@@ -310,7 +304,7 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
     });
   }
 
-  if (t.kind === "pr" && t.pr) {
+  if (t.isPullRequest && t.pr) {
     const m = yield* (yield* Git).pr(seal.repo, t.pr);
 
     if (!m.headFetched) {
@@ -346,7 +340,7 @@ const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(
   }
 
   // A commit is fixed; a range re-resolves its refs.
-  const e = t.kind === "range" ? yield* resolveEnds(seal.repo, t) : seal;
+  const e = t.isRange ? yield* resolveEnds(seal.repo, t) : seal;
 
   return Current.make({
     baseSha: e.baseSha,

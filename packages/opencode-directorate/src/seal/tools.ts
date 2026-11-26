@@ -84,7 +84,7 @@ export const readTools = (
               ...picked.slice(shown.length).map((r) => r.id),
             ];
 
-            const head = `[seal ${seal.id} · base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree"} · columns: old line, new line]`;
+            const head = `[seal ${seal.id} · base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree"} · columns: old line, new line]`;
 
             const tail = [
               owner

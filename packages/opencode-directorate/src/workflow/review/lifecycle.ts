@@ -20,7 +20,7 @@ import {
 import { emptyLedger } from "../../records/records.ts";
 import { carryMarks } from "../../seal/coverage.ts";
 import { Seal } from "../../seal/record.ts";
-import { Region } from "../../seal/region.ts";
+import { isBaseSide, isSealedSide, Region } from "../../seal/region.ts";
 import {
   capture,
   changedBetween,
@@ -38,14 +38,14 @@ import {
 import type { Current } from "../../seal/seal.ts";
 import { Target } from "../../seal/target.ts";
 import { started } from "./custody.ts";
-import type { Mode } from "./request.ts";
-import { shipped } from "./ship-link.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
   recheckMinutes,
-  Window,
-} from "./window.ts";
+} from "./request.ts";
+import type { Mode } from "./request.ts";
+import { shipped } from "./ship-link.ts";
+import { Window } from "./window.ts";
 
 /** What the review's state does not allow: a second active seal, re-checking an open review, resuming a reported one. */
 export class ReviewConflict extends Schema.TaggedError<
@@ -72,7 +72,7 @@ const sealId = Effect.fnUntraced(function* sealId(createdAt: DateTime.Utc) {
 
 /** A commit pair's description with the ends it moved to; a worktree's description does not name them. */
 const describedAt = (seal: Seal, cur: Pick<Current, "baseSha" | "headSha">) =>
-  seal.postImage === "commit"
+  seal.pinsCommit
     ? seal.description.replace(
         /\((?<prefix>[^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/u,
         `($1${cur.baseSha.slice(0, 10)} → ${cur.headSha.slice(0, 10)})`
@@ -158,13 +158,13 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
     const hit = [...depsOf(e)].filter((d) => changed.has(d));
 
     const gone =
-      e.anchor.side === "new" &&
+      isSealedSide(e.anchor.side) &&
       before.files.some(
         (f) => f.path === e.anchor.path && f.status !== "unchanged"
       ) &&
       !inChange.has(e.anchor.path);
 
-    const baseMoved = e.anchor.side === "old" && changed.has("(base moved)");
+    const baseMoved = isBaseSide(e.anchor.side) && changed.has("(base moved)");
 
     return hit.length || gone || baseMoved
       ? { files: hit.join(", ") || "base moved", gone, hit: hit.length > 0 }

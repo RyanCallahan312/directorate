@@ -24,7 +24,7 @@ import type { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
 import { ActiveSeal, Records } from "../records/records.ts";
-import { budget } from "../workflow/review/window.ts";
+import { budget, isLocked } from "../workflow/review/window.ts";
 import type { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
@@ -75,6 +75,21 @@ class Lockdown extends Schema.TaggedError<
 // no change from any writer but the ship link; each meets it in its own way: refused, left alone silently, or shown
 // read-only.
 
+/** Who may make a tool call: any participant in the review, or only the session that sealed it. */
+const CallersSchema = Schema.Literals(["participants", "owner"]);
+
+const isOwnerOnly = Schema.is(CallersSchema.pick(["owner"]));
+
+/** Whether a tool call is checked against the ToolCatalog once the budget locks, or exempt. */
+const LockdownCheckSchema = Schema.Literals(["catalog", "exempt"]);
+
+const isCatalogChecked = Schema.is(LockdownCheckSchema.pick(["catalog"]));
+
+/** What a reported seal does to a tool call: refuses it, or shows the seal and saves nothing. */
+const ReportedSchema = Schema.Literals(["refused", "shown"]);
+
+const isShownReported = Schema.is(ReportedSchema.pick(["shown"]));
+
 /**
  * A tool call by `actor`. On an open seal, owner-only tools (`callers: "owner"`) need the session that sealed it, and once
  * the budget locks only the tools the ToolCatalog says the caller's agent keeps still run (unless `lockdown: "exempt"`).
@@ -86,17 +101,32 @@ export class ToolCall extends Schema.TaggedClass<
   { readonly brand: unique symbol }
 >()("ToolCall", {
   actor: Actor,
-  callers: Schema.Literals(["participants", "owner"]).pipe(
+  callers: CallersSchema.pipe(
     Schema.withConstructorDefault(Effect.succeed("participants" as const))
   ),
-  lockdown: Schema.Literals(["catalog", "exempt"]).pipe(
+  lockdown: LockdownCheckSchema.pipe(
     Schema.withConstructorDefault(Effect.succeed("catalog" as const))
   ),
-  reported: Schema.Literals(["refused", "shown"]).pipe(
+  reported: ReportedSchema.pipe(
     Schema.withConstructorDefault(Effect.succeed("refused" as const))
   ),
   tool: Schema.String,
-}) {}
+}) {
+  /** Only the session that sealed may make it. */
+  get ownerOnly() {
+    return isOwnerOnly(this.callers);
+  }
+
+  /** Once the budget locks, it runs only if the ToolCatalog says the caller's agent keeps the tool. */
+  get catalogChecked() {
+    return isCatalogChecked(this.lockdown);
+  }
+
+  /** On a reported seal, it runs and saves nothing instead of being refused. */
+  get showsReported() {
+    return isShownReported(this.reported);
+  }
+}
 
 /** The ordered session-event consumer, and runs settled after a reload: a reported seal is left alone, silently. */
 export class HostEvent extends Schema.TaggedClass<
@@ -170,6 +200,22 @@ type Revision<A> =
       readonly ledger?: undefined;
     };
 
+/**
+ * How the door admits a writer: "write" runs the transition and saves what it hands back, "read" runs it and saves
+ * nothing, "skip" does not run it.
+ */
+const AdmissionSchema = Schema.Literals(["write", "read", "skip"]);
+
+const writes = Schema.is(AdmissionSchema.pick(["write"]));
+
+const skips = Schema.is(AdmissionSchema.pick(["skip"]));
+
+/** The seal and Liaison session a subagent call was launched for. */
+const LaunchSchema = Schema.Struct({
+  parent: Schema.String,
+  seal: Schema.String,
+});
+
 /** How a writer that leaves a reported seal alone is admitted. */
 const quietly = (seal: Seal) =>
   Effect.succeed(seal.reportedAt ? ("skip" as const) : ("write" as const));
@@ -204,7 +250,7 @@ const make = Effect.gen(function* make() {
    * close the seal before the launch links to its child session; the late child is stopped, not left running unowned.
    */
   const launches = yield* Ref.make(
-    HashMap.empty<string, { parent: string; seal: string }>()
+    HashMap.empty<string, typeof LaunchSchema.Type>()
   );
 
   const interrupt = (sessionID: string) =>
@@ -336,7 +382,7 @@ const make = Effect.gen(function* make() {
     call: ToolCall
   ) {
     if (seal.reportedAt) {
-      if (call.reported === "shown") {
+      if (call.showsReported) {
         return "read" as const;
       }
 
@@ -346,16 +392,16 @@ const make = Effect.gen(function* make() {
       });
     }
 
-    if (call.callers === "owner" && seal.ownerSession !== call.actor.session) {
+    if (call.ownerOnly && seal.ownerSession !== call.actor.session) {
       return yield* new NotOwner({ seal: seal.id, tool: call.tool });
     }
 
     // A model step that began before the deadline still sees the tools stripped at lockdown, and the lock may have been
     // held past it: check under the seal's lock.
     if (
-      call.lockdown === "catalog" &&
+      call.catalogChecked &&
       !(yield* catalog.keeps(call.actor.agent, call.tool)) &&
-      (yield* budget(seal.window)).phase === "locked"
+      isLocked((yield* budget(seal.window)).phase)
     ) {
       return yield* new Lockdown({
         agent: call.actor.agent,
@@ -454,12 +500,12 @@ const make = Effect.gen(function* make() {
       const seal = yield* loaded(sealId, writer);
       const admitted = yield* admit(seal, writer);
 
-      if (admitted === "skip") {
+      if (skips(admitted)) {
         return;
       }
 
       const save = (revision: Revision<unknown>) =>
-        admitted === "write" ? persist(sealId, revision) : Effect.void;
+        writes(admitted) ? persist(sealId, revision) : Effect.void;
 
       const revision = yield* transition(reviewOf(seal, save));
       yield* save(revision);

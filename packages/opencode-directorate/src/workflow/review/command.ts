@@ -3,6 +3,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { CommandDefinition } from "@opencode/plugin/effect/command";
 import { Effect } from "effect";
 
+import { Liaison } from "../../feature/agents/agent.ts";
 import { InvalidRequest, reviewRequest } from "./request.ts";
 
 export const reviewCommand = (host: Plugin.Context) =>
@@ -37,7 +38,7 @@ export const reviewCommand = (host: Plugin.Context) =>
             sessionID,
             text: [
               rest ? `<user_request>\n${rest}\n</user_request>` : "",
-              `Re-check ${which} after fixes${rest ? `, with the <user_request> above as its focus` : ""}. If you dispatched the directorate_liaison that issued it in this conversation, send that session a follow-up asking for the re-check. Otherwise dispatch directorate_liaison to re-check it: ${seal ? `tell it to pass recheck: "${seal}" to directorate_seal` : "it finds the latest reported seal with directorate_ledger_list and passes it as recheck to directorate_seal"}. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
+              `Re-check ${which} after fixes${rest ? `, with the <user_request> above as its focus` : ""}. If you dispatched the ${Liaison.id} that issued it in this conversation, send that session a follow-up asking for the re-check. Otherwise dispatch ${Liaison.id} to re-check it: ${seal ? `tell it to pass recheck: "${seal}" to directorate_seal` : "it finds the latest reported seal with directorate_ledger_list and passes it as recheck to directorate_seal"}. Wait for the Liaison and relay its final Directive verbatim. Do not run the review yourself.`,
             ]
               .filter(Boolean)
               .join("\n\n"),

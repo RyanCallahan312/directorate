@@ -33,6 +33,33 @@ export class UnreadableFile extends Schema.TaggedError<
   }
 }
 
+/** git's answer to a yes-or-no query such as `rev-parse --is-shallow-repository`. */
+const isYes = Schema.is(Schema.Literal("true"));
+
+/** `ls-files -v` tags a skip-worktree file S, or s when it is also assume-unchanged. */
+const isSkipWorktree = Schema.is(Schema.Literals(["S", "s"]));
+
+/** The status letters git's raw and name-status records write for a changed file, other than those it never writes for a diff. */
+export const ChangeCodeSchema = Schema.Literals(["A", "C", "D", "M", "R", "T"]);
+
+/** A deleted file. */
+export const isDeletion = Schema.is(ChangeCodeSchema.pick(["D"]));
+
+/** A renamed file. */
+export const isRename = Schema.is(ChangeCodeSchema.pick(["R"]));
+
+/** A renamed or copied file: its record names the source path too. */
+export const isRenameOrCopy = Schema.is(ChangeCodeSchema.pick(["R", "C"]));
+
+/** A typechange: a file that became a symlink, or back. */
+export const isTypechange = Schema.is(ChangeCodeSchema.pick(["T"]));
+
+/** How the two ends of a merge base read in a message: the names the caller gave them, not their commits. */
+const EndNamesSchema = Schema.Struct({
+  base: Schema.String,
+  head: Schema.String,
+});
+
 const GIT_ENV = (extra: Record<string, string> = {}) => ({
   GIT_CONFIG_PARAMETERS: "",
   GIT_EXTERNAL_DIFF: "",
@@ -42,18 +69,21 @@ const GIT_ENV = (extra: Record<string, string> = {}) => ({
   ...extra,
 });
 
+/** A pull request as `gh pr view --json` describes it: its two ends by name and commit. */
+const PullRequestSchema = Schema.Struct({
+  baseRefName: Schema.String,
+  baseRefOid: Schema.String,
+  headRefName: Schema.String,
+  headRefOid: Schema.String,
+  number: Schema.Int,
+  title: Schema.String,
+  url: Schema.String,
+});
+
+export type PullRequest = typeof PullRequestSchema.Type;
+
 const decodePr = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      baseRefName: Schema.String,
-      baseRefOid: Schema.String,
-      headRefName: Schema.String,
-      headRefOid: Schema.String,
-      number: Schema.Int,
-      title: Schema.String,
-      url: Schema.String,
-    })
-  )
+  Schema.fromJsonString(PullRequestSchema)
 );
 
 const make = Effect.gen(function* make() {
@@ -283,7 +313,7 @@ const make = Effect.gen(function* make() {
     repo: string,
     base: string,
     head: string,
-    labels?: { readonly base: string; readonly head: string }
+    labels?: typeof EndNamesSchema.Type
   ) {
     const mb = (yield* run(repo, ["merge-base", base, head], [0, 1])).trim();
 
@@ -291,9 +321,9 @@ const make = Effect.gen(function* make() {
       return mb;
     }
 
-    const shallow =
-      (yield* run(repo, ["rev-parse", "--is-shallow-repository"])).trim() ===
-      "true";
+    const shallow = isYes(
+      (yield* run(repo, ["rev-parse", "--is-shallow-repository"])).trim()
+    );
 
     const [b, h] = [labels?.base ?? base, labels?.head ?? head];
 
@@ -337,7 +367,7 @@ const make = Effect.gen(function* make() {
       .filter(Boolean)
       .flatMap((line) => {
         const tag = line.slice(0, 1);
-        const sparse = tag === "S" || tag === "s";
+        const sparse = isSkipWorktree(tag);
 
         return sparse || tag !== tag.toUpperCase()
           ? [{ path: line.slice(2), sparse }]
@@ -417,7 +447,7 @@ const make = Effect.gen(function* make() {
     for (let i = 0; i + 1 < fields.length; i += 2) {
       diffed.push(fields[i + 1] ?? "");
 
-      if (fields[i] === "D") {
+      if (isDeletion(fields[i])) {
         deleted.push(fields[i + 1] ?? "");
       }
     }
@@ -453,10 +483,9 @@ const make = Effect.gen(function* make() {
       Effect.mapError(
         (cause) =>
           new GitFailed({
-            message:
-              cause.code === "NotFound"
-                ? "gh CLI not found; PR targets need GitHub CLI."
-                : `gh ${args[0]} failed: ${cause.message}`,
+            message: cause.notInstalled
+              ? "gh CLI not found; PR targets need GitHub CLI."
+              : `gh ${args[0]} failed: ${cause.message}`,
           })
       )
     );

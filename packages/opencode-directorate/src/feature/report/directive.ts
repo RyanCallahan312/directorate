@@ -7,6 +7,7 @@ import { isSecret } from "../../exclusions.ts";
 import { orLegacyTrue, since, Time } from "../../platform/stored.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
+import { isLocked } from "../../workflow/review/window.ts";
 import type { Phase } from "../../workflow/review/window.ts";
 import {
   failedDispatches,
@@ -178,7 +179,7 @@ export const assess = (
       `code changed after the seal (${fresh.stale?.length} ${fresh.stale?.length === 1 ? "change" : "changes"})`,
       false,
     ],
-    [phase === "locked", "time budget ran out", false],
+    [isLocked(phase), "time budget ran out", false],
     [Boolean(seal.abandoned), "abandoned for a new review", true],
   ] as const;
 

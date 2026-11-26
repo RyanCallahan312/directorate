@@ -3,7 +3,15 @@
 import { Bytes, Effect, FileSystem, Path, Predicate, Schema } from "effect";
 
 import { exclusionReason, isSecret, scopeOf } from "../exclusions.ts";
-import { Git, IO_CONCURRENCY, sha256, Worktree } from "../platform/platform.ts";
+import {
+  Git,
+  IO_CONCURRENCY,
+  isDeletedSignature,
+  isDeletion,
+  isRename,
+  sha256,
+  Worktree,
+} from "../platform/platform.ts";
 import type { LiveEntry } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
@@ -371,17 +379,18 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
             : deleted;
         }
 
-        const { buf, mode } = yield* wt.entry(top, path);
+        const live = yield* wt.entry(top, path);
+        const { buf } = live;
 
         if (buf === undefined) {
           return deleted;
         }
 
-        if (mode === "gitlink" || binary(buf)) {
+        if (live.isSubmodule || binary(buf)) {
           return {
             file: FileEntry.make({
               added: 0,
-              excluded: mode === "gitlink" ? "submodule" : "binary",
+              excluded: live.isSubmodule ? "submodule" : "binary",
               path,
               removed: 0,
               status,
@@ -453,7 +462,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   sigs: Readonly<Record<string, string>> | undefined
 ) {
   const git = yield* Git;
-  const worktree = seal.postImage === "worktree";
+  const worktree = !seal.pinsCommit;
 
   const tracked = yield* decodeRawDiff(
     yield* git.run(
@@ -478,7 +487,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
 
   const replacements = new Map(
     tracked
-      .filter((p) => p.code === "D" && untrackedNames.has(p.path))
+      .filter((p) => isDeletion(p.code) && untrackedNames.has(p.path))
       .map((p) => [p.path, p])
   );
 
@@ -492,7 +501,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
   const rediffNames = new Set([
     ...unwatched,
     ...tracked
-      .filter((p) => p.code !== "D" && sigs?.[p.path] === "deleted")
+      .filter((p) => !isDeletion(p.code) && isDeletedSignature(sigs?.[p.path]))
       .map((p) => p.path),
   ]);
 
@@ -502,7 +511,7 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
     [
       ...Array.from(rediffNames, (path) => ({ path, removed: false })),
       ...misread.flatMap((p) =>
-        p.code === "R" && p.oldPath !== undefined
+        isRename(p.code) && p.oldPath !== undefined
           ? [{ path: p.oldPath, removed: true }]
           : []
       ),
@@ -553,7 +562,7 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
   const store = yield* Records;
   const wt = yield* Worktree;
   const top = seal.repo;
-  const worktree = seal.postImage === "worktree";
+  const worktree = !seal.pinsCommit;
   yield* store.resetSnapshot(seal);
 
   const {
@@ -594,10 +603,9 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
 
   const sigs = worktree ? Object.fromEntries(signed) : undefined;
 
-  const { text, files, regions } =
-    seal.target.kind === "paths"
-      ? yield* capturePaths(top, scope, new Set(changed))
-      : yield* captureDiff(seal, scope, hidden, sigs);
+  const { text, files, regions } = seal.target.wholeFiles
+    ? yield* capturePaths(top, scope, new Set(changed))
+    : yield* captureDiff(seal, scope, hidden, sigs);
 
   // A file renamed from a withheld path is withheld too: its content came from there.
   yield* Effect.forEach(
@@ -609,9 +617,9 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
 
   const deleted = [
     ...new Set([
-      ...signed.filter(([, sig]) => sig === "deleted").map(([f]) => f),
-      ...(seal.target.kind === "paths"
-        ? files.filter((f) => f.status === "deleted").map((f) => f.path)
+      ...signed.filter(([, sig]) => isDeletedSignature(sig)).map(([f]) => f),
+      ...(seal.target.wholeFiles
+        ? files.filter((f) => f.isDeleted).map((f) => f.path)
         : []),
     ]),
   ].toSorted();
@@ -648,7 +656,7 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
       return [`(${cur.unfetched})`];
     }
 
-    if (seal.postImage === "worktree") {
+    if (!seal.pinsCommit) {
       return changedSignatures(
         seal.sigs ?? {},
         yield* (yield* Worktree).sigs(
@@ -681,6 +689,6 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
 
 /** Files that differ between a seal and a later capture of the same target. */
 export const changedBetween = (seal: Seal, captured: Seal) =>
-  seal.postImage === "worktree"
-    ? Effect.succeed(changedSignatures(seal.sigs ?? {}, captured.sigs ?? {}))
-    : changedSinceSeal(seal, captured);
+  seal.pinsCommit
+    ? changedSinceSeal(seal, captured)
+    : Effect.succeed(changedSignatures(seal.sigs ?? {}, captured.sigs ?? {}));

@@ -4,7 +4,9 @@ import { Schema } from "effect";
 
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
+import { isLocked } from "../../workflow/review/window.ts";
 import type { Phase } from "../../workflow/review/window.ts";
+import { Compliance, Seat } from "../agents/agent.ts";
 import {
   outstandingDispatches,
   missingSeats,
@@ -50,7 +52,7 @@ export const seatsGate = (seal: Seal, phase: Phase) => {
   return hold(
     "panel",
     missing.map((s) => `${s.model}:${s.runs.length}`),
-    `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. ${phase === "drain" ? "Seats can no longer be launched or continued during drain." : "Continue a partial seat in its existing session or launch a new directorate_seat without a model (The Directorate assigns it); leave a seat that failed twice."} Calling directorate_report again files a partial review.`
+    `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. ${phase === "drain" ? "Seats can no longer be launched or continued during drain." : `Continue a partial seat in its existing session or launch a new ${Seat.id} without a model (The Directorate assigns it); leave a seat that failed twice.`} Calling directorate_report again files a partial review.`
   );
 };
 
@@ -75,7 +77,7 @@ export const dossierGate = (ledger: Ledger) => {
       (e) =>
         `${e.id}:${e.status}:${e.verdicts.length}:${e.history?.length ?? 0}`
     ),
-    `Protocol hold (Unverified Dossier): ${open.length} entries are unresolved: ${open.map((e) => `${e.id} (${currentSeverity(e)}, by ${e.raisedBy.agent}${e.status === "duplicate" ? ", duplicate of an unconfirmed entry" : ""})`).join(", ")}. Decide minor Auditor/Seat entries yourself; route the rest to directorate_compliance. Calling directorate_report again renders them as unverified leads.`
+    `Protocol hold (Unverified Dossier): ${open.length} entries are unresolved: ${open.map((e) => `${e.id} (${currentSeverity(e)}, by ${e.raisedBy.agent}${e.status === "duplicate" ? ", duplicate of an unconfirmed entry" : ""})`).join(", ")}. Decide minor Auditor/Seat entries yourself; route the rest to ${Compliance.id}. Calling directorate_report again renders them as unverified leads.`
   );
 };
 
@@ -86,7 +88,7 @@ export const dossierGate = (ledger: Ledger) => {
 export const pushesBack = (seal: Seal, phase: Phase, { ids, key }: Hold) => {
   const seen = new Set(seal.gates[key]);
 
-  return phase === "locked" || ids.every((id) => seen.has(id))
+  return isLocked(phase) || ids.every((id) => seen.has(id))
     ? undefined
     : { [key]: [...new Set([...seen, ...ids])] };
 };
@@ -104,6 +106,6 @@ export const driftGate = (
   fingerprint !== seal.fingerprint &&
   seal.refreshes < 1 &&
   seal.gates.freshness !== fingerprint &&
-  phase !== "locked"
+  !isLocked(phase)
     ? `Protocol hold (Containment Drift): the artifact changed after sealing${unfetched ? ` (${unfetched})` : ""}. Call directorate_refresh to re-contain once, read the new regions, and re-verify reopened entries; then call directorate_report again.`
     : undefined;

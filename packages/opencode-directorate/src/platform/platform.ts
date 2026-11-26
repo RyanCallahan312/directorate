@@ -11,7 +11,16 @@ import { nodeProcessIdentity } from "./process-identity.ts";
 
 export { command } from "./command.ts";
 
-export { Git } from "./git.ts";
+export {
+  ChangeCodeSchema,
+  Git,
+  isDeletion,
+  isRename,
+  isRenameOrCopy,
+  isTypechange,
+} from "./git.ts";
+
+export type { PullRequest } from "./git.ts";
 
 export { sha256 } from "./hash.ts";
 
@@ -41,7 +50,13 @@ export {
 
 export type { DefineTool } from "./tool.ts";
 
-export { IO_CONCURRENCY, Worktree } from "./worktree.ts";
+export {
+  IO_CONCURRENCY,
+  isDeletedSignature,
+  isDirectory,
+  isFile,
+  Worktree,
+} from "./worktree.ts";
 
 export type { LiveEntry } from "./worktree.ts";
 

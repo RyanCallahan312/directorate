@@ -1,15 +1,14 @@
 // What recovery after a reload or restart reads from the host's own record, never from the model's reply.
 import type { Plugin } from "@opencode/plugin/effect";
+import type { Location } from "@opencode/schema/location";
 import type { Session } from "@opencode/schema/session";
 import type { SessionMessage } from "@opencode/schema/session-message";
-import { DateTime, Effect, Option } from "effect";
+import { DateTime, Effect, Match, Option } from "effect";
 
 import { ProcessIdentity } from "./process-identity.ts";
 
-export const locationKey = (ref: {
-  readonly directory: string;
-  readonly workspaceID?: string | undefined;
-}) => JSON.stringify([ref.directory, ref.workspaceID ?? ""]);
+export const locationKey = (ref: Location.Ref) =>
+  JSON.stringify([ref.directory, ref.workspaceID ?? ""]);
 
 const timeOf = (time: DateTime.Utc | undefined) =>
   time && DateTime.toEpochMillis(time);
@@ -78,9 +77,15 @@ export const foreign = Effect.fnUntraced(function* foreign(
   );
 });
 
+/** The message, if it marks a turn's end. */
+const settled = Match.type<SessionMessage.Info>().pipe(
+  Match.when({ type: "idle" }, (message) => [message]),
+  Match.orElse(() => [])
+);
+
 /** How each turn that settled in these messages ended, oldest first. A shutdown is not a turn's end. */
 export const turns = (messages: readonly SessionMessage.Info[]) =>
-  messages.flatMap((message) => (message.type === "idle" ? [message] : []));
+  messages.flatMap(settled);
 
 export const createdAt = (message: SessionMessage.Info) =>
   DateTime.toEpochMillis(message.time.created);

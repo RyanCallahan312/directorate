@@ -22,6 +22,9 @@ type Body<Args extends unknown[], A, R> = (
   ...args: Args
 ) => Effect.fn.Return<A, Error, R>;
 
+/** What a Directorate tool answers: the text the model reads. */
+const ToolReplySchema = Schema.Struct({ content: Schema.String });
+
 type Editor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
 
 export type DefineTool<R> = <
@@ -32,7 +35,7 @@ export type DefineTool<R> = <
   input: Input;
   execute: Body<
     [input: Input["Type"], c: Tool.Context],
-    { content: string },
+    typeof ToolReplySchema.Type,
     R
   >;
   /** Files the call reads, checked with the seal. */

@@ -10,6 +10,8 @@ import {
 import { Zip } from "effect/encoding";
 import type { PlatformError } from "effect/PlatformError";
 
+import { isDirectory, isFile } from "../platform/platform.ts";
+
 /** A review could not be exported: an artifact that is not a regular file or directory, or an archive that failed. */
 export class ExportFailed extends Schema.TaggedError<
   ExportFailed,
@@ -36,7 +38,7 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
           const info = yield* fs.lstat(source);
           const mtime = Option.getOrUndefined(info.mtime);
 
-          if (info.type === "Directory") {
+          if (isDirectory(info.type)) {
             const children = yield* fs.readDirectory(source);
 
             return Stream.make(Zip.directory(name, { mtime })).pipe(
@@ -48,7 +50,7 @@ export const writeArchive = Effect.fn("Directorate.writeArchive")(
             );
           }
 
-          if (info.type !== "File") {
+          if (!isFile(info.type)) {
             return yield* new ExportFailed({
               message: `Not a regular export artifact: ${name}`,
             });

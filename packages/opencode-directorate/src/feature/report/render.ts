@@ -3,6 +3,7 @@ import { Match, Schema } from "effect";
 
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
+import { isBaseSide } from "../../seal/region.ts";
 import type { Region } from "../../seal/region.ts";
 import { Seat as SeatAgent } from "../agents/agent.ts";
 import {
@@ -231,7 +232,7 @@ const renderFindings = (
       const marker = `${i + 1}. `;
       const indent = " ".repeat(marker.length);
       out.push(
-        `${marker}**[${SEV_LABEL[sev]}] ${e.title}** — \`${loc}\`${e.anchor.side === "old" ? " (base side)" : ""} · ${e.kind} · ${e.lens}${panel ? ` · seats ${seats?.size ?? 0}/${panel.seats.length}` : ""}${origin(e, seal.recheckOf)}`,
+        `${marker}**[${SEV_LABEL[sev]}] ${e.title}** — \`${loc}\`${isBaseSide(e.anchor.side) ? " (base side)" : ""} · ${e.kind} · ${e.lens}${panel ? ` · seats ${seats?.size ?? 0}/${panel.seats.length}` : ""}${origin(e, seal.recheckOf)}`,
         `${indent}- **Trigger:** ${e.trigger}`,
         `${indent}- **Consequence:** ${e.consequence}`
       );

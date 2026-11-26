@@ -12,12 +12,30 @@ import {
 } from "effect";
 
 import { Ledger, LedgerJson } from "../feature/ledger/entry.ts";
-import { IO_CONCURRENCY } from "../platform/platform.ts";
+import { IO_CONCURRENCY, isDirectory } from "../platform/platform.ts";
 import { SealJson } from "../seal/record.ts";
 import type { Seal } from "../seal/record.ts";
 import { mutationLocks } from "./locks.ts";
 import { retentionOf } from "./retention.ts";
 import { StateRoot } from "./state-root.ts";
+
+/** The files a review keeps by name, beside each generation's patch and snapshot. */
+const RecordFileSchema = Schema.Literals([
+  "seal.json",
+  "ledger.json",
+  "report.md",
+]);
+
+export const isRecordFile = Schema.is(RecordFileSchema);
+
+/** Whether a missing ledger is damage (a reported review always has one) or an empty dossier. */
+const LedgerDemandSchema = Schema.Struct({ required: Schema.Boolean });
+
+/** Which seals to list: those of one repository, and at most how many. */
+const ListFilterSchema = Schema.Struct({
+  limit: Schema.optionalKey(Schema.Finite),
+  repo: Schema.optionalKey(Schema.String),
+});
 
 const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/u;
 
@@ -138,7 +156,7 @@ const make = Effect.gen(function* make() {
 
   const loadLedger = Effect.fn("Store.loadLedger")(function* loadLedger(
     id: string,
-    options?: { required: boolean }
+    options?: typeof LedgerDemandSchema.Type
   ) {
     const raw = yield* fs
       .readFileString(file(id, "ledger.json"))
@@ -209,7 +227,7 @@ const make = Effect.gen(function* make() {
 
   /** Seals in the store, newest first. */
   const list = Effect.fn("Store.list")(function* list(
-    opts: { repo?: string; limit?: number } = {}
+    opts: typeof ListFilterSchema.Type = {}
   ) {
     const seals = yield* Effect.forEach(
       yield* ids,
@@ -279,7 +297,7 @@ const make = Effect.gen(function* make() {
           .lstat(p)
           .pipe(Effect.orElseSucceed(Function.constUndefined));
 
-        if (st && st.type !== "Directory") {
+        if (st && !isDirectory(st.type)) {
           yield* fs.remove(p, { force: true });
         }
       }
@@ -287,10 +305,11 @@ const make = Effect.gen(function* make() {
       yield* fs.makeDirectory(paths.dirname(dest), { recursive: true });
 
       if (
-        (yield* fs
-          .lstat(dest)
-          .pipe(Effect.orElseSucceed(Function.constUndefined)))?.type ===
-        "Directory"
+        isDirectory(
+          (yield* fs
+            .lstat(dest)
+            .pipe(Effect.orElseSucceed(Function.constUndefined)))?.type
+        )
       ) {
         yield* fs.remove(dest, { force: true, recursive: true });
       }

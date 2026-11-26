@@ -4,16 +4,33 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { decodeUtf8 } from "./utf8.ts";
 
 /** A command failed to run or exited nonzero: its exit code (NotFound when it is not installed) and what it printed. */
+const NotFoundSchema = Schema.Literal("NotFound");
+
+const isNotFound = Schema.is(NotFoundSchema);
+
 class CommandError extends Schema.TaggedError<
   CommandError,
   { readonly brand: unique symbol }
 >()("DirectorateCommandError", {
-  code: Schema.optionalKey(
-    Schema.Union([Schema.Int, Schema.Literal("NotFound")])
-  ),
+  code: Schema.optionalKey(Schema.Union([Schema.Int, NotFoundSchema])),
   message: Schema.String,
   stdout: Schema.optionalKey(Schema.Uint8Array),
-}) {}
+}) {
+  /** The command is not installed. */
+  get notInstalled() {
+    return isNotFound(this.code);
+  }
+}
+
+/** How to run a command: where, with what environment, for how long, and how much each stream may print. */
+const CommandOptionsSchema = Schema.Struct({
+  cwd: Schema.optionalKey(Schema.String),
+  env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  maxOutputBytes: Schema.optionalKey(Schema.Finite),
+  timeout: Schema.Finite,
+});
+
+type CommandOptions = typeof CommandOptionsSchema.Type;
 
 // The process runner for git and gh, shaped like OpenCode's own AppProcess.run (packages/util/src/process.ts), which
 // external plugins are not given. ChildProcessSpawner.string would drop the exit code and the bytes, and has no bound;
@@ -45,12 +62,7 @@ export const command = Effect.fn("Directorate.command")(
   function* command(
     name: string,
     args: readonly string[],
-    options: {
-      cwd?: string;
-      env?: Record<string, string>;
-      timeout: number;
-      maxOutputBytes?: number;
-    }
+    options: CommandOptions
   ) {
     const { cwd, env, maxOutputBytes = MAX_OUTPUT_BYTES } = options;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -96,7 +108,10 @@ export const command = Effect.fn("Directorate.command")(
     "NotFound",
     (reason) =>
       Effect.fail(
-        new CommandError({ code: "NotFound", message: reason.message })
+        new CommandError({
+          code: NotFoundSchema.make("NotFound"),
+          message: reason.message,
+        })
       ),
     (_, error) => Effect.fail(new CommandError({ message: error.message }))
   ),

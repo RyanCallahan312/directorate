@@ -55,7 +55,7 @@ import { Seal, SealJson } from "../src/seal/record.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
-} from "../src/workflow/review/window.ts";
+} from "../src/workflow/review/request.ts";
 import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {

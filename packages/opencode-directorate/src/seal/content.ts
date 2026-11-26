@@ -7,19 +7,19 @@ import { Git, IO_CONCURRENCY } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import type { Seal } from "./record.ts";
-import { Anchor } from "./region.ts";
+import { Anchor, isBaseSide, isSealedSide, SIDE_NAMES } from "./region.ts";
 import type { Side } from "./region.ts";
 import { LineRef } from "./repo-path.ts";
 
 const isUrl = (ref: string) => /^https?:\/\//u.test(ref.trim());
 
 export const outsideWorktreeScope = (seal: Seal, path: string) =>
-  seal.postImage === "worktree" && !inScope(path, scopeOf(seal.target.paths));
+  !seal.pinsCommit && !inScope(path, scopeOf(seal.target.paths));
 
 /** Content withheld from every tool: a secret-like path, or on the sealed side a file renamed or copied from one. */
 export const isWithheld = (seal: Seal, p: string, side: Side = "new") =>
   isSecret(p) ||
-  (side === "new" &&
+  (isSealedSide(side) &&
     seal.files.some(
       (f) => f.path === p && f.oldPath !== undefined && isSecret(f.oldPath)
     ));
@@ -32,7 +32,7 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
 ) {
   const git = yield* Git;
 
-  if (side === "old") {
+  if (isBaseSide(side)) {
     return yield* git.blob(seal.repo, seal.baseSha, p);
   }
 
@@ -40,7 +40,7 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
     return;
   }
 
-  if (seal.postImage === "commit") {
+  if (seal.pinsCommit) {
     return yield* git.blob(seal.repo, seal.headSha, p);
   }
 
@@ -166,12 +166,12 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
   }
 
   if (
-    side === "old" ||
+    isBaseSide(side) ||
     seal.deleted.includes(p) ||
     seal.files.some((f) => f.path === p)
   ) {
     return yield* new NotInSeal({
-      message: `${p} does not exist on the ${side === "old" ? "base" : "sealed"} side`,
+      message: `${p} does not exist on the ${SIDE_NAMES[side]} side`,
     });
   }
 
@@ -199,7 +199,7 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
     anchor: Pick<Anchor, "endLine" | "line" | "path" | "side">,
     quote: string
   ) {
-    if (anchor.side === "new" && outsideWorktreeScope(seal, anchor.path)) {
+    if (isSealedSide(anchor.side) && outsideWorktreeScope(seal, anchor.path)) {
       return yield* new AnchorRejected({
         message: `${anchor.path} is outside the sealed scope; only the base is available. Use side:"old" to anchor to the base.`,
       });
@@ -300,7 +300,7 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
     const hit = lines.findIndex((l) => norm(l).includes(first));
 
     return yield* new AnchorRejected({
-      message: `quote not found at ${anchor.path}:${anchor.line} on the ${anchor.side === "old" ? "base" : "sealed"} side.${hit === -1 ? " It does not appear in the file." : ` Its first line appears at line ${hit + 1}.`} Re-read with directorate_read and anchor to the real code.`,
+      message: `quote not found at ${anchor.path}:${anchor.line} on the ${SIDE_NAMES[anchor.side]} side.${hit === -1 ? " It does not appear in the file." : ` Its first line appears at line ${hit + 1}.`} Re-read with directorate_read and anchor to the real code.`,
     });
   }
 );

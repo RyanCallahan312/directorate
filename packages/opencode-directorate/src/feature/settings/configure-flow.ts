@@ -4,16 +4,14 @@
 import { Effect, Match, Result, Schema } from "effect";
 
 import {
+  DEFAULT_BUDGET,
   DEFAULT_MODE,
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
+  PANEL_BUDGET_FACTOR,
   ReviewScopeSchema,
 } from "../../workflow/review/request.ts";
 import type { Mode, ReviewScope } from "../../workflow/review/request.ts";
-import {
-  DEFAULT_BUDGET,
-  PANEL_BUDGET_FACTOR,
-} from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL, seatRef } from "../dispatch/seat.ts";
 import type { SeatSpec } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";

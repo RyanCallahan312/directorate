@@ -16,7 +16,7 @@ import {
   windowCheck,
 } from "../workflow/review/window.ts";
 import { FileEntry, Region } from "./region.ts";
-import { PostImageSchema, Target } from "./target.ts";
+import { isCommitImage, PostImageSchema, Target } from "./target.ts";
 
 const list = Schema.Array;
 const opt = Schema.optional;
@@ -92,6 +92,11 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
       refreshes: 0,
       regions: [],
     });
+  }
+
+  /** Its post-image is a commit; otherwise it is the working tree, snapshotted at sealing. */
+  get pinsCommit() {
+    return isCommitImage(this.postImage);
   }
 
   /** The review's clock. */

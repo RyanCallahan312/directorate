@@ -8,7 +8,7 @@ import type { DefineTool } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, Sessions, ToolCall } from "../../seal/seal.ts";
-import { budget } from "../../workflow/review/window.ts";
+import { budget, isLocked } from "../../workflow/review/window.ts";
 import {
   dispatchName,
   outstandingDispatches,
@@ -47,7 +47,7 @@ export const waitTool = (
         );
       }
 
-      if (phase === "locked") {
+      if (isLocked(phase)) {
         return yield* done(
           start,
           "The budget is locked: call directorate_report now; it stops the runs still going."
@@ -120,7 +120,7 @@ export const waitTool = (
           `- ${dispatchName(x)} ${statusOf(x)}${x.session ? ` (${x.session})` : ""}: ${recorded(x)}`
       );
 
-      if (phaseNow === "locked") {
+      if (isLocked(phaseNow)) {
         lines.push(
           "The budget is locked: call directorate_report now; it stops the runs still going."
         );

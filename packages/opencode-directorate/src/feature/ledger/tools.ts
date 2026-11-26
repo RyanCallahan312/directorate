@@ -204,8 +204,7 @@ export const ledgerTools = (
   });
 
   tool({
-    description:
-      "Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), duplicate (of an open or confirmed entry), or, in a re-check, resolved (a finding carried from the earlier review no longer holds; evidence = the lines that fix it). directorate_liaison decides only minor entries raised by others and may withdraw its own open entries; directorate_compliance decides everything else, including every carried verified finding, and may re-decide. Refuting or resolving an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.",
+    description: `Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), duplicate (of an open or confirmed entry), or, in a re-check, resolved (a finding carried from the earlier review no longer holds; evidence = the lines that fix it). ${Liaison.id} decides only minor entries raised by others and may withdraw its own open entries; ${Compliance.id} decides everything else, including every carried verified finding, and may re-decide. Refuting or resolving an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.`,
     *execute(input, c) {
       const by = actor(c);
 
@@ -411,7 +410,7 @@ export const ledgerTools = (
           );
 
       const cov = coverageSummary(seal);
-      const head = `seal ${seal.id} · ${seal.mode} · base ${seal.baseSha.slice(0, 12)} · head ${seal.postImage === "commit" ? seal.headSha.slice(0, 12) : "working tree"} · read ${cov.read}/${cov.total} · notes ${ledger.notes.length}${seal.reportedAt ? " · REPORTED" : ""}`;
+      const head = `seal ${seal.id} · ${seal.mode} · base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree"} · read ${cov.read}/${cov.total} · notes ${ledger.notes.length}${seal.reportedAt ? " · REPORTED" : ""}`;
 
       return yield* done(
         seal,
@@ -430,8 +429,7 @@ export const ledgerTools = (
   });
 
   tool({
-    description:
-      "Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial. directorate_liaison only: kind answered, with text = a failed Auditor's question: line verbatim, records that you answered it yourself, so it no longer counts as unanswered.",
+    description: `Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial. ${Liaison.id} only: kind answered, with text = a failed Auditor's question: line verbatim, records that you answered it yourself, so it no longer counts as unanswered.`,
     *execute(input, c) {
       const by = actor(c);
 

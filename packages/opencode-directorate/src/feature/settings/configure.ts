@@ -9,11 +9,11 @@ import { actor, Host, optional, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
 import { Sessions } from "../../seal/seal.ts";
 import {
+  DEFAULT_BUDGET,
   DEFAULT_MODE,
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
 } from "../../workflow/review/request.ts";
-import { DEFAULT_BUDGET } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
 import {

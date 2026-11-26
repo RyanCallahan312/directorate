@@ -3,24 +3,13 @@ import { DateTime, Effect, Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
-import { ModeSchema } from "./request.ts";
-import type { Mode } from "./request.ts";
 
 export const PhaseSchema = Schema.Literals(["normal", "drain", "locked"]);
 
 export type Phase = typeof PhaseSchema.Type;
 
-/**
- * Minutes a review gets when neither the request nor directorate.json sets them. A panel's verification load grows with its
- * seats, so its default is PANEL_BUDGET_FACTOR times longer.
- */
-export const DEFAULT_BUDGET = Schema.Record(ModeSchema, Schema.Finite).make({
-  "code-quality": 30,
-  default: 20,
-  full: 60,
-});
-
-export const PANEL_BUDGET_FACTOR = 1.5;
+/** Locked: the deadline has passed. */
+export const isLocked = Schema.is(PhaseSchema.pick(["locked"]));
 
 /** The minutes a request or directorate.json may give a review. */
 export const BudgetMinutesSchema = Schema.Finite.check(
@@ -33,13 +22,6 @@ export const GRACE_MS = 120_000;
 
 /** A taken-over review whose budget was spent restarts with half of it, at least this many minutes. */
 const TAKEOVER_MIN_MINUTES = 5;
-
-/** A re-check gets half its mode's default budget when the caller names none, at least this many minutes. */
-const RECHECK_MIN_MINUTES = 10;
-
-/** A re-check's budget when the caller names none: half its mode's default, at least RECHECK_MIN_MINUTES. */
-export const recheckMinutes = (mode: Mode) =>
-  Math.max(RECHECK_MIN_MINUTES, Math.round(DEFAULT_BUDGET[mode] / 2));
 
 /** Each phase's header; the instruction every agent reads in it is the agent's own. */
 export const PHASE_HEADERS = Schema.Record(PhaseSchema, Schema.String).make({

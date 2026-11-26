@@ -28,6 +28,15 @@ export const PostImageSchema = Schema.Literals(["worktree", "commit"]);
 
 export type PostImage = typeof PostImageSchema.Type;
 
+/** A post-image pinned at a commit, rather than the working tree snapshotted at sealing. */
+export const isCommitImage = Schema.is(PostImageSchema.pick(["commit"]));
+
+const isPathsKind = Schema.is(TargetKindSchema.pick(["paths"]));
+
+const isPrKind = Schema.is(TargetKindSchema.pick(["pr"]));
+
+const isRangeKind = Schema.is(TargetKindSchema.pick(["range"]));
+
 /** What a review seals, as stored. The directorate_seal tool input declares its own keys with optionalKey: Schema.optional renders as anyOf-null for the model. */
 export class Target extends Schema.Class<
   Target,
@@ -39,4 +48,19 @@ export class Target extends Schema.Class<
   kind: TargetKindSchema,
   paths: opt(Schema.Array(Schema.String)),
   pr: opt(Schema.String),
-}) {}
+}) {
+  /** Whole files, every line of them, rather than a diff. */
+  get wholeFiles() {
+    return isPathsKind(this.kind);
+  }
+
+  /** A pull request, whose ends GitHub names. */
+  get isPullRequest() {
+    return isPrKind(this.kind);
+  }
+
+  /** A range of refs, which re-resolve when they move. */
+  get isRange() {
+    return isRangeKind(this.kind);
+  }
+}

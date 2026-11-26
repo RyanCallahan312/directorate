@@ -3,12 +3,10 @@ import { Schema } from "effect";
 
 import { Count } from "../platform/stored.ts";
 import type { Seal } from "./record.ts";
-import { DispositionSchema } from "./region.ts";
-import type { Disposition, Region } from "./region.ts";
+import { DispositionSchema, isReviewed, ReaderSchema } from "./region.ts";
+import type { Disposition, Reader, Region } from "./region.ts";
 
 const CHUNK_MAX_LINES = 600;
-
-const isReviewed = Schema.is(DispositionSchema.pick(["reviewed"]));
 
 const isSkimmed = Schema.is(DispositionSchema.pick(["skimmed"]));
 
@@ -53,18 +51,21 @@ export const coverageSummary = (seal: Seal) => {
   };
 };
 
+/** Which regions a reader asks for: these ids, this file, or (neither) what it has not read yet. */
+const RegionRequestSchema = Schema.Struct({
+  file: Schema.optional(Schema.String),
+  ids: Schema.optional(Schema.Array(Schema.String)),
+  owner: ReaderSchema.fields.owner,
+  reader: ReaderSchema.fields.key,
+});
+
 /**
  * The next chunk for a reader (its session, or "owner" for the lead): the requested regions, else what that reader has
  * not read, within CHUNK_MAX_LINES.
  */
 export const nextRegions = (
   seal: Seal,
-  opts: {
-    ids?: readonly string[] | undefined;
-    file?: string | undefined;
-    reader: string;
-    owner: boolean;
-  }
+  opts: typeof RegionRequestSchema.Type
 ) => {
   const { ids, file, owner, reader } = opts;
   const explicit = Boolean(ids?.length || file);
@@ -103,7 +104,7 @@ export const nextRegions = (
 export const markShown = (
   seal: Seal,
   shown: readonly Shown[],
-  reader: { key: string; owner: boolean }
+  reader: Reader
 ) => {
   const byId = new Map(
     shown.flatMap((s) => (s.missing ? [] : [[s.id, s] as const]))
