@@ -4,10 +4,11 @@ import { Schema } from "effect";
 
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
-import { isLocked } from "../../workflow/review/window.ts";
+import { isDraining, isLocked } from "../../workflow/review/window.ts";
 import type { Phase } from "../../workflow/review/window.ts";
 import { Compliance, Seat } from "../agents/agent.ts";
 import {
+  isPartialSeat,
   outstandingDispatches,
   missingSeats,
   seatName,
@@ -52,7 +53,7 @@ export const seatsGate = (seal: Seal, phase: Phase) => {
   return hold(
     "panel",
     missing.map((s) => `${s.model}:${s.runs.length}`),
-    `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => s.status === "partial") ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${s.status === "partial" ? `${s.unread} regions unread` : s.status})`).join(", ")}. ${phase === "drain" ? "Seats can no longer be launched or continued during drain." : `Continue a partial seat in its existing session or launch a new ${Seat.id} without a model (The Directorate assigns it); leave a seat that failed twice.`} Calling directorate_report again files a partial review.`
+    `Protocol hold (Seats): ${missing.length} of ${seal.panel?.length ?? 0} Directorate Seats ${missing.some((s) => isPartialSeat(s.status)) ? "did not finish reading all regions" : "returned no review"}: ${missing.map((s) => `${seatName(s.model)} (${isPartialSeat(s.status) ? `${s.unread} regions unread` : s.status})`).join(", ")}. ${isDraining(phase) ? "Seats can no longer be launched or continued during drain." : `Continue a partial seat in its existing session or launch a new ${Seat.id} without a model (The Directorate assigns it); leave a seat that failed twice.`} Calling directorate_report again files a partial review.`
   );
 };
 
@@ -77,7 +78,7 @@ export const dossierGate = (ledger: Ledger) => {
       (e) =>
         `${e.id}:${e.status}:${e.verdicts.length}:${e.history?.length ?? 0}`
     ),
-    `Protocol hold (Unverified Dossier): ${open.length} entries are unresolved: ${open.map((e) => `${e.id} (${currentSeverity(e)}, by ${e.raisedBy.agent}${e.status === "duplicate" ? ", duplicate of an unconfirmed entry" : ""})`).join(", ")}. Decide minor Auditor/Seat entries yourself; route the rest to ${Compliance.id}. Calling directorate_report again renders them as unverified leads.`
+    `Protocol hold (Unverified Dossier): ${open.length} entries are unresolved: ${open.map((e) => `${e.id} (${currentSeverity(e)}, by ${e.raisedBy.agent}${e.isDuplicate ? ", duplicate of an unconfirmed entry" : ""})`).join(", ")}. Decide minor Auditor/Seat entries yourself; route the rest to ${Compliance.id}. Calling directorate_report again renders them as unverified leads.`
   );
 };
 

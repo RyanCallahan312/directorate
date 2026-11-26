@@ -2,7 +2,7 @@
 import { Match, Schema } from "effect";
 
 import { coverageSummary } from "../../seal/coverage.ts";
-import type { Seal } from "../../seal/record.ts";
+import { Seal } from "../../seal/record.ts";
 import { isBaseSide } from "../../seal/region.ts";
 import type { Region } from "../../seal/region.ts";
 import { Seat as SeatAgent } from "../agents/agent.ts";
@@ -12,7 +12,7 @@ import {
   dispatchName,
   outstandingDispatches,
   dispatchQuestion,
-  DispatchSchema,
+  isFailed,
   missingSeats,
   panelSeats,
   seatName,
@@ -23,8 +23,16 @@ import {
   resolvedTarget,
   unresolved,
 } from "../ledger/decide.ts";
-import { SeveritySchema } from "../ledger/entry.ts";
-import type { Entry, Ledger, Severity } from "../ledger/entry.ts";
+import {
+  isConfirming,
+  isMinor,
+  isRefuting,
+  isResolving,
+  Ledger,
+  SeveritySchema,
+} from "../ledger/entry.ts";
+import type { Entry, Severity } from "../ledger/entry.ts";
+import { DirectiveStatusSchema, isComplete } from "./directive.ts";
 import type { DirectiveStatus } from "./directive.ts";
 
 const SEV_LABEL = Schema.Record(SeveritySchema, Schema.String).make({
@@ -43,7 +51,7 @@ const seatsRaising = (seal: Seal, ledger: Ledger) => {
   const raised = new Map<string, Set<string>>();
 
   for (const e of ledger.entries) {
-    const root = e.status === "duplicate" ? resolvedTarget(ledger, e) : e;
+    const root = e.isDuplicate ? resolvedTarget(ledger, e) : e;
     const seat = seatOf(e);
 
     if (root && seat) {
@@ -69,7 +77,7 @@ const directiveVerdict = (
     return verdicts[top];
   }
 
-  if (status !== "complete") {
+  if (!isComplete(status)) {
     return "<Provisional/Incomplete> — No Confirmed Issues";
   }
 
@@ -92,10 +100,9 @@ const origin = (entry: Entry, recheckOf: string | undefined): string => {
     return " · new";
   }
 
-  const label =
-    entry.carried.status === "confirmed"
-      ? "still present"
-      : "previously unverified";
+  const label = entry.carried.wasVerified
+    ? "still present"
+    : "previously unverified";
 
   return ` · ${label} (${entry.carried.id} in \`${recheckOf}\`)`;
 };
@@ -135,7 +142,7 @@ const outsideContainment = (
   }
 
   for (const f of seal.files.filter(
-    (file) => file.excluded && file.status !== "unchanged"
+    (file) => file.excluded && file.isChanged
   )) {
     nr.push(`- \`${f.path}\`: ${f.excluded}`);
   }
@@ -149,7 +156,7 @@ const outsideContainment = (
   ]) {
     if (!(c.model && seatless.some((s) => s.model === c.model))) {
       nr.push(
-        `- ${dispatchName(c)} did not ${DispatchSchema.isAnyOf(["Failed"])(c) ? "complete" : "finish"}: ${dispatchQuestion(c)}`
+        `- ${dispatchName(c)} did not ${isFailed(c) ? "complete" : "finish"}: ${dispatchQuestion(c)}`
       );
     }
   }
@@ -174,12 +181,8 @@ const outsideContainment = (
     nr.push(`- ${SeatAgent.title} ${seatName(s.model)}: ${explanation}`);
   }
 
-  for (const n of ledger.notes.filter(
-    (note) => note.kind === "unanswered" || note.kind === "limit"
-  )) {
-    nr.push(
-      `- ${n.kind === "unanswered" ? "Unanswered question" : "Limit"}: ${n.text}`
-    );
+  for (const n of ledger.notes.filter((note) => note.isNotReviewed)) {
+    nr.push(`- ${n.isUnanswered ? "Unanswered question" : "Limit"}: ${n.text}`);
   }
 
   if (seal.staleFiles?.length) {
@@ -220,11 +223,10 @@ const renderFindings = (
           ? `${e.anchor.path}:${e.anchor.line}`
           : `${e.anchor.path}:${e.anchor.line}-${e.anchor.endLine}`;
 
-      const v = e.verdicts.findLast((x) => x.verdict === "confirmed");
+      const v = e.verdicts.findLast((x) => isConfirming(x.verdict));
 
       const dupes = ledger.entries.filter(
-        (d) =>
-          d.status === "duplicate" && resolvedTarget(ledger, d)?.id === e.id
+        (d) => d.isDuplicate && resolvedTarget(ledger, d)?.id === e.id
       );
 
       const higher = dupes.filter((d) => RANK[currentSeverity(d)] < RANK[sev]);
@@ -270,7 +272,7 @@ const renderFindings = (
 const renderRefuted = (seal: Seal, refuted: readonly Entry[]) => {
   const out: string[] = [];
   const who = (actor: Entry["raisedBy"]) => actorName(seal, actor);
-  const notable = refuted.filter((e) => currentSeverity(e) !== "minor");
+  const notable = refuted.filter((e) => !isMinor(currentSeverity(e)));
 
   if (notable.length) {
     out.push(
@@ -280,7 +282,7 @@ const renderRefuted = (seal: Seal, refuted: readonly Entry[]) => {
     );
 
     for (const e of notable) {
-      const v = e.verdicts.findLast((x) => x.verdict === "refuted");
+      const v = e.verdicts.findLast((x) => isRefuting(x.verdict));
       out.push(
         `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, raised by ${who(e.raisedBy)}; refuted by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""})`
       );
@@ -302,9 +304,9 @@ const renderCandidates = (
     out.push("", `### Resolved Since \`${seal.recheckOf}\``);
 
     for (const e of resolved) {
-      const v = e.verdicts.findLast((x) => x.verdict === "resolved");
+      const v = e.verdicts.findLast((x) => isResolving(x.verdict));
       out.push(
-        `- ${e.title} — was \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${e.carried?.id}${e.carried?.status === "unverified" ? ", previously unverified" : ""}); resolved by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""}`.trimEnd()
+        `- ${e.title} — was \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${e.carried?.id}${e.carried && !e.carried.wasVerified ? ", previously unverified" : ""}); resolved by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""}`.trimEnd()
       );
     }
   }
@@ -320,11 +322,12 @@ const renderCandidates = (
       const stale = e.staleReason ? `; ${e.staleReason}` : "";
 
       const prior = e.carried
-        ? `; ${e.carried.status === "confirmed" ? "verified" : "unverified"} as ${e.carried.id} in \`${seal.recheckOf}\`, not re-checked`
+        ? `; ${e.carried.wasVerified ? "verified" : "unverified"} as ${e.carried.id} in \`${seal.recheckOf}\`, not re-checked`
         : stale;
 
-      const duplicate =
-        e.status === "duplicate" ? "; duplicate of an unconfirmed entry" : "";
+      const duplicate = e.isDuplicate
+        ? "; duplicate of an unconfirmed entry"
+        : "";
 
       out.push(
         `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${who(e.raisedBy)}${prior}${duplicate})`
@@ -378,28 +381,31 @@ const withSynthesis = (lines: string[], synthesis: string | undefined) => {
   return lines;
 };
 
-export const renderReport = (input: {
-  seal: Seal;
-  ledger: Ledger;
-  status: DirectiveStatus;
-  approach?: string | undefined;
-  synthesis?: string | undefined;
-  reasons: readonly string[];
-}): string => {
+/** What a Directive renders from: the reported seal and its dossier, the Directive's status and reasons, and the Liaison's prose. */
+export const ReportSchema = Schema.Struct({
+  approach: Schema.optional(Schema.String),
+  ledger: Ledger,
+  reasons: Schema.Array(Schema.String),
+  seal: Seal,
+  status: DirectiveStatusSchema,
+  synthesis: Schema.optional(Schema.String),
+});
+
+export const renderReport = (input: typeof ReportSchema.Type): string => {
   const { seal, ledger, status } = input;
 
   const confirmed = ledger.entries
-    .filter((e) => e.status === "confirmed")
+    .filter((e) => e.isConfirmed)
     .map(finding)
     .toSorted(findingOrder);
 
   const leads = unresolved(ledger);
-  const refuted = ledger.entries.filter((e) => e.status === "refuted");
-  const resolved = ledger.entries.filter((e) => e.status === "resolved");
+  const refuted = ledger.entries.filter((e) => e.isRefuted);
+  const resolved = ledger.entries.filter((e) => e.isResolved);
 
   const merged =
-    ledger.entries.filter((e) => e.status === "duplicate").length -
-    leads.filter((e) => e.status === "duplicate").length;
+    ledger.entries.filter((e) => e.isDuplicate).length -
+    leads.filter((e) => e.isDuplicate).length;
 
   const verdict = directiveVerdict(confirmed[0]?.sev, status, resolved.length);
 
@@ -425,7 +431,7 @@ export const renderReport = (input: {
 
   if (input.reasons.length) {
     out.push(
-      `> ${status === "complete" ? "Directive Note" : `Why ${status}`}: ${input.reasons.join("; ")}`
+      `> ${isComplete(status) ? "Directive Note" : `Why ${status}`}: ${input.reasons.join("; ")}`
     );
   }
 
@@ -446,7 +452,7 @@ export const renderReport = (input: {
     out.push("", "### Outside Containment (Not Reviewed)", ...nr);
   }
 
-  const assumptions = ledger.notes.filter((n) => n.kind === "assumption");
+  const assumptions = ledger.notes.filter((n) => n.isAssumption);
 
   if (assumptions.length) {
     out.push(

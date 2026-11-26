@@ -12,6 +12,7 @@ import {
   Seat as SeatAgent,
 } from "../agents/agent.ts";
 import type { Actor } from "../agents/agent.ts";
+import { isAnswered } from "../ledger/entry.ts";
 import type { Ledger } from "../ledger/entry.ts";
 
 const opt = Schema.optional;
@@ -82,10 +83,10 @@ export const DispatchSchema = Schema.Union([
 
 export type Dispatch = typeof DispatchSchema.Type;
 
-const isOutstanding = DispatchSchema.isAnyOf(["Launching", "Running"]);
-const isLaunching = DispatchSchema.isAnyOf(["Launching"]);
+export const isOutstanding = DispatchSchema.isAnyOf(["Launching", "Running"]);
+export const isLaunching = DispatchSchema.isAnyOf(["Launching"]);
 const isCompleted = DispatchSchema.isAnyOf(["Completed"]);
-const isFailed = DispatchSchema.isAnyOf(["Failed"]);
+export const isFailed = DispatchSchema.isAnyOf(["Failed"]);
 
 /** A dispatch's state, as seal.json names it. */
 const DispatchStatusSchema = Schema.Literals([
@@ -96,6 +97,31 @@ const DispatchStatusSchema = Schema.Literals([
 ]);
 
 type DispatchStatus = typeof DispatchStatusSchema.Type;
+
+/** How a run ended: its final state, as seal.json names it, and when. */
+const RunEndSchema = Schema.Struct({
+  endedAt: Schema.DateTimeUtc,
+  status: DispatchStatusSchema.pick(["completed", "failed"]),
+});
+
+type RunEnd = typeof RunEndSchema.Type;
+
+/**
+ * What says a session's execution ended: a session.idle event; an execution event, which also settles delivered
+ * follow-ups and may fail a completed run; or the host's own record, read after a reload, which settles only the
+ * outstanding runs that were no follow-up.
+ */
+const EndMarkerSchema = Schema.Literals(["idle", "execution", "record"]);
+
+export type EndMarker = typeof EndMarkerSchema.Type;
+
+/** An end that settles follow-ups already delivered. */
+const settlesDelivered = Schema.is(
+  EndMarkerSchema.pick(["execution", "record"])
+);
+
+/** An end read from the host's record after a reload. */
+const isRecordEnd = Schema.is(EndMarkerSchema.pick(["record"]));
 
 /** A dispatch in seal.json's children: its state is a `status` field, not a tag. */
 const StoredDispatch = Schema.Struct({
@@ -203,6 +229,9 @@ export const SeatStatusSchema = Schema.Literals([
 
 type SeatStatus = typeof SeatStatusSchema.Type;
 
+/** A seat whose completed run did not read every region. */
+export const isPartialSeat = Schema.is(SeatStatusSchema.pick(["partial"]));
+
 /** A seat's status as the report shows it: completed, partial (a run completed but did not read everything), or its latest run's. */
 const seatStatus = (
   done: boolean,
@@ -280,9 +309,7 @@ const decided = (c: Dispatch, ledger: Ledger) => {
 
   return (
     ids.length > 0 &&
-    ids.every((id) =>
-      ledger.entries.some((e) => e.id === id && e.status !== "open")
-    )
+    ids.every((id) => ledger.entries.some((e) => e.id === id && !e.isOpen))
   );
 };
 
@@ -294,7 +321,7 @@ export const questionText = (text: string) =>
 const answered = (c: Dispatch, ledger: Ledger) =>
   dispatchedAgent(c) === Auditor &&
   ledger.notes.some(
-    (n) => n.kind === "answered" && questionText(n.text) === dispatchQuestion(c)
+    (n) => isAnswered(n.kind) && questionText(n.text) === dispatchQuestion(c)
   );
 
 /**
@@ -423,18 +450,18 @@ export const inboxSettled = (
   });
 
 /**
- * A promoted follow-up delivered as `inbox`: still running, or ended as `ending` at `endedAt` with the first terminal
- * marker after it.
+ * A promoted follow-up delivered as `inbox`: still running, or ended as `ended` says, with the first terminal marker
+ * after it.
  */
 export const followUpRecovered = (
   c: Dispatch,
   inbox: string,
-  ended?: { ending: typeof Completed | typeof Failed; endedAt: DateTime.Utc }
+  ended?: RunEnd
 ) => {
   const fields = { ...fieldsOf(c), followUp: { delivered: true, inbox } };
 
   return ended
-    ? new ended.ending({ ...fields, endedAt: ended.endedAt })
+    ? new (stateFor(ended.status))({ ...fields, endedAt: ended.endedAt })
     : new Running(fields);
 };
 
@@ -444,13 +471,13 @@ export const finished = (
   session: string,
   ending: typeof Completed | typeof Failed,
   endedAt: DateTime.Utc,
-  durable: boolean | "initial"
+  marker: EndMarker
 ) => {
   const runs = seal.children.filter(
     (c) =>
       c.session === session &&
       (c.followUp
-        ? durable && c.followUp.delivered
+        ? settlesDelivered(marker) && c.followUp.delivered
         : DateTime.toEpochMillis(c.startedAt) <=
           DateTime.toEpochMillis(endedAt))
   );
@@ -459,9 +486,9 @@ export const finished = (
 
   return update(seal, (c) =>
     runs.includes(c) &&
-    (durable !== "initial" || !c.followUp) &&
+    (!isRecordEnd(marker) || !c.followUp) &&
     (isOutstanding(c) ||
-      (durable !== "initial" &&
+      (!isRecordEnd(marker) &&
         ending === Failed &&
         c === latestRun &&
         !c.followUp &&

@@ -45,7 +45,13 @@ import {
   ReviewScopeSchema,
 } from "./request.ts";
 import type { ReviewScope } from "./request.ts";
-import { budget, BudgetMinutesSchema, restarted, Window } from "./window.ts";
+import {
+  budget,
+  BudgetMinutesSchema,
+  isNormal,
+  restarted,
+  Window,
+} from "./window.ts";
 
 /** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
 const RECHECK_FIXED = [
@@ -61,7 +67,7 @@ const RECHECK_FIXED = [
 
 /** What a new seal tells the Liaison: its ends, the changed files and their regions, and what to do next. */
 const sealSummary = (seal: Seal) => {
-  const changedFiles = seal.files.filter((f) => f.status !== "unchanged");
+  const changedFiles = seal.files.filter((f) => f.isChanged);
   const regionIds = Map.groupBy(seal.regions, (r) => r.file);
 
   const rows = changedFiles.slice(0, 300).map(
@@ -282,7 +288,7 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
                     const { phase } = yield* budget(window);
 
                     const takeover =
-                      s.ownerSession === a.session || phase === "normal"
+                      s.ownerSession === a.session || isNormal(phase)
                         ? undefined
                         : window.takeover(now);
 

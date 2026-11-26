@@ -5,8 +5,10 @@ import { Command, Plugin } from "@opencode/plugin/gui";
 import type { Context } from "@opencode/plugin/gui";
 
 import {
+  backend,
   configureFromHost,
   fromHost,
+  isWarning,
   showToast,
 } from "./feature/settings/configure-client.ts";
 import type { Dialogs } from "./feature/settings/configure-flow.ts";
@@ -32,7 +34,7 @@ export const guiDialogs = (ctx: Context): Dialogs => ({
       ctx.toast.show({
         description: o.description,
         title: o.title ?? "The Directorate",
-        variant: o.variant === "warning" ? "default" : o.variant,
+        variant: isWarning(o.variant) ? "default" : o.variant,
       });
     }),
 });
@@ -49,10 +51,10 @@ export const configureInGui = (ctx: Context): Promise<void> => {
 
   return configureFromHost(
     guiDialogs(ctx),
-    {
-      settings: fromHost(() => directorate.settings(undefined, { location })),
-      write: (input) => fromHost(() => directorate.write(input, { location })),
-    },
+    backend(
+      fromHost(() => directorate.settings(undefined, { location })),
+      (input) => fromHost(() => directorate.write(input, { location }))
+    ),
     ctx.signal
   );
 };

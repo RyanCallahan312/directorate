@@ -16,9 +16,14 @@ import { DEFAULT_PANEL, seatRef } from "../dispatch/seat.ts";
 import type { SeatSpec } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
 import type { Lens } from "../ledger/entry.ts";
-import { normalizeSettings, sameSettings } from "./file.ts";
+import {
+  isProjectScope,
+  normalizeSettings,
+  sameSettings,
+  SettingsScopeSchema,
+} from "./file.ts";
 import type { Settings, SettingsScope } from "./file.ts";
-import type { SettingsView, WriteResult } from "./rpc.ts";
+import type { SettingsView, WriteInput, WriteResult } from "./rpc.ts";
 
 /** One choice in a select. A host without disabled options leaves disabled ones out. */
 export interface DialogChoice<V> {
@@ -29,6 +34,40 @@ export interface DialogChoice<V> {
   readonly disabled?: boolean;
 }
 
+/** A text prompt: its title, its help, and the text it starts with. */
+const PromptDialogSchema = Schema.Struct({
+  description: Schema.optionalKey(Schema.String),
+  title: Schema.String,
+  value: Schema.optionalKey(Schema.String),
+});
+
+/** A question and the labels of its two answers. */
+const ConfirmDialogSchema = Schema.Struct({
+  cancel: Schema.String,
+  confirm: Schema.String,
+  description: Schema.String,
+  title: Schema.String,
+});
+
+/** A message the user dismisses. */
+const AlertDialogSchema = Schema.Struct({
+  description: Schema.String,
+  title: Schema.String,
+});
+
+/** How a toast reads: done, worth a look, or failed. */
+const ToastVariantSchema = Schema.Literals(["success", "warning", "error"]);
+
+/** A host with no warning toast shows its default one instead. */
+export const isWarning = Schema.is(ToastVariantSchema.pick(["warning"]));
+
+/** A passing notice; without a title the host shows its own. */
+const ToastSchema = Schema.Struct({
+  description: Schema.String,
+  title: Schema.optionalKey(Schema.String),
+  variant: ToastVariantSchema,
+});
+
 /** The dialogs the walk needs; each resolves undefined (false for confirm) when the user backs out. */
 export interface Dialogs {
   select: <V>(options: {
@@ -37,39 +76,34 @@ export interface Dialogs {
     readonly current?: V | undefined;
     readonly options: readonly DialogChoice<V>[];
   }) => Effect.Effect<V | undefined, SettingsError>;
-  prompt: (options: {
-    readonly title: string;
-    readonly description?: string;
-    readonly value?: string;
-  }) => Effect.Effect<string | undefined, SettingsError>;
-  confirm: (options: {
-    readonly title: string;
-    readonly description: string;
-    readonly confirm: string;
-    readonly cancel: string;
-  }) => Effect.Effect<boolean | undefined, SettingsError>;
-  alert: (options: {
-    readonly title: string;
-    readonly description: string;
-  }) => Effect.Effect<void, SettingsError>;
-  toast: (options: {
-    readonly title?: string;
-    readonly description: string;
-    readonly variant: "success" | "warning" | "error";
-  }) => Effect.Effect<void, SettingsError>;
+  prompt: (
+    options: typeof PromptDialogSchema.Type
+  ) => Effect.Effect<string | undefined, SettingsError>;
+  confirm: (
+    options: typeof ConfirmDialogSchema.Type
+  ) => Effect.Effect<boolean | undefined, SettingsError>;
+  alert: (
+    options: typeof AlertDialogSchema.Type
+  ) => Effect.Effect<void, SettingsError>;
+  toast: (
+    options: typeof ToastSchema.Type
+  ) => Effect.Effect<void, SettingsError>;
   /** A path for display, such as with the home directory abbreviated. */
   path: (path: string) => string;
 }
 
-/** The settings RPC, bound to the location being configured. */
-export interface Backend {
-  readonly settings: Effect.Effect<SettingsView, SettingsError>;
-  write: (input: {
-    readonly previous: Settings;
-    readonly scope: SettingsScope;
-    readonly settings: Settings;
-  }) => Effect.Effect<WriteResult, SettingsError>;
-}
+/**
+ * The settings RPC, bound to the location being configured. The walk's writes always say what the file held when it was
+ * read, so a file changed since is not overwritten.
+ */
+export const backend = (
+  settings: Effect.Effect<SettingsView, SettingsError>,
+  write: (
+    input: Required<WriteInput>
+  ) => Effect.Effect<WriteResult, SettingsError>
+) => ({ settings, write });
+
+export type Backend = ReturnType<typeof backend>;
 
 /** The settings menu's items, in menu order. */
 const MenuItemSchema = Schema.Literals([
@@ -85,16 +119,43 @@ const MenuItemSchema = Schema.Literals([
 
 type MenuItem = typeof MenuItemSchema.Type;
 
+const isSave = Schema.is(MenuItemSchema.pick(["save"]));
+
+/** Each scope's name in the menu's title. */
+const SCOPE_TITLES = Schema.Record(SettingsScopeSchema, Schema.String).make({
+  global: "Global Charter",
+  project: "Local Jurisdiction",
+});
+
+/** What can be done to one seat. */
+const SeatActionSchema = Schema.Literals(["variant", "up", "remove"]);
+
+type SeatAction = typeof SeatActionSchema.Type;
+
+/** The seats menu's commands besides picking a seat. */
+const SeatsCommandSchema = Schema.Literals(["add", "clear"]);
+
+type SeatsCommand = typeof SeatsCommandSchema.Type;
+
+const isAddSeat = Schema.is(SeatsCommandSchema.pick(["add"]));
+
+const isClearSeats = Schema.is(SeatsCommandSchema.pick(["clear"]));
+
+/** The lenses menu's choice to drop this file's lenses and use the global setting. */
+const isInherit = Schema.is(Schema.Literal("inherit"));
+
+/** The Unset choice each key's menu offers: the key is dropped and falls back to the base. */
+const isUnsetChoice = Schema.is(Schema.Literal("unset"));
+
+/** The panel's choices. */
+const PanelChoiceSchema = Schema.Literals(["on", "off", "unset"]);
+
+type PanelChoice = typeof PanelChoiceSchema.Type;
+
+const isPanelOn = Schema.is(PanelChoiceSchema.pick(["on"]));
+
 /** A chat model a Directorate Seat can use, as the settings RPC lists it. */
 type Choice = SettingsView["models"][number];
-
-interface FlowContext {
-  readonly base: Settings;
-  readonly dialog: Dialogs;
-  readonly directorate: Backend;
-  readonly now: SettingsView;
-  readonly scope: SettingsScope;
-}
 
 const MODE_HINT = Schema.Record(ModeSchema, Schema.String).make({
   "code-quality": "adds maintainability and design",
@@ -129,7 +190,7 @@ const seatsFallback = (base: Settings) =>
 const lensesOff = (base: Settings, s: Settings) =>
   s.lenses?.disabled ?? base.lenses?.disabled ?? [];
 
-const panelState = (enabled: boolean | undefined): "on" | "off" | "unset" => {
+const panelState = (enabled: boolean | undefined): PanelChoice => {
   if (enabled === undefined) {
     return "unset";
   }
@@ -144,6 +205,25 @@ const panelDescription = (base: Settings, draft: Settings): string => {
 
   return draft.panel.enabled ? "on" : "off";
 };
+
+/**
+ * The walk's context: the dialogs, the settings RPC, both files as read, the scope being edited, and what its unset keys
+ * fall back to: the global file under a project's, then Directorate defaults.
+ */
+const flowContext = (
+  dialog: Dialogs,
+  directorate: Backend,
+  now: SettingsView,
+  scope: SettingsScope
+) => ({
+  base: isProjectScope(scope) ? now.global : {},
+  dialog,
+  directorate,
+  now,
+  scope,
+});
+
+type FlowContext = ReturnType<typeof flowContext>;
 
 const choose = <V>(
   dialog: Dialogs,
@@ -230,7 +310,7 @@ const editSeatAt = Effect.fnUntraced(function* editSeatAt(
     return seats;
   }
 
-  const action = yield* ctx.dialog.select<"variant" | "up" | "remove">({
+  const action = yield* ctx.dialog.select<SeatAction>({
     options: [
       { title: "Thinking level…", value: "variant" },
       { disabled: index === 0, title: "Move up", value: "up" },
@@ -239,35 +319,44 @@ const editSeatAt = Effect.fnUntraced(function* editSeatAt(
     title: seatRef(seat),
   });
 
-  if (action === "remove") {
-    return seats.filter((_, i) => i !== index);
+  if (!action) {
+    return seats;
   }
 
-  if (action === "up" && index > 0) {
-    const next = [...seats];
-    next.splice(index - 1, 0, ...next.splice(index, 1));
+  return yield* Match.value(action).pipe(
+    Match.when("remove", () =>
+      Effect.succeed(seats.filter((_, i) => i !== index))
+    ),
+    Match.when("up", () => {
+      if (index === 0) {
+        return Effect.succeed(seats);
+      }
 
-    return next;
-  }
+      const next = [...seats];
+      next.splice(index - 1, 0, ...next.splice(index, 1));
 
-  if (action === "variant") {
-    const choice = ctx.now.models.find((m) => m.ref === seat.model);
+      return Effect.succeed(next);
+    }),
+    Match.when("variant", () =>
+      Effect.gen(function* editVariant() {
+        const choice = ctx.now.models.find((m) => m.ref === seat.model);
 
-    if (!choice) {
-      yield* ctx.dialog.toast({
-        description: `${seat.model} is not an available chat model on this plane; remove it or pick another.`,
-        variant: "warning",
-      });
+        if (!choice) {
+          yield* ctx.dialog.toast({
+            description: `${seat.model} is not an available chat model on this plane; remove it or pick another.`,
+            variant: "warning",
+          });
 
-      return seats;
-    }
+          return seats;
+        }
 
-    const next = yield* pickVariant(ctx.dialog, choice, seat.variant);
+        const next = yield* pickVariant(ctx.dialog, choice, seat.variant);
 
-    return next ? seats.map((s, i) => (i === index ? next : s)) : seats;
-  }
-
-  return seats;
+        return next ? seats.map((s, i) => (i === index ? next : s)) : seats;
+      })
+    ),
+    Match.exhaustive
+  );
 });
 
 const editSeats = Effect.fnUntraced(function* editSeats(
@@ -275,10 +364,10 @@ const editSeats = Effect.fnUntraced(function* editSeats(
   draft: Settings
 ) {
   let seats = draft.panel?.models ?? [];
-  let at: number | "add" | "clear" | undefined;
+  let at: number | SeatsCommand | undefined;
 
   while (true) {
-    const pick = yield* ctx.dialog.select<number | "add" | "clear">({
+    const pick = yield* ctx.dialog.select<number | SeatsCommand>({
       current: at,
       options: [
         ...seats.map((s, i) => ({
@@ -307,12 +396,12 @@ const editSeats = Effect.fnUntraced(function* editSeats(
 
     at = pick;
 
-    if (pick === "clear") {
+    if (isClearSeats(pick)) {
       seats = [];
       continue;
     }
 
-    if (pick === "add") {
+    if (isAddSeat(pick)) {
       const seat = yield* addSeat(ctx);
 
       seats = seat ? [...seats, seat] : seats;
@@ -402,7 +491,7 @@ const editLenses = Effect.fnUntraced(function* editLenses(
           title: l,
           value: l,
         })),
-        ...(ctx.scope === "project"
+        ...(isProjectScope(ctx.scope)
           ? [
               {
                 disabled: !current.lenses?.disabled,
@@ -421,7 +510,7 @@ const editLenses = Effect.fnUntraced(function* editLenses(
 
     at = pick;
 
-    if (pick === "inherit") {
+    if (isInherit(pick)) {
       const { lenses: _, ...rest } = current;
 
       current = rest;
@@ -461,7 +550,7 @@ const editReviewScope = Effect.fnUntraced(function* editReviewScope(
     ]
   );
 
-  if (reviewScope === "unset") {
+  if (isUnsetChoice(reviewScope)) {
     const { default_scope: _, ...rest } = draft;
 
     return rest;
@@ -498,14 +587,14 @@ const editMode = Effect.fnUntraced(function* editMode(
 
   const { mode: _, ...rest } = draft;
 
-  return mode === "unset" ? rest : { ...rest, mode };
+  return isUnsetChoice(mode) ? rest : { ...rest, mode };
 });
 
 const editPanel = Effect.fnUntraced(function* editPanel(
   ctx: FlowContext,
   draft: Settings
 ) {
-  const on = yield* choose<"on" | "off" | "unset">(
+  const on = yield* choose<PanelChoice>(
     ctx.dialog,
     "Panel by default",
     panelState(draft.panel?.enabled),
@@ -538,7 +627,7 @@ const editPanel = Effect.fnUntraced(function* editPanel(
 
   return {
     ...draft,
-    panel: on === "unset" ? panel : { ...panel, enabled: on === "on" },
+    panel: isUnsetChoice(on) ? panel : { ...panel, enabled: isPanelOn(on) },
   };
 });
 
@@ -675,7 +764,7 @@ const runMenu = Effect.fnUntraced(function* runMenu(
     const item = yield* ctx.dialog.select<MenuItem>({
       current: at,
       options: menuOptions(ctx, draft, changed),
-      title: `The Directorate // ${ctx.scope === "global" ? "Global Charter" : "Local Jurisdiction"}${changed ? " (unsaved)" : ""}`,
+      title: `The Directorate // ${SCOPE_TITLES[ctx.scope]}${changed ? " (unsaved)" : ""}`,
     });
 
     if (item === undefined) {
@@ -688,7 +777,7 @@ const runMenu = Effect.fnUntraced(function* runMenu(
 
     at = item;
 
-    if (item === "save") {
+    if (isSave(item)) {
       if (!changed || (yield* saveSettings(ctx, draft))) {
         return;
       }
@@ -712,7 +801,5 @@ export const configure = Effect.fn("Directorate.configure")(function* configure(
     return;
   }
 
-  // What an unset key falls back to: the global file under a project's, then Directorate defaults.
-  const base = scope === "project" ? now.global : {};
-  yield* runMenu({ base, dialog, directorate, now, scope }, now[scope]);
+  yield* runMenu(flowContext(dialog, directorate, now, scope), now[scope]);
 });

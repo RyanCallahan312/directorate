@@ -151,7 +151,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
 /** What `next` changed in the files an entry rests on, judged against `before`; undefined when nothing it rests on moved. */
 const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
   const inChange = new Set(
-    next.files.filter((f) => f.status !== "unchanged").map((f) => f.path)
+    next.files.filter((f) => f.isChanged).map((f) => f.path)
   );
 
   return (e: Entry) => {
@@ -159,9 +159,7 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
 
     const gone =
       isSealedSide(e.anchor.side) &&
-      before.files.some(
-        (f) => f.path === e.anchor.path && f.status !== "unchanged"
-      ) &&
+      before.files.some((f) => f.path === e.anchor.path && f.isChanged) &&
       !inChange.has(e.anchor.path);
 
     const baseMoved = isBaseSide(e.anchor.side) && changed.has("(base moved)");

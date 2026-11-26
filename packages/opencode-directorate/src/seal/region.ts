@@ -46,6 +46,8 @@ export type FileStatus = typeof FileStatusSchema.Type;
 
 const isDeletedStatus = Schema.is(FileStatusSchema.pick(["deleted"]));
 
+const isUnchangedStatus = Schema.is(FileStatusSchema.pick(["unchanged"]));
+
 /** The reader key the lead's reads are recorded under; every other reader is recorded by its session. */
 export const isOwnerMark = Schema.is(Schema.Literal("owner"));
 
@@ -139,6 +141,11 @@ export class FileEntry extends Schema.Class<
   /** Gone from the post-image. */
   get isDeleted() {
     return isDeletedStatus(this.status);
+  }
+
+  /** Changed by the target; a whole-file target also lists files it leaves unchanged. */
+  get isChanged() {
+    return !isUnchangedStatus(this.status);
   }
 }
 

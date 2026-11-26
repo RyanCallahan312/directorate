@@ -3,6 +3,7 @@
 import type { Plugin } from "@opencode/plugin/tui";
 
 import {
+  backend,
   configureFromHost,
   fromHost,
   showToast,
@@ -64,13 +65,14 @@ const plugin: Plugin.Definition = {
 
             const directorate = context.client.rpc(DirectorateRpc);
 
-            return configureFromHost(tuiDialogs(context), {
-              settings: fromHost(() =>
-                directorate.settings(undefined, { location })
-              ),
-              write: (input) =>
-                fromHost(() => directorate.write(input, { location })),
-            });
+            return configureFromHost(
+              tuiDialogs(context),
+              backend(
+                fromHost(() => directorate.settings(undefined, { location })),
+                (input) =>
+                  fromHost(() => directorate.write(input, { location }))
+              )
+            );
           },
           slash: { name: "directorate-configure" },
           title: "Configure The Directorate",

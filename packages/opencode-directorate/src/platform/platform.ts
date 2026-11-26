@@ -30,6 +30,11 @@ export {
   activity,
   createdAt,
   foreign,
+  idleAt,
+  isIdle,
+  isOrphaned,
+  isRunning,
+  isSucceeded,
   locationKey,
   turns,
 } from "./host-record.ts";
@@ -41,6 +46,7 @@ export { ProcessIdentity } from "./process-identity.ts";
 export {
   actor,
   adapter,
+  isSubagentTool,
   optional,
   positiveInt,
   str,

@@ -40,6 +40,15 @@ const WriteResultSchema = Schema.Struct({
 
 export type WriteResult = typeof WriteResultSchema.Type;
 
+/** What the write method takes: one scope's new settings, and its file as the caller last read it. */
+const WriteInputSchema = Schema.Struct({
+  previous: Schema.optionalKey(SettingsSchema),
+  scope: SettingsScopeSchema,
+  settings: SettingsSchema,
+});
+
+export type WriteInput = typeof WriteInputSchema.Type;
+
 export const DirectorateRpc = Rpc.define({
   events: {},
   id: "directorate",
@@ -53,13 +62,7 @@ export const DirectorateRpc = Rpc.define({
     /** Replaces one scope's file; {} removes it. */
     write: {
       errors: rejected,
-      input: std(
-        Schema.Struct({
-          previous: Schema.optionalKey(SettingsSchema),
-          scope: SettingsScopeSchema,
-          settings: SettingsSchema,
-        })
-      ),
+      input: std(WriteInputSchema),
       output: std(WriteResultSchema),
     },
   },

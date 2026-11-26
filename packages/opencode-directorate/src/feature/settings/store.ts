@@ -10,9 +10,11 @@ import {
   Path,
   Schema,
 } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 
 import { Git } from "../../platform/platform.ts";
 import {
+  isGlobalScope,
   isUnset,
   merge,
   normalizeSettings,
@@ -90,7 +92,7 @@ const make = Effect.gen(function* make() {
     scope: Scope,
     directory: string
   ) {
-    if (scope === "global") {
+    if (isGlobalScope(scope)) {
       return (
         globalFile ??
         (yield* new SettingsUnavailable({
@@ -169,17 +171,17 @@ const make = Effect.gen(function* make() {
     const settings = normalizeSettings(input);
     const removed = isUnset(settings);
 
-    const other =
-      scope === "global" ? yield* file("project", directory) : globalFile;
+    const other = isGlobalScope(scope)
+      ? yield* file("project", directory)
+      : globalFile;
 
     const unchanged = other ? yield* read(other) : {};
 
-    const effective =
-      scope === "global"
-        ? merge(settings, unchanged)
-        : merge(unchanged, settings);
+    const effective = isGlobalScope(scope)
+      ? merge(settings, unchanged)
+      : merge(unchanged, settings);
 
-    const fail = (e: { message: string }) =>
+    const fail = (e: PlatformError) =>
       Effect.fail(
         new SettingsUnavailable({ message: `Cannot write ${at}: ${e.message}` })
       );

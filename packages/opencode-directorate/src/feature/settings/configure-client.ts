@@ -5,6 +5,8 @@ import { Cause, Effect, Exit, Predicate } from "effect";
 import { configure, SettingsError } from "./configure-flow.ts";
 import type { Backend, Dialogs } from "./configure-flow.ts";
 
+export { backend, isWarning } from "./configure-flow.ts";
+
 const hostError = (cause: unknown) =>
   new SettingsError({
     message: Predicate.hasProperty(cause, "message")

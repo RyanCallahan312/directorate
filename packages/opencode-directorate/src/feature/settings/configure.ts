@@ -37,6 +37,11 @@ const show = (label: string, file: string, s: Settings) =>
 
 const MAX_LISTED = 40;
 
+/** What directorate_configure does: show the settings, or write one scope's file. */
+const ConfigureActionSchema = Schema.Literals(["show", "write"]);
+
+const isWrite = Schema.is(ConfigureActionSchema.pick(["write"]));
+
 const make = Effect.gen(function* make() {
   const host = yield* Host;
   const store = yield* SettingsStore;
@@ -139,7 +144,7 @@ export const configureTool = (
         (yield* (yield* Sessions).directory(c.sessionID)) ??
         host.location.directory;
 
-      if (input.action === "write") {
+      if (isWrite(input.action)) {
         if (!input.scope || !input.settings) {
           return yield* new SettingsRejected({
             message: `write needs scope and settings ({} removes the scope's file).`,
@@ -211,7 +216,7 @@ export const configureTool = (
     },
     harness: false,
     input: Schema.Struct({
-      action: Schema.Literals(["show", "write"]),
+      action: ConfigureActionSchema,
       find: optional(
         str.annotate({
           description:

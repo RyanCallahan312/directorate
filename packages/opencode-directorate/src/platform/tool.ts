@@ -25,6 +25,9 @@ type Body<Args extends unknown[], A, R> = (
 /** What a Directorate tool answers: the text the model reads. */
 const ToolReplySchema = Schema.Struct({ content: Schema.String });
 
+/** The host's tool, and permission action, that launches a subagent. */
+export const isSubagentTool = Schema.is(Schema.Literal("subagent"));
+
 type Editor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
 
 export type DefineTool<R> = <

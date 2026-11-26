@@ -7,9 +7,12 @@ import type { Anchor } from "../../seal/region.ts";
 import { Compliance, Liaison } from "../agents/agent.ts";
 import type { Actor, Agent } from "../agents/agent.ts";
 import {
-  CarriedStatusSchema,
   Entry,
   EntryStatusSchema,
+  isConfirming,
+  isDuplicating,
+  isMinor,
+  isResolving,
   SeveritySchema,
   Verdict,
   VerdictKindSchema,
@@ -21,24 +24,6 @@ export const RANK = Schema.Record(SeveritySchema, Schema.Int).make({
   important: 1,
   minor: 2,
 });
-
-const isOpen = Schema.is(EntryStatusSchema.pick(["open"]));
-
-const isConfirmed = Schema.is(EntryStatusSchema.pick(["confirmed"]));
-
-const isDuplicate = Schema.is(EntryStatusSchema.pick(["duplicate"]));
-
-const isRefuted = Schema.is(EntryStatusSchema.pick(["refuted"]));
-
-const isConfirming = Schema.is(VerdictKindSchema.pick(["confirmed"]));
-
-const isDuplicating = Schema.is(VerdictKindSchema.pick(["duplicate"]));
-
-const isResolving = Schema.is(VerdictKindSchema.pick(["resolved"]));
-
-const isMinor = Schema.is(SeveritySchema.pick(["minor"]));
-
-const carriedConfirmed = Schema.is(CarriedStatusSchema.pick(["confirmed"]));
 
 /** Severity of the current verification generation: the latest confirmation, else the claim. */
 export const currentSeverity = (e: Entry) =>
@@ -52,7 +37,7 @@ const followDuplicate = (
   e: Entry | undefined,
   seen: Set<string>
 ): Entry | undefined => {
-  if (!e || !isDuplicate(e.status)) {
+  if (!e?.isDuplicate) {
     return e;
   }
 
@@ -73,8 +58,7 @@ export const resolvedTarget = (ledger: Ledger, e: Entry) =>
 export const unresolved = (ledger: Ledger) =>
   ledger.entries.filter(
     (e) =>
-      isOpen(e.status) ||
-      (isDuplicate(e.status) && !isConfirmed(resolvedTarget(ledger, e)?.status))
+      e.isOpen || (e.isDuplicate && !resolvedTarget(ledger, e)?.isConfirmed)
   );
 
 /** A verdict as its caller claims it: the parts of a `Verdict` the decision reads. */
@@ -106,7 +90,7 @@ const resolvesOnlyCarried = (entry: Entry, claim: VerdictClaim) =>
 
 /** A verified finding carried into a re-check was confirmed by Compliance (or within its rules); only Compliance re-decides it. */
 const decidesCarriedFinding = (agent: Agent, entry: Entry) =>
-  !carriedConfirmed(entry.carried?.status) || agent === Compliance;
+  !entry.carried?.wasVerified || agent === Compliance;
 
 /** The caller's own session raised the entry. */
 const raisedBy = (by: Actor, entry: Entry) =>
@@ -121,7 +105,7 @@ const hidesHigherClaim = (target: Entry, entry: Entry) =>
 
 /** The Liaison's reach over entries other sessions raised: undecided, minor, not its own kind's to affirm, kept minor. */
 const liaisonReachError = (entry: Entry, claim: VerdictClaim) => {
-  if (!isOpen(entry.status)) {
+  if (!entry.isOpen) {
     return `${entry.id} is ${entry.status}. Only ${Compliance.id} may re-decide a decided entry.`;
   }
 
@@ -224,7 +208,7 @@ export const verdictError = (
     return `${entry.id} was raised in this session. A different session must ${isResolving(claim.verdict) ? "resolve" : "confirm"} it: ${Compliance.id} for the Liaison's own entries.`;
   }
 
-  if (own && !isOpen(entry.status)) {
+  if (own && !entry.isOpen) {
     return `${entry.id} is ${entry.status}; you can only withdraw your own open entries.`;
   }
 
@@ -250,7 +234,7 @@ export const nearby = (ledger: Ledger, a: Anchor) =>
     (e) =>
       e.anchor.path === a.path &&
       Math.abs(e.anchor.line - a.line) <= 8 &&
-      !isRefuted(e.status)
+      !e.isRefuted
   );
 
 // ---------- Transitions: each returns the next entry or ledger ----------
@@ -281,7 +265,7 @@ export const decide = (ledger: Ledger, entry: Entry) => {
   }
 
   // After the entry was refuted or resolved, entries merged into it are open questions again.
-  const merged = (d: Entry) => isDuplicate(d.status) && lastOf(d) === entry.id;
+  const merged = (d: Entry) => d.isDuplicate && lastOf(d) === entry.id;
   const reopened = placed.filter(merged).map((d) => d.id);
 
   const entries = placed.map((d) => {

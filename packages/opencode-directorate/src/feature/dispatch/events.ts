@@ -1,11 +1,29 @@
 // Dispatch's host-event side: the one ordered session-event consumer, and what OpenCode's session records say about the
 // runs a review dispatched.
 import type { Plugin } from "@opencode/plugin/effect";
+import type { SessionInbox } from "@opencode/schema/session-inbox";
 import type { SessionMessage } from "@opencode/schema/session-message";
-import { DateTime, Effect, Schedule, Stream } from "effect";
+import {
+  DateTime,
+  Effect,
+  Match,
+  Option,
+  Schedule,
+  Schema,
+  Stream,
+} from "effect";
 
 import { ignore, recover } from "../../platform/error.ts";
-import { activity, createdAt, Host } from "../../platform/platform.ts";
+import {
+  activity,
+  createdAt,
+  Host,
+  idleAt,
+  isOrphaned,
+  isRunning,
+  isSucceeded,
+  turns,
+} from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
@@ -14,17 +32,36 @@ import { dispatchableNamed } from "../agents/agent.ts";
 import {
   claimed,
   Completed,
-  DispatchSchema,
   enqueued,
   Failed,
   finished,
   followUpPrompt,
   followUpRecovered,
   inboxSettled,
+  isOutstanding,
   outstandingDispatches,
   perSession,
   update,
 } from "./lifecycle.ts";
+import type { EndMarker } from "./lifecycle.ts";
+
+/** The message, if the user (or an inbox delivery) sent it. */
+const userMessage = Match.type<SessionMessage.Info>().pipe(
+  Match.when({ type: "user" }, (message) => message),
+  Match.option
+);
+
+/** The text of an inbox item the user (or a follow-up) sent. */
+const userText = Match.type<SessionInbox.Item>().pipe(
+  Match.when({ type: "user" }, (item) => item.payload.text),
+  Match.option
+);
+
+/** OpenCode restores executions it suspended at shutdown. */
+const isShutdown = Schema.is(Schema.Literal("shutdown"));
+
+/** The user stopped the execution. */
+const isUserStop = Schema.is(Schema.Literal("user"));
 
 /** A promoted follow-up belongs to the first terminal marker after that exact input. */
 const recoverFollowUps = (
@@ -33,23 +70,19 @@ const recoverFollowUps = (
   messages: readonly SessionMessage.Info[]
 ) =>
   update(seal, (child) => {
-    if (
-      child.session !== session ||
-      !child.followUp ||
-      !DispatchSchema.isAnyOf(["Launching", "Running"])(child)
-    ) {
+    if (child.session !== session || !child.followUp || !isOutstanding(child)) {
       return child;
     }
 
     const { inbox } = child.followUp;
 
-    const input = messages.findIndex(
-      (message) =>
-        message.type === "user" &&
-        (inbox
-          ? message.id === inbox
-          : message.text === followUpPrompt(child) &&
-            createdAt(message) >= DateTime.toEpochMillis(child.startedAt))
+    const input = messages.findIndex((message) =>
+      Option.exists(userMessage(message), (user) =>
+        inbox
+          ? user.id === inbox
+          : user.text === followUpPrompt(child) &&
+            createdAt(user) >= DateTime.toEpochMillis(child.startedAt)
+      )
     );
 
     const delivered = messages[input];
@@ -58,9 +91,7 @@ const recoverFollowUps = (
       return child;
     }
 
-    const turn = messages
-      .slice(input + 1)
-      .find((message) => message.type === "idle");
+    const [turn] = turns(messages.slice(input + 1));
 
     if (!turn && child.followUp.delivered) {
       return child;
@@ -71,7 +102,7 @@ const recoverFollowUps = (
       delivered.id,
       turn && {
         endedAt: turn.time.created,
-        ending: turn.outcome === "succeeded" ? Completed : Failed,
+        status: isSucceeded(turn.outcome) ? "completed" : "failed",
       }
     );
   });
@@ -92,19 +123,19 @@ export const settleChildren = Effect.fn("Directorate.settleChildren")(
         !session ||
         !info ||
         !act ||
-        act.state === "running" ||
-        (act.state === "orphaned" && !act.session.time.busy)
+        isRunning(act.state) ||
+        (isOrphaned(act.state) && !act.session.time.busy)
       ) {
         continue;
       }
 
-      const completed =
-        act.state === "idle" && act.session.outcome === "succeeded";
+      const idle = idleAt(act);
 
-      const endedAt =
-        act.state === "idle"
-          ? DateTime.makeUnsafe(act.at)
-          : yield* DateTime.now;
+      const completed = Option.isSome(idle) && isSucceeded(act.session.outcome);
+
+      const endedAt = Option.isSome(idle)
+        ? DateTime.makeUnsafe(idle.value)
+        : yield* DateTime.now;
 
       const messages = outstanding.some(
         (run) => run.session === session && run.followUp
@@ -124,7 +155,7 @@ export const settleChildren = Effect.fn("Directorate.settleChildren")(
               session,
               completed ? Completed : Failed,
               endedAt,
-              "initial"
+              "record"
             ) ?? followed,
         });
       });
@@ -240,70 +271,18 @@ export const consumeSessionEvents = Effect.fnUntraced(
         .pipe(ignore(`could not update ${sessionID} in ${id}`, "Warn"));
     });
 
-    /** The review's share of one event. */
-    const forRuns = (event: SessionEvent) => {
+    /** A session's execution ended as `ending`: settle its runs. The user stopping the Liaison itself halts the review. */
+    const ended = (
+      event: SessionEvent,
+      ending: typeof Completed | typeof Failed,
+      marker: EndMarker,
+      stopped: boolean
+    ) => {
       const { sessionID } = event.data;
-
-      if (event.type === "session.created") {
-        return event.data.parentID
-          ? claimChild(
-              event.data.sessionID,
-              event.data.parentID,
-              String(event.data.agent ?? ""),
-              event.data.title
-            )
-          : Effect.void;
-      }
-
-      if (event.type === "session.deleted" || event.type === "session.moved") {
-        return Effect.void;
-      }
-
-      // OpenCode restores suspended executions and jobs after shutdown.
-      if (
-        event.type === "session.execution.interrupted" &&
-        event.data.reason === "shutdown"
-      ) {
-        return Effect.void;
-      }
-
-      if (event.type === "session.inbox.enqueued") {
-        const { inboxID, item } = event.data;
-
-        return item.type === "user" &&
-          item.payload.text.includes("\n\n[Directorate follow-up: ")
-          ? childEvent(sessionID, (s) =>
-              enqueued(s, sessionID, inboxID, item.payload.text)
-            )
-          : Effect.void;
-      }
-
       const at = DateTime.makeUnsafe(event.created);
 
-      if (
-        event.type === "session.inbox.delivered" ||
-        event.type === "session.inbox.cancelled"
-      ) {
-        const { inboxID } = event.data;
-        const delivered = event.type === "session.inbox.delivered";
-
-        return childEvent(sessionID, (s) =>
-          inboxSettled(s, sessionID, inboxID, delivered, at)
-        );
-      }
-
-      const stopped =
-        event.type === "session.execution.interrupted" &&
-        event.data.reason === "user";
-
       return childEvent(sessionID, (s) => {
-        const next = finished(
-          s,
-          sessionID,
-          /failed|interrupted/u.test(event.type) ? Failed : Completed,
-          at,
-          event.type !== "session.idle"
-        );
+        const next = finished(s, sessionID, ending, at, marker);
 
         // The user stopped the Liaison itself: a later successful turn must not read as the review's own.
         return stopped && s.ownerSession === sessionID && !s.halted
@@ -311,6 +290,66 @@ export const consumeSessionEvents = Effect.fnUntraced(
           : next;
       });
     };
+
+    /** The review's share of one event. */
+    const forRuns = Match.type<SessionEvent>().pipe(
+      Match.discriminatorsExhaustive("type")({
+        "session.created": ({ data }) =>
+          data.parentID
+            ? claimChild(
+                data.sessionID,
+                data.parentID,
+                String(data.agent ?? ""),
+                data.title
+              )
+            : Effect.void,
+        "session.deleted": () => Effect.void,
+        "session.execution.failed": (event) =>
+          ended(event, Failed, "execution", false),
+        "session.execution.interrupted": (event) =>
+          // OpenCode restores suspended executions and jobs after shutdown.
+          isShutdown(event.data.reason)
+            ? Effect.void
+            : ended(event, Failed, "execution", isUserStop(event.data.reason)),
+        "session.execution.succeeded": (event) =>
+          ended(event, Completed, "execution", false),
+        "session.idle": (event) => ended(event, Completed, "idle", false),
+        "session.inbox.cancelled": ({
+          created,
+          data: { inboxID, sessionID },
+        }) => {
+          const at = DateTime.makeUnsafe(created);
+
+          return childEvent(sessionID, (s) =>
+            inboxSettled(s, sessionID, inboxID, false, at)
+          );
+        },
+        "session.inbox.delivered": ({
+          created,
+          data: { inboxID, sessionID },
+        }) => {
+          const at = DateTime.makeUnsafe(created);
+
+          return childEvent(sessionID, (s) =>
+            inboxSettled(s, sessionID, inboxID, true, at)
+          );
+        },
+        "session.inbox.enqueued": ({ data: { inboxID, item, sessionID } }) => {
+          const followUp = Option.filter(userText(item), (text) =>
+            text.includes("\n\n[Directorate follow-up: ")
+          );
+
+          return Option.match(followUp, {
+            onNone: () => Effect.void,
+            onSome: (text) =>
+              childEvent(sessionID, (s) =>
+                enqueued(s, sessionID, inboxID, text)
+              ),
+          });
+        },
+        "session.moved": () => Effect.void,
+      })
+    );
 
     yield* Stream.suspend(() => subscribe(host)).pipe(
       Stream.runForEach((event) =>

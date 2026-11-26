@@ -5,7 +5,7 @@ import { Clock, DateTime, Effect, Result, Schema } from "effect";
 import { actor, optional, str } from "../../platform/platform.ts";
 import type { DefineTool, Host } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
-import type { Seal } from "../../seal/record.ts";
+import { Seal } from "../../seal/record.ts";
 import {
   AutoReport,
   changedSinceSeal,
@@ -24,6 +24,7 @@ import {
   Directive,
   directiveFiled,
   freshnessChecked,
+  isComplete,
   pushedBack,
 } from "./directive.ts";
 import type { Freshness, Remembered } from "./directive.ts";
@@ -36,13 +37,27 @@ import {
   seatsGate,
 } from "./gates.ts";
 import type { Hold } from "./gates.ts";
-import { renderReport } from "./render.ts";
+import { renderReport, ReportSchema } from "./render.ts";
 
 /** A freshness check's outcome: the target's current ends, or why they could not be told. */
 type CurrentCheck = Result.Result<
   Current,
   Effect.Error<ReturnType<typeof currentFingerprint>>
 >;
+
+/** How a Directive is filed: with the Liaison's prose, or unattended (`auto`) with the reasons it was filed without it. */
+const FilingSchema = Schema.Struct({
+  approach: ReportSchema.fields.approach,
+  auto: Schema.optionalKey(Schema.Boolean),
+  extraReasons: Schema.optionalKey(Schema.Array(Schema.String)),
+  synthesis: ReportSchema.fields.synthesis,
+});
+
+/** What directorate_report answers: the report, and the seal it reported now (none if the seal was reported before). */
+const ReportedSchema = Schema.Struct({
+  md: Schema.String,
+  seal: Schema.UndefinedOr(Seal),
+});
 
 /** A protocol gate pushes back: the Liaison reads why, and calling again proceeds. */
 class ProtocolHold extends Schema.TaggedError<
@@ -86,17 +101,12 @@ const freshness = (seal: Seal, cur: CurrentCheck) =>
 export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
   seal: Seal,
   ledger: Ledger,
-  opts: {
-    approach?: string | undefined;
-    synthesis?: string | undefined;
-    extraReasons?: readonly string[];
-    auto?: boolean;
-    cur?: CurrentCheck;
-  }
+  opts: typeof FilingSchema.Type,
+  cur?: CurrentCheck
 ) {
   const { stale, unverified } = yield* freshness(
     seal,
-    opts.cur ?? (yield* Effect.result(currentFingerprint(seal)))
+    cur ?? (yield* Effect.result(currentFingerprint(seal)))
   );
 
   const assessed = freshnessChecked(seal, { stale, unverified });
@@ -104,7 +114,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
 
   const a = assess(assessed, ledger, { stale, unverified }, phase);
 
-  const status = opts.auto && a.status === "complete" ? "partial" : a.status;
+  const status = opts.auto && isComplete(a.status) ? "partial" : a.status;
   const reasons = [...a.reasons, ...(opts.extraReasons ?? [])];
 
   const md = renderReport({
@@ -262,11 +272,12 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
                 return dossierHeld;
               }
 
-              const reported = yield* finalize(seal, ledger, {
-                approach: input.approach,
-                cur,
-                synthesis: input.synthesis,
-              });
+              const reported = yield* finalize(
+                seal,
+                ledger,
+                { approach: input.approach, synthesis: input.synthesis },
+                cur
+              );
 
               return {
                 out: Result.succeed(reported),
@@ -277,7 +288,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
         );
 
         const { md, seal: reported } = yield* Effect.fromResult<
-          { md: string; seal: Seal | undefined },
+          typeof ReportedSchema.Type,
           ProtocolHold
         >(filing);
 

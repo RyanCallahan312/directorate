@@ -3390,7 +3390,8 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
     finalize(
       await runPr(loadSeal(seal.id)),
       Ledger.make({ entries: [], notes: [] }),
-      { cur: Result.succeed(cur) }
+      {},
+      Result.succeed(cur)
     )
   );
 

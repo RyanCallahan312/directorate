@@ -3,7 +3,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { Location } from "@opencode/schema/location";
 import type { Session } from "@opencode/schema/session";
 import type { SessionMessage } from "@opencode/schema/session-message";
-import { DateTime, Effect, Match, Option } from "effect";
+import { DateTime, Effect, Match, Option, Schema } from "effect";
 
 import { ProcessIdentity } from "./process-identity.ts";
 
@@ -62,6 +62,24 @@ export const activity = Effect.fnUntraced(function* activity(
 });
 
 export type Activity = Effect.Success<ReturnType<typeof activity>>;
+
+/** What `activity` finds a session doing: settled, executing in this process, or left mid-turn by a restart. */
+const ActivityStateSchema = Schema.Literals(["idle", "running", "orphaned"]);
+
+export const isIdle = Schema.is(ActivityStateSchema.pick(["idle"]));
+
+export const isRunning = Schema.is(ActivityStateSchema.pick(["running"]));
+
+export const isOrphaned = Schema.is(ActivityStateSchema.pick(["orphaned"]));
+
+/** When a settled session went idle, in the host's milliseconds; none while it runs or once orphaned. */
+export const idleAt = Match.type<Activity>().pipe(
+  Match.when({ state: "idle" }, (act) => act.at),
+  Match.option
+);
+
+/** The host's outcome of a session or turn that succeeded. */
+export const isSucceeded = Schema.is(Schema.Literal("succeeded"));
 
 /**
  * Whether another live server process last drove this record. Servers can share one database, and each sees only its

@@ -11,6 +11,12 @@ export type Phase = typeof PhaseSchema.Type;
 /** Locked: the deadline has passed. */
 export const isLocked = Schema.is(PhaseSchema.pick(["locked"]));
 
+/** Draining: the last stretch before the deadline. */
+export const isDraining = Schema.is(PhaseSchema.pick(["drain"]));
+
+/** Normal: before the budget drains. */
+export const isNormal = Schema.is(PhaseSchema.pick(["normal"]));
+
 /** The minutes a request or directorate.json may give a review. */
 export const BudgetMinutesSchema = Schema.Finite.check(
   Schema.isGreaterThanOrEqualTo(2),

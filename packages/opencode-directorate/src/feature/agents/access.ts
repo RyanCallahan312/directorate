@@ -3,12 +3,18 @@
 import type { SessionContext } from "@opencode/plugin/effect/session";
 import { Effect } from "effect";
 
-import { adapter, Host, ToolCatalog } from "../../platform/platform.ts";
+import {
+  adapter,
+  Host,
+  isSubagentTool,
+  ToolCatalog,
+} from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
 import {
   budget,
   isLocked,
+  isNormal,
   PHASE_STAGES,
 } from "../../workflow/review/window.ts";
 import {
@@ -81,14 +87,12 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
     "evaluate",
     hook("evaluate", function* onEvaluate(event) {
       const target = String(event.resources?.[0] ?? "");
+      const dispatching = isSubagentTool(event.action);
+      const child = dispatching ? dispatchableNamed(target) : undefined;
 
-      const child =
-        event.action === "subagent" ? dispatchableNamed(target) : undefined;
-
-      const covered =
-        event.action === "subagent"
-          ? child !== undefined
-          : yield* catalog.harness(event.action);
+      const covered = dispatching
+        ? child !== undefined
+        : yield* catalog.harness(event.action);
 
       // A request that names no agent is the session's agent's, as the host resolves it.
       const caller = covered
@@ -107,7 +111,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
         return;
       }
 
-      if (event.action !== "subagent") {
+      if (!dispatching) {
         return;
       }
 
@@ -122,7 +126,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
       // Any other subagent launches only while the budget is normal, as Auditors and Seats do.
       const launchable = child
         ? Liaison.mayLaunch(child, b.phase)
-        : b.phase === "normal";
+        : isNormal(b.phase);
 
       if (!launchable) {
         event.effect = "deny";

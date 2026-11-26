@@ -11,6 +11,7 @@ import { isLocked } from "../../workflow/review/window.ts";
 import type { Phase } from "../../workflow/review/window.ts";
 import {
   failedDispatches,
+  isPartialSeat,
   outstandingDispatches,
   missingSeats,
 } from "../dispatch/lifecycle.ts";
@@ -61,6 +62,8 @@ export const DirectiveStatusSchema = Schema.Literals([
 ]);
 
 export type DirectiveStatus = typeof DirectiveStatusSchema.Type;
+
+export const isComplete = Schema.is(DirectiveStatusSchema.pick(["complete"]));
 
 /** A Directive's status and the reasons for it: assessed at filing, and stored on the reported seal. */
 export class Directive extends Schema.Class<
@@ -138,7 +141,7 @@ export const assess = (
 
   const secrets = seal.files.filter(
     (f) =>
-      f.status !== "unchanged" &&
+      f.isChanged &&
       f.excluded &&
       (isSecret(f.path) || (f.oldPath !== undefined && isSecret(f.oldPath)))
   );
@@ -162,7 +165,7 @@ export const assess = (
     ],
     [leads > 0, `${leads} leads unverified`, true],
     [
-      ledger.notes.some((n) => n.kind === "unanswered") ||
+      ledger.notes.some((n) => n.isUnanswered) ||
         failedDispatches(seal, ledger).length > 0 ||
         outstandingDispatches(seal).length > 0,
       "some questions went unanswered",
@@ -170,7 +173,7 @@ export const assess = (
     ],
     [
       seatless.length > 0,
-      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`,
+      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => isPartialSeat(s.status)) ? "every region" : "the target"}`,
       true,
     ],
     [Boolean(fresh.unverified), "freshness could not be verified", true],

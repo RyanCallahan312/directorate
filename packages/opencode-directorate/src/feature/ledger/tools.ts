@@ -41,6 +41,8 @@ import {
 import {
   Entry,
   EntryStatusSchema,
+  isAnswered,
+  isConfirming,
   KindSchema,
   LensSchema,
   Note,
@@ -252,20 +254,19 @@ export const ledgerTools = (
 
             const quote = input.quote ?? entry.quote;
 
-            const anchored =
-              input.verdict === "confirmed"
-                ? {
-                    anchor: yield* checkQuote(seal, want, quote).pipe(
-                      Effect.mapError(
-                        (e) =>
-                          new VerdictRefused({
-                            message: `Cannot confirm: the anchor does not match the sealed code (${e.message}). Re-anchor with path/line/quote, or refute.`,
-                          })
-                      )
-                    ),
-                    quote,
-                  }
-                : undefined;
+            const anchored = isConfirming(input.verdict)
+              ? {
+                  anchor: yield* checkQuote(seal, want, quote).pipe(
+                    Effect.mapError(
+                      (e) =>
+                        new VerdictRefused({
+                          message: `Cannot confirm: the anchor does not match the sealed code (${e.message}). Re-anchor with path/line/quote, or refute.`,
+                        })
+                    )
+                  ),
+                  quote,
+                }
+              : undefined;
 
             const verdict = Verdict.make({
               at: yield* DateTime.now,
@@ -273,10 +274,9 @@ export const ledgerTools = (
               evidence,
               of: input.of,
               rationale: input.rationale,
-              severity:
-                input.verdict === "confirmed"
-                  ? (input.severity ?? currentSeverity(entry))
-                  : undefined,
+              severity: isConfirming(input.verdict)
+                ? (input.severity ?? currentSeverity(entry))
+                : undefined,
               verdict: input.verdict,
             });
 
@@ -442,7 +442,7 @@ export const ledgerTools = (
             const ledger = yield* review.ledger;
             let { text } = input;
 
-            if (input.kind === "answered") {
+            if (isAnswered(input.kind)) {
               if (by.role !== Liaison) {
                 return yield* new NoteRefused({
                   message: `Only ${Liaison.id} records an answered question.`,

@@ -8,7 +8,6 @@ import {
   ModeSchema,
   ReviewScopeSchema,
 } from "../../workflow/review/request.ts";
-import type { Mode } from "../../workflow/review/request.ts";
 import { BudgetMinutesSchema } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL, SeatSpecSchema, seatRef } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
@@ -17,6 +16,10 @@ import { LensSchema } from "../ledger/entry.ts";
 export const SettingsScopeSchema = Schema.Literals(["global", "project"]);
 
 export type SettingsScope = typeof SettingsScopeSchema.Type;
+
+export const isGlobalScope = Schema.is(SettingsScopeSchema.pick(["global"]));
+
+export const isProjectScope = Schema.is(SettingsScopeSchema.pick(["project"]));
 
 /** directorate.json. Every key is optional; an absent key falls through to the global file, then to Directorate defaults. */
 export const SettingsSchema = Schema.Struct({
@@ -126,16 +129,16 @@ export const merge = (global: Settings, project: Settings): Settings => ({
   }),
 });
 
+/** What a directorate_seal request asks for over the settings: its mode, a panel or not and its models, and its budget. */
+const RequestedSchema = Schema.Struct({
+  budgetMinutes: Schema.optional(Schema.Finite),
+  mode: Schema.optional(ModeSchema),
+  panel: Schema.optional(Schema.Boolean),
+  panelModels: Schema.optional(Schema.Array(Schema.String)),
+});
+
 /** What a new review gets from settings: its mode, whether it is a panel and with which seats, its budget, and lenses off. */
-export const resolve = (
-  s: Settings,
-  input: {
-    mode?: Mode | undefined;
-    panel?: boolean | undefined;
-    panelModels?: readonly string[] | undefined;
-    budgetMinutes?: number | undefined;
-  }
-) => {
+export const resolve = (s: Settings, input: typeof RequestedSchema.Type) => {
   const mode = input.mode ?? s.mode ?? DEFAULT_MODE;
 
   const defaultPanel =

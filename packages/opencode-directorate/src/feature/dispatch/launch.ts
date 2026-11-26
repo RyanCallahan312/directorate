@@ -1,9 +1,10 @@
 // Launching: the subagent tool's hooks. A launch is registered before the child runs, so a fast child is never missed,
 // and the subagent's result settles it even if session.created was missed.
-import { DateTime, Effect, Option, Predicate, Schema } from "effect";
+import type { ToolHooks } from "@opencode/plugin/effect/tool";
+import { DateTime, Effect, Match, Option, Predicate, Schema } from "effect";
 
 import { ignore } from "../../platform/error.ts";
-import { adapter, Host } from "../../platform/platform.ts";
+import { adapter, Host, isSubagentTool } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
 import {
@@ -13,12 +14,12 @@ import {
 } from "../agents/agent.ts";
 import {
   Completed,
-  DispatchSchema,
   Failed,
   followUpPrompt,
   launchTitle,
   launched,
   Launching,
+  isLaunching,
   openSeat,
   resumed,
   returned,
@@ -46,6 +47,21 @@ const decodeChildMeta = Schema.decodeUnknownOption(
   })
 );
 
+/** How the subagent tool's metadata names its child's end. */
+const ChildStatusSchema = Schema.Literals(["completed", "failed"]);
+
+const reportsCompleted = Schema.is(ChildStatusSchema.pick(["completed"]));
+
+const reportsFailed = Schema.is(ChildStatusSchema.pick(["failed"]));
+
+/** The subagent call's result when it completed, and whether it errored instead. */
+const callResult = Match.type<ToolHooks["execute.after"]>().pipe(
+  Match.discriminatorsExhaustive("status")({
+    completed: (ev) => ({ errored: false, result: ev.result }),
+    error: () => ({ errored: true, result: undefined }),
+  })
+);
+
 /** How the subagent tool says its child ended: an error, then a completion, then a failure; otherwise it still runs. */
 const subagentOutcome = (
   errored: boolean,
@@ -56,13 +72,13 @@ const subagentOutcome = (
     return Failed;
   }
 
-  if (reported === "completed" || /state=\\?"completed/u.test(text)) {
+  if (reportsCompleted(reported) || /state=\\?"completed/u.test(text)) {
     return Completed;
   }
 
   if (
     /state=\\?"(?:failed|error|interrupted)/u.test(text) ||
-    reported === "failed"
+    reportsFailed(reported)
   ) {
     return Failed;
   }
@@ -82,7 +98,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
   yield* host.tool.hook(
     "execute.before",
     hook("executeBefore", function* onExecuteBefore(ev) {
-      if (ev.tool !== "subagent") {
+      if (!isSubagentTool(ev.tool)) {
         const id = yield* sessions.boundTo(ev.sessionID);
 
         if (!id || !dispatchableNamed(ev.agent)) {
@@ -205,9 +221,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
         : null;
 
       const launch = reported?.reportedAt
-        ? reported.children.find(
-            (x) => x.call === call && DispatchSchema.isAnyOf(["Launching"])(x)
-          )
+        ? reported.children.find((x) => x.call === call && isLaunching(x))
         : undefined;
 
       const child = session ?? launch?.session;
@@ -222,11 +236,11 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
   yield* host.tool.hook(
     "execute.after",
     hook("executeAfter", function* onExecuteAfter(ev) {
-      if (ev.tool !== "subagent") {
+      if (!isSubagentTool(ev.tool)) {
         return;
       }
 
-      const result = ev.status === "completed" ? ev.result : undefined;
+      const { errored, result } = callResult(ev);
 
       const meta = Option.getOrElse(
         decodeChildMeta(result?.metadata?.metadata ?? result?.metadata),
@@ -244,7 +258,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
       const text = JSON.stringify(result?.content ?? "");
 
-      const outcome = subagentOutcome(ev.status === "error", meta.status, text);
+      const outcome = subagentOutcome(errored, meta.status, text);
 
       const endedAt = yield* DateTime.now;
       let child: string | undefined;
@@ -259,10 +273,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
           // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
           // registered, so there is no child, and no failure to report.
-          if (
-            ev.status === "error" &&
-            DispatchSchema.isAnyOf(["Launching"])(launch)
-          ) {
+          if (errored && isLaunching(launch)) {
             return Effect.succeed({
               out: undefined,
               seal: withdrawn(s, launch),
