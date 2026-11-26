@@ -199,6 +199,7 @@ try {
             plugins: [
               {
                 name: "@effect/language-service",
+                ignoreEffectSuggestionsInTscExitCode: false,
                 namespaceImportPackages: ["effect", "@effect/*"],
                 allowedUnstableApis: ["effect/process"],
               },

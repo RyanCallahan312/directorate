@@ -1,9 +1,7 @@
 ---
 name: effect-ts
-description: Write, refactor, and review Effect 4.1.2 TypeScript code—schemas, services, layers, streams, fibers, schedules, caching, config, platform I/O, HTTP, SQL, workflows, clusters, and tests—avoiding stale v3/beta APIs. Do not use for Effect v3 codebases, non-Effect TypeScript, or unrelated UI/build/linter configuration.
+description: Write, refactor, and review Effect 4.1.2 TypeScript code—schemas, services, layers, domain modeling, module layout, streams, fibers, schedules, caching, config, platform I/O, HTTP, SQL, workflows, clusters, and tests—avoiding stale v3/beta APIs. Do not use for Effect v3 codebases, non-Effect TypeScript, or unrelated UI/build/linter configuration.
 license: MIT
-metadata:
-  upstream: "kitlangton/skills@30dee8607214c893dd89f6eee65c669ef3dce8c9"
 ---
 
 # Effect v4
@@ -38,7 +36,8 @@ change crosses concerns.
 |---|---|
 | Version checks, beta-to-stable API names, package exports | [Installed Version](./references/installed-version.md) |
 | Schemas, brands, variants, errors, codecs, recursion, evolution | [Schema](./references/schema-advanced.md) |
-| Services, Layers, module surfaces, `Effect.fn`, scoped workers | [Services and Layers](./references/services-layers.md) |
+| Services, `make` factories, Layers, colocation, `Effect.fn`, scoped workers | [Services and Layers](./references/services-layers.md) |
+| Second module for a capability, shared models across features/clients, multi-writer records, upward/sideways imports, package layout | [Architecture](./references/architecture.md) |
 | Environment or runtime configuration, `ConfigProvider` | [Config](./references/config.md) |
 | Retry, repeat, polling, backoff, jitter, timeout policy | [Scheduling](./references/scheduling.md) |
 | TTL caches, memoization, concurrent dedupe, request batching | [Caching](./references/caching.md) |
@@ -54,14 +53,41 @@ change crosses concerns.
 | Entities, sharding, cluster transport and storage | [Clustering](./references/clustering.md) |
 | AI, CLI, GraphQL, RPC, HTTP API, OpenAPI, other specialized modules | [Specialized Modules](./references/specialized.md) |
 
+## Implementation Order
+
+1. **Model the domain with Effect Schema first.** Define branded `Schema.Class`
+   values, tagged unions (`Schema.TaggedClass` +
+   `Schema.toTaggedUnion("_tag")`), and `Schema.TaggedError` failures before
+   writing behavior—even when no external parsing is needed yet. Derive types
+   from schemas instead of maintaining parallel `interface` or union types.
+2. **Build the service with a `make` factory next when owning I/O or state.**
+   Introduce `Context.Service` for a real capability seam. Express its
+   operations in those schema-backed types and typed errors, implement it in a
+   `const make = Effect.gen(...)` factory that captures dependencies (`R = never`
+   on methods), and expose `static readonly layer = Layer.effect(Self, make)`
+   with `Effect.Success<typeof make>`. Keep pure domain logic on schema classes
+   or exported functions rather than wrapping it in a service.
+3. **Colocate by capability and grow in place.** Start a new capability in one
+   domain-named module (owned schemas and errors -> pure functions -> `make`
+   factory -> `Context.Service` + `layer`). Promote to a slice directory, then
+   to ordered bands, only when a trigger in
+   [Architecture](./references/architecture.md) fires in the code you are
+   touching. An established repository layout wins.
+4. **Decode at ingress; don't wait for ingress to model the domain.** Boundary
+   decoding and domain modeling are separate decisions.
+
 ## Core Defaults
 
 - Compose inline workflows with `Effect.gen`.
 - Define reusable Effect operations with `Effect.fn("Domain.operation")` when
   tracing is useful. Use `Effect.fnUntraced` for library glue or hot paths that
   should not introduce a tracing boundary.
-- Put domain decisions in generators; attach timeout, retry, tracing,
-  provisioning, and interruption policy with combinators.
+- Keep decisions over known values pure; use generators to obtain inputs and
+  coordinate effects, and attach timeout, retry, tracing, provisioning, and
+  interruption policy with combinators.
+- Compose bottom-up: schema primitives -> concrete values and `make` factories
+  -> pure policies and layers. Wire cross-slice dependencies only at the
+  composition root.
 - For reusable policy, prefer a canonical pipeable value; treat options objects
   as convenience syntax that normalizes to it rather than as the policy algebra.
 - Introduce `Context.Service` for a real capability seam. Capture dependencies
@@ -132,6 +158,14 @@ change crosses concerns.
 
 - Do not silence Effect typing with `as any`, non-null assertions, or unchecked
   casts.
+- Do not write parallel handwritten `interface`s or plain object types for
+  domain concepts that should be Effect Schemas.
+- Do not split capabilities into horizontal kind folders (`schemas/`,
+  `services/`, `layers/`, `types.ts`, `utils.ts`) or put pattern words
+  (`*Aggregate`, `*ValueObject`, `*Specification`) in domain names.
+- Do not expose open write paths (`update(id, patch: Partial<X>)` or a public
+  `save(entity)`) on shared records; expose domain verbs or a guarded
+  transition door.
 - Do not bypass class validation with plain object spreads (`{ ...entity, x }`);
   construct a new instance (`new Entity({ ...entity, x })` or `Entity.make(...)`).
 - Do not use cause-level recovery when typed-error recovery is sufficient.

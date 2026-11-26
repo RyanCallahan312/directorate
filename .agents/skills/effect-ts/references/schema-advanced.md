@@ -9,26 +9,61 @@ Target installed Effect 4.1.2. Verify unfamiliar APIs in
 
 ## Model Domain Concepts as Schema Classes
 
-Default named domain concepts to branded `Schema.Class`:
+Model domain concepts with Effect Schema from the start—even for internal
+values that are not parsed from external input yet. Default named domain
+concepts to branded `Schema.Class` (empty class bodies with standalone pure
+functions are the clean default; add methods on the class only when behavior
+cohesively belongs on the type) instead of maintaining a parallel `interface`:
 
 ```ts
 import { Schema } from "effect"
+
+export const UserIdSchema = Schema.Int.pipe(Schema.brand("UserId"))
+export type UserId = typeof UserIdSchema.Type
 
 export class User extends Schema.Class<
   User,
   { readonly brand: unique symbol }
 >("app/User")({
-  id: Schema.Int,
+  id: UserIdSchema,
   name: Schema.NonEmptyString
 }) {}
+
+export const createUser = (id: number, name: string) =>
+  User.make({ id: UserIdSchema.make(id), name })
+
+export const renameUser = (user: User, name: string) =>
+  new User({ ...user, name })
 ```
 
-The class unifies schema, nominal type, validated construction (`new User(...)`
-/ `User.make(...)`), `Equal`, and pure domain methods. Branding prevents plain
-objects from silently satisfying a class type, and constructing a new instance
-on updates (`new User({ ...user, name })`) keeps invariants checked on every
-transition. Pass a checked `Schema.Struct(...).check(...)` to `Schema.Class` for
-cross-field invariants.
+Pure schemas with no class methods work the same way for closed name sets,
+tagged records, and anonymous shapes (`Schema.Literals`, `Schema.Struct`,
+`Schema.Opaque`), deriving types with `typeof XSchema.Type` and keeping
+operations as plain functions:
+
+```ts
+import { Schema } from "effect"
+
+export const RoleSchema = Schema.Literals(["viewer", "editor", "admin"])
+export type Role = typeof RoleSchema.Type
+
+export const MembershipSchema = Schema.Struct({
+  userId: Schema.Int.pipe(Schema.brand("UserId")),
+  role: RoleSchema
+})
+export type Membership = typeof MembershipSchema.Type
+
+export const isAdmin = Schema.is(RoleSchema.pick(["admin"]))
+const isEditorRole = Schema.is(RoleSchema.pick(["editor", "admin"]))
+export const canEdit = (m: Membership) => isEditorRole(m.role)
+```
+
+A `Schema.Class` unifies schema, nominal type, validated construction
+(`new User(...)` / `User.make(...)`), `Equal`, and optional pure domain methods.
+Branding prevents plain objects from silently satisfying a class type, and
+constructing a new instance on updates (`new User({ ...user, name })`) keeps
+invariants checked on every transition. Pass a checked
+`Schema.Struct(...).check(...)` to `Schema.Class` for cross-field invariants.
 
 Escape hatches: use `Schema.Struct(...)` for anonymous shapes, tool inputs, and
 shared field fragments; use `Schema.Opaque` when a plain object needs nominal
@@ -62,6 +97,39 @@ Default domain variants (internal or serialized) to branded
 validated construction, `.match`, `.isAnyOf`, and `.guards` from a single
 schema. Use `Data.TaggedEnum` only when a strictly internal control-flow
 algebra has no reason to be a schema.
+
+```ts
+import { Schema } from "effect"
+
+export class Pending extends Schema.TaggedClass<
+  Pending,
+  { readonly brand: unique symbol }
+>()("Pending", {
+  id: Schema.NonEmptyString
+}) {}
+
+export class Shipped extends Schema.TaggedClass<
+  Shipped,
+  { readonly brand: unique symbol }
+>()("Shipped", {
+  id: Schema.NonEmptyString,
+  trackingCode: Schema.NonEmptyString
+}) {}
+
+export const ShipmentSchema = Schema.Union([Pending, Shipped]).pipe(
+  Schema.toTaggedUnion("_tag")
+)
+export type Shipment = typeof ShipmentSchema.Type
+
+export const ship = (shipment: Shipment, trackingCode: string) =>
+  ShipmentSchema.match(shipment, {
+    Pending: (p) => Shipped.make({ id: p.id, trackingCode }),
+    Shipped: (s) => s
+  })
+```
+
+For deciding which slice owns transitions and when to route mutations through a
+single guarded door, see [Architecture](./architecture.md).
 
 Do not inspect `_tag` directly in runtime application code. This includes
 comparisons, ternaries, `switch`, optional reads, destructuring, collection

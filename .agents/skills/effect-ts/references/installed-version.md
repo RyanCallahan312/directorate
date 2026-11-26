@@ -23,7 +23,7 @@ follow an upstream main link as if it described the installed release.
 
 ## Replace Beta-Era Names
 
-| Earlier skill guidance | Installed 4.1.2 guidance |
+| Earlier API names | Installed 4.1.2 equivalents |
 | --- | --- |
 | Schema.TaggedErrorClass | `Schema.TaggedError<Self, { readonly brand: unique symbol }>()("Tag", fields)` |
 | SchemaTransformation.transformOrFail | `SchemaTransformation.transformEffect` |
