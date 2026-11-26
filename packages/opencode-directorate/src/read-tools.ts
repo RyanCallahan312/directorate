@@ -2,19 +2,19 @@
 import { Schema } from "effect";
 
 import {
-  grepSealed,
-  history,
-  listFiles,
-  readLines,
-  renderRegions,
-} from "./browse.ts";
-import {
   coverageSummary,
   dispose,
   markShown,
   nextRegions,
 } from "./coverage.ts";
 import { failure } from "./error.ts";
+import {
+  grepSealed,
+  history,
+  listFiles,
+  readLines,
+  renderRegions,
+} from "./inspect.ts";
 import { DispositionSchema, SideSchema } from "./model.ts";
 import { RepoPath, RepoScope } from "./repo-path.ts";
 import { Sessions } from "./session.ts";

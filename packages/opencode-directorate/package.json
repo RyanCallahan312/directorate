@@ -10,6 +10,7 @@
   },
   "files": [
     "src",
+    "!src/AGENTS.md",
     "dist/gui-experimental.cjs",
     "agents",
     "skills",
@@ -30,7 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@effect/platform-node-shared": "4.1.0",
+    "@effect/platform-node": "4.1.0",
     "@opencode/schema": "2.4.1"
   },
   "devDependencies": {

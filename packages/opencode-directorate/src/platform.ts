@@ -1,8 +1,8 @@
 // Directorate review services on the Node platform: the one layer the plugin entry and the tests build.
-import * as NodeChildProcessSpawner from "@effect/platform-node-shared/NodeChildProcessSpawner";
-import * as NodeCrypto from "@effect/platform-node-shared/NodeCrypto";
-import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
-import * as NodePath from "@effect/platform-node-shared/NodePath";
+import * as NodeChildProcessSpawner from "@effect/platform-node/NodeChildProcessSpawner";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { Effect, FileSystem, Layer, Option } from "effect";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 

@@ -525,11 +525,11 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
                   // A spent budget gets more time: half the original, at least 5 minutes, unless the caller names a budget.
                   const now = yield* DateTime.now;
+                  const { phase } = yield* budget(s);
 
                   const minutes =
                     input.budget_minutes ??
-                    (s.ownerSession === a.session ||
-                    budget(s, DateTime.toEpochMillis(now)).phase === "normal"
+                    (s.ownerSession === a.session || phase === "normal"
                       ? undefined
                       : Math.max(5, Math.round(s.budgetMinutes / 2)));
 
@@ -762,7 +762,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
 
             yield* writable(seal, c, "directorate_report", true);
             const ledger = yield* store.loadLedger(seal.id);
-            const { phase } = budget(seal, yield* Clock.currentTimeMillis);
+            const { phase } = yield* budget(seal);
 
             const pushBack = (gates: Seal["gates"], message: string) =>
               store
@@ -879,7 +879,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
           return seal;
         });
 
-        const { phase } = budget(start, yield* Clock.currentTimeMillis);
+        const { phase } = yield* budget(start);
         const waiting = childOutstanding(start);
 
         if (!waiting.length) {
@@ -905,15 +905,17 @@ const register = Effect.fn("Directorate.register")(function* register() {
         };
 
         // The session events and the deadline watchdog write the seal; poll it until something the Liaison acts on changed.
-        const { seal, now } = yield* Effect.all({
-          now: Clock.currentTimeMillis,
-          seal: store.load(start.id),
+        const { seal, phaseNow } = yield* Effect.gen(function* poll() {
+          const current = yield* store.load(start.id);
+          const next = yield* budget(current);
+
+          return { phaseNow: next.phase, seal: current };
         }).pipe(
           Effect.repeat({
             schedule: Schedule.spaced("1 second"),
             until: (state) =>
               state.seal.reportedAt !== undefined ||
-              budget(state.seal, state.now).phase !== phase ||
+              state.phaseNow !== phase ||
               ended(state.seal).length > 0,
           })
         );
@@ -958,7 +960,6 @@ const register = Effect.fn("Directorate.register")(function* register() {
         };
 
         const still = perSession(childOutstanding(seal));
-        const phaseNow = budget(seal, now).phase;
 
         const lines = perSession(ended(seal)).map(
           (x) =>
@@ -1722,8 +1723,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
           return;
         }
 
-        const now = yield* Clock.currentTimeMillis;
-        const b = budget(seal, now);
+        const b = yield* budget(seal);
 
         if (b.phase !== "locked") {
           return;
@@ -1782,7 +1782,7 @@ const register = Effect.fn("Directorate.register")(function* register() {
         return;
       }
 
-      const b = budget(seal, yield* Clock.currentTimeMillis);
+      const b = yield* budget(seal);
 
       if (b.phase === "locked" || (b.phase === "drain" && target !== REFUTER)) {
         const stage = b.phase === "locked" ? "lockdown" : "evacuation";

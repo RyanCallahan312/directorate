@@ -1,4 +1,4 @@
-import * as NodePath from "@effect/platform-node-shared/NodePath";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { Effect, Option, Path, Schema, SchemaTransformation } from "effect";
 
 import { invalid } from "./model.ts";

@@ -22,6 +22,8 @@ export default defineConfig({
     "anti-slop-effect/no-manual-tagged-construction": "error",
     "anti-slop-effect/no-service-constructor-imports": "error",
     "anti-slop-effect/prefer-effect-match": "error",
+    // Replaces unicorn/throw-new-error, which reports Schema.TaggedError<E>() and Schema.Error<E>().
+    "anti-slop-effect/throw-new-error": "error",
     "anti-slop/no-array-filter-map": "error",
     "anti-slop/no-chained-type-assertions": "error",
     "anti-slop/no-conditional-empty-object-spread": "error",
@@ -40,6 +42,9 @@ export default defineConfig({
     "anti-slop/no-widen-then-assert": "error",
     "anti-slop/require-readable-spacing": "error",
     "anti-slop/require-safety-comment-for-type-assertion": "error",
+    // Slices colocate Schema.Class / Schema.TaggedClass / Schema.TaggedError definitions.
+    "max-classes-per-file": "off",
     "oxc/no-accumulating-spread": "error",
+    "unicorn/throw-new-error": "off",
   },
 });

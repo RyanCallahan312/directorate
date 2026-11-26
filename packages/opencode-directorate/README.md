@@ -400,7 +400,7 @@ flowchart TB
     subgraph domain["Review domain"]
         seal["seal.ts<br/>capture · create · refresh"]
         report["report.ts<br/>assess · render · finalize"]
-        browse["browse.ts<br/>paged views"]
+        inspect["inspect.ts<br/>paged views"]
         content["content.ts<br/>sealed files · quotes · evidence"]
         target["target.ts<br/>ends · fingerprints"]
         diff["diff.ts<br/>raw diff · regions"]
@@ -438,7 +438,7 @@ flowchart TB
     class tuiPart,host,node hostC
     class index,ship flowC
     class tool,readTools,ledgerTools,configure,exportTool adaptC
-    class seal,report,browse,content,target,diff domainC
+    class seal,report,inspect,content,target,diff domainC
     class pure pureC
     class sessions,store,worktree,git,settings svcC
 ```

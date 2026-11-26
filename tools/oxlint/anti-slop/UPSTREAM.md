@@ -4,9 +4,12 @@
 - Revision: `13909c9e07590f5a85d93c62712259fe14a883f7`
 - Copied: upstream `src/` and root `LICENSE`.
 - Local change: the CLI smoke test invokes Oxlint through Bun instead of pnpm.
+- Local addition: `effect/rules/throw-new-error.ts` replaces Oxlint's native
+  `unicorn/throw-new-error` (disabled in the root config), which exempts only
+  `Data.TaggedError` and so reports `Schema.TaggedError<E>()` and `Schema.Error<E>()`.
 - License: MIT. Additional third-party notices are in `vendor/`.
 
-The root Oxlint config enables the generic rules, all five Effect-specific
+The root Oxlint config enables the generic rules, all six Effect-specific
 rules, and the companion native `oxc/no-accumulating-spread` rule.
 
 Run the vendored tests from the repo root with `node --test 'tools/oxlint/anti-slop/**/*.test.ts'`.

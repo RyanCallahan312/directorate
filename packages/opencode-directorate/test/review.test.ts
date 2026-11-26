@@ -7,7 +7,7 @@ import { after, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import {
   ConfigProvider,
   DateTime,
@@ -22,16 +22,8 @@ import {
 } from "effect";
 import { ChildProcess } from "effect/process";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
+import { TestClock } from "effect/testing";
 
-import {
-  grepSealed,
-  history,
-  listFiles,
-  OUTPUT_MAX_BYTES,
-  OUTPUT_MAX_LINES,
-  readLines,
-  renderRegions,
-} from "../src/browse.ts";
 import { budget, budgetLine } from "../src/budget.ts";
 import { childFailures } from "../src/children.ts";
 import { command } from "../src/command.ts";
@@ -51,6 +43,15 @@ import {
 import { assemble, buildRegions, RawDiff } from "../src/diff.ts";
 import { isSecret } from "../src/exclusions.ts";
 import { Git } from "../src/git.ts";
+import {
+  grepSealed,
+  history,
+  listFiles,
+  OUTPUT_MAX_BYTES,
+  OUTPUT_MAX_LINES,
+  readLines,
+  renderRegions,
+} from "../src/inspect.ts";
 import {
   currentSeverity,
   decide,
@@ -2503,7 +2504,7 @@ test("range refresh deltas withhold secrets", async () => {
 });
 
 // ---------- budget, report ----------
-test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", () => {
+test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", async () => {
   const cases = [
     [20, 13, "normal"],
     [20, 14.5, "drain"],
@@ -2511,11 +2512,15 @@ test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", () =
     [20, 20.1, "locked"],
   ] as const;
 
-  for (const [minutes, elapsed, phase] of cases) {
-    const seal = { createdAt: T0, deadline: DateTime.add(T0, { minutes }) };
-    const now = DateTime.toEpochMillis(T0) + elapsed * 60_000;
-    assert.equal(budget(seal, now).phase, phase);
-  }
+  await Effect.runPromise(
+    Effect.gen(function* testBudget() {
+      for (const [minutes, elapsed, phase] of cases) {
+        const seal = { createdAt: T0, deadline: DateTime.add(T0, { minutes }) };
+        yield* TestClock.setTime(DateTime.toEpochMillis(T0) + elapsed * 60_000);
+        assert.equal((yield* budget(seal)).phase, phase);
+      }
+    }).pipe(Effect.provide(TestClock.layer()))
+  );
 });
 
 test("assess and render: skips make it partial; orphan duplicates count; refuted important candidates are listed", async () => {
@@ -3303,7 +3308,7 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
   assert.match(md, /status: \*\*stale\*\*/u);
 });
 
-test("budget lines are written for each role", () => {
+test("budget lines are written for each role", async () => {
   const now = Date.parse("2026-01-01T00:00:00Z");
 
   const s = {
@@ -3312,21 +3317,26 @@ test("budget lines are written for each role", () => {
     deadline: DateTime.makeUnsafe(now + 60_000),
   };
 
-  assert.match(
-    budgetLine(s, now, "directorate_auditor"),
-    /file surviving candidates now and hand off/u
-  );
-  assert.match(
-    budgetLine(s, now, "directorate_compliance"),
-    /finish the entry in hand/u
-  );
-  assert.match(
-    budgetLine(s, now, "directorate_liaison"),
-    /call directorate_report/u
-  );
-  assert.doesNotMatch(
-    budgetLine(s, now, "directorate_auditor"),
-    /directorate_report/u
+  await Effect.runPromise(
+    Effect.gen(function* testBudgetLines() {
+      yield* TestClock.setTime(now);
+      assert.match(
+        yield* budgetLine(s, "directorate_auditor"),
+        /file surviving candidates now and hand off/u
+      );
+      assert.match(
+        yield* budgetLine(s, "directorate_compliance"),
+        /finish the entry in hand/u
+      );
+      assert.match(
+        yield* budgetLine(s, "directorate_liaison"),
+        /call directorate_report/u
+      );
+      assert.doesNotMatch(
+        yield* budgetLine(s, "directorate_auditor"),
+        /directorate_report/u
+      );
+    }).pipe(Effect.provide(TestClock.layer()))
   );
 });
 

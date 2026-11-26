@@ -65,8 +65,9 @@ change crosses concerns.
 - Build and provide Layers near the runtime boundary; run Effects only at
   application, framework, script, or test edges.
 - Decode unknown input once at ingress and pass validated values inward.
-- Do not inspect `_tag` directly at runtime. Use generated tagged-union
-  predicates and exhaustive matchers, or Effect's domain-specific helpers.
+- Never inspect, compare, switch on, destructure, or index `_tag` at runtime.
+  Use generated union matchers/predicates (`Union.match`, `Union.isAnyOf`,
+  `Match.tag` + `Match.exhaustive`) or Effect's domain helpers.
 - Keep expected failures in `E`. Preserve defects and interruption unless a
   named supervision boundary has a truthful policy for them.
 - Make resource, Scope, and fiber ownership explicit.
@@ -75,16 +76,14 @@ change crosses concerns.
 
 | Need | Default |
 |---|---|
-| Ordinary record | `Schema.Struct` plus a same-name inferred interface/type |
+| Named domain concept | Branded `Schema.Class` (`Schema.Class<Self, { readonly brand: unique symbol }>("id")(fields)`) |
+| Anonymous shape, tool input, or fragment | `Schema.Struct` |
 | Scalar identity | Checked schema, then `Schema.brand` |
-| Nominal plain object | `Schema.Opaque` |
-| Methods, custom construction, inheritance | Exceptional `Schema.Class` |
-| Internal decision algebra | `Data.TaggedEnum` and exhaustive `$match` |
-| Serialized tagged value | `Schema.TaggedStruct` / `Schema.TaggedUnion` |
-| Tagged-union membership | `Data.taggedEnum(...).$is` / `Schema.TaggedUnion(...).isAnyOf` |
-| Tagged-union branching | Generated `$match` / `.match`, or `Match.tag` with `Match.exhaustive` |
-| Expected boundary failure | `Schema.TaggedError` |
-| Strictly local failure | `Data.TaggedError` |
+| Nominal plain object (no methods) | `Schema.Opaque` |
+| Domain variant | Branded `Schema.TaggedClass` in `Schema.Union([...]).pipe(Schema.toTaggedUnion("_tag"))` |
+| Tagged-union membership | `Union.isAnyOf` (decoded) / `Union.guards.Tag` (unknown) |
+| Tagged-union branching | `Union.match`, or `Match.tag` with `Match.exhaustive` |
+| Expected failure | Branded `Schema.TaggedError` |
 | Unknown payload | `Schema.decodeUnknownEffect` |
 | Trusted construction | `schema.make` |
 | Fallible Effect construction | `schema.makeEffect` |
@@ -117,8 +116,6 @@ change crosses concerns.
   adapters.
 - Use result types and typed errors for expected control flow. Do not throw from
   Effect-native domain code.
-- Do not compare, switch on, destructure, persist, or perform collection lookup
-  with `_tag` directly. Follow the tagged-union guidance in the Schema reference.
 
 ## Boundary Rules
 
@@ -136,7 +133,8 @@ change crosses concerns.
 
 - Do not silence Effect typing with `as any`, non-null assertions, or unchecked
   casts.
-- Do not use `Schema.Class` as the default record model.
+- Do not bypass class validation with plain object spreads (`{ ...entity, x }`);
+  construct a new instance (`new Entity({ ...entity, x })` or `Entity.make(...)`).
 - Do not use cause-level recovery when typed-error recovery is sufficient.
 - Do not convert interruption into an ordinary success or failure.
 - Do not use `Layer.mergeAll` or `provideMerge` as blind compile fixes.

@@ -2,7 +2,7 @@
 // and report failures the way the host expects.
 import type { Plugin } from "@opencode/plugin/effect";
 import { Tool } from "@opencode/schema/tool";
-import { Clock, Effect, Predicate, Schema } from "effect";
+import { Effect, Predicate, Schema } from "effect";
 
 import { budget, budgetLine } from "./budget.ts";
 import { failure, recover } from "./error.ts";
@@ -41,14 +41,17 @@ export const actor = (c: Tool.Context): Actor => ({
 });
 
 /** A tool result; while the seal is open, it ends with the caller's budget line. */
-export const done = (seal: Seal, text: string, agent?: string) =>
-  Clock.currentTimeMillis.pipe(
-    Effect.map((now) => ({
-      content: seal.reportedAt
-        ? text
-        : `${text}\n\n${budgetLine(seal, now, agent)}`,
-    }))
-  );
+export const done = Effect.fnUntraced(function* done(
+  seal: Seal,
+  text: string,
+  agent?: string
+) {
+  return {
+    content: seal.reportedAt
+      ? text
+      : `${text}\n\n${yield* budgetLine(seal, agent)}`,
+  };
+});
 
 /** A reported seal accepts no changes; an owner-only tool also needs the session that sealed it. */
 export const writable = (
@@ -99,18 +102,21 @@ export const LOCKED_TOOLS = new Map([
  * Once an open seal's budget locks, only the caller's locked tools run: a model step that began before the deadline still
  * sees the tools stripped at lockdown, and the lock may have been held past it. Check under the seal's lock.
  */
-export const unlocked = (seal: Seal, c: Tool.Context, name: string) =>
-  Clock.currentTimeMillis.pipe(
-    Effect.flatMap((now) =>
-      !seal.reportedAt &&
-      budget(seal, now).phase === "locked" &&
-      !LOCKED_TOOLS.get(c.agent)?.has(name)
-        ? failure(
-            `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
-          )
-        : Effect.void
-    )
-  );
+export const unlocked = Effect.fnUntraced(function* unlocked(
+  seal: Seal,
+  c: Tool.Context,
+  name: string
+) {
+  if (
+    !seal.reportedAt &&
+    !LOCKED_TOOLS.get(c.agent)?.has(name) &&
+    (yield* budget(seal)).phase === "locked"
+  ) {
+    return yield* failure(
+      `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
+    );
+  }
+});
 
 /** A change to an open seal, under its lock; once the budget locks, only the caller's locked tools run. */
 export const mutate = <A>(

@@ -1,5 +1,5 @@
 // Directorate report (Directive): the review's status and the markdown rendered from verified dossier entries only.
-import { Clock, DateTime, Effect, Result } from "effect";
+import { DateTime, Effect, Result } from "effect";
 
 import { budget } from "./budget.ts";
 import type { Phase } from "./budget.ts";
@@ -608,12 +608,9 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     staleFiles: stale,
   };
 
-  const a = assess(
-    assessed,
-    ledger,
-    { stale, unverified },
-    budget(seal, yield* Clock.currentTimeMillis).phase
-  );
+  const { phase } = yield* budget(seal);
+
+  const a = assess(assessed, ledger, { stale, unverified }, phase);
 
   const status = opts.auto && a.status === "complete" ? "partial" : a.status;
   const reasons = [...a.reasons, ...(opts.extraReasons ?? [])];
