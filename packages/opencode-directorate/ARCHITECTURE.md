@@ -479,6 +479,12 @@ Folder and type names use the operational words that stored files, tool names, a
 - **`test/contracts.test.ts`** checks the stored contracts. Current and legacy fixtures under `test/stored/` for `seal.json`, `ledger.json`, `directorate.json`, and ship state round-trip byte for byte. Legacy fixtures re-encode to their `*.expected.json` goldens. The first current fixture sets every encoded field, and the fixtures together cover every shape-changing union member. A `Seal` whose Window breaks `windowCheck` fails to decode, so the check survives composition.
 - **`test/surface.test.ts`** checks the host-facing surface against `test/stored/surface.json`: tools in order with their input JSON Schemas, commands, agents, skills, RPC, hooks, and event subscriptions.
 
+Lint guards three modeling rules of [`src/AGENTS.md`](src/AGENTS.md) for everything under `src/`. The rules live in `tools/oxlint/directorate/` at the repository root and are enabled in the root `oxlint.config.ts`:
+
+- **`directorate/no-name-comparison`**: a name is never compared raw (`x === "name"`, `case "name":`, `["a", "b"].includes(x)`); plain text such as `""` or `".."` may be.
+- **`directorate/no-handwritten-object-type`**: no object type literals or interfaces, except the class brand, a generic slot, and a pure function bag.
+- **`directorate/no-agent-id-in-string`**: an agent id is spelled only in `feature/agents/agent.ts`; the config reads the ids from `AgentIdSchema`.
+
 What is **not** mechanically checked:
 
 - Field-group ownership: which transition may call which `with<Group>` method, and that every write goes through the door.

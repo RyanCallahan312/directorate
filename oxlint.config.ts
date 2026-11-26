@@ -1,6 +1,8 @@
 import { defineConfig } from "oxlint";
 import core from "ultracite/oxlint/core";
 
+import { AgentIdSchema } from "./packages/opencode-directorate/src/feature/agents/agent.ts";
+
 export default defineConfig({
   env: core.env,
   extends: [core],
@@ -14,6 +16,24 @@ export default defineConfig({
     {
       name: "anti-slop-effect",
       specifier: "./tools/oxlint/anti-slop/effect/index.ts",
+    },
+    { name: "directorate", specifier: "./tools/oxlint/directorate/index.ts" },
+  ],
+  overrides: [
+    {
+      // The modeling rules of packages/opencode-directorate/src/AGENTS.md that a syntax tree can check.
+      files: ["packages/opencode-directorate/src/**/*.ts"],
+      rules: {
+        "directorate/no-agent-id-in-string": [
+          "error",
+          {
+            ids: [...AgentIdSchema.literals],
+            owner: "feature/agents/agent.ts",
+          },
+        ],
+        "directorate/no-handwritten-object-type": "error",
+        "directorate/no-name-comparison": "error",
+      },
     },
   ],
   rules: {

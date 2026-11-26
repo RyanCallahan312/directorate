@@ -10,3 +10,4 @@ From the repository root, use `bun run` for project scripts and installed tools.
 - `bun run lint` runs lint and formatting checks without type checking or tests.
 - `bun run oxlint <path>` runs only Oxlint on the specified files or directories.
 - `bun run oxfmt <path>` formats the specified files or directories in place.
+- `node --test 'tools/oxlint/directorate/**/*.test.ts'` runs the tests of the repository's own Oxlint rules (`tools/oxlint/directorate/`); `tools/oxlint/anti-slop/` is vendored.

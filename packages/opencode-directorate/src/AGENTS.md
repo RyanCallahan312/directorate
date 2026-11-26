@@ -28,6 +28,7 @@ Why branding and re-construction matter: nominal brands block plain objects from
 - **Plain text is not a name** and may be compared directly: `""`, `"."`, `".."`, path separators, and git's literal output lines (`rel === ".."` in `seal/content.ts`, `line === "GIT binary patch"` in `seal/diff.ts`).
 - Never keep bare name constants (`REVIEWER`), `Set<string>`, or `Map<string, ...>` beside the schema that owns those names.
 - **Agent ids** never appear inside a string. Interpolate the `Agent`'s id (`` `Only ${Liaison.id} runs a Directorate review` ``), so the ids are written only in `feature/agents/agent.ts`.
+- **Lint enforces both**: `directorate/no-name-comparison` and `directorate/no-agent-id-in-string` (in `tools/oxlint/directorate/` at the repository root) fail `bun run check` on a raw name comparison or a spelled-out agent id anywhere under `src/`.
 
 ## 2. Derive Data Types
 
@@ -41,6 +42,7 @@ A hand-written data type means a schema is missing.
 - **Generic types** let a schema own every non-generic field and add only the generic slot: `DialogChoice<V>` is `ChoiceLabelSchema`'s type plus `{ readonly value: V }`, and the door's `Revision<A>` is `RevisedSchema`'s or `FiledSchema`'s type plus `{ readonly out: A }`.
 - **Ports** are pure function bags (`Dialogs`, `ActiveSeal`) or derived from their constructor: `Backend` is `ReturnType<typeof backend>`, and services are `Context.Service<Records, Effect.Success<typeof make>>()`.
 - **Exempt** (non-data): `@opencode/*` host types, host seams with no `make` (`Host`), function types (including `DefineTool` and its tool spec), and value-derived types (`ReturnType`, `Effect.Success`, `Layer.Success`).
+- **Lint enforces this**: `directorate/no-handwritten-object-type` rejects every object type literal and interface under `src/` except the class brand, a generic slot (a shape that names a type parameter in scope), and a pure function bag.
 
 ## 3. Primitives → Factories → Composition
 
