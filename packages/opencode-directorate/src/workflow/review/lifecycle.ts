@@ -5,7 +5,7 @@ import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
 import { scopeOf } from "../../exclusions.ts";
-import { REVIEWER } from "../../feature/agents/agent.ts";
+import { Liaison } from "../../feature/agents/agent.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
 import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
 import { reopen, unresolved } from "../../feature/ledger/decide.ts";
@@ -29,7 +29,7 @@ import {
 import type { Current } from "../../seal/seal.ts";
 import type { Target } from "../../seal/target.ts";
 import type { Mode } from "./request.ts";
-import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR } from "./window.ts";
+import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, Window } from "./window.ts";
 
 const IO_CONCURRENCY = 16;
 
@@ -78,9 +78,11 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
     const id = yield* sealId(createdAt);
     const panel = input.panel?.length ? [...new Set(input.panel)] : undefined;
 
-    const budgetMinutes =
+    const window = Window.open(
+      createdAt,
       input.budgetMinutes ??
-      DEFAULT_BUDGET[input.mode] * (panel ? PANEL_BUDGET_FACTOR : 1);
+        DEFAULT_BUDGET[input.mode] * (panel ? PANEL_BUDGET_FACTOR : 1)
+    );
 
     // Each attempt re-resolves the ends, then captures; files changing mid-capture retry the whole attempt.
     return yield* store.create(
@@ -92,10 +94,8 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
           {
             baseSha: ends.baseSha,
             baseTip: ends.baseTip,
-            budgetMinutes,
+            ...window.toStored(),
             children: [],
-            createdAt,
-            deadline: DateTime.add(createdAt, { minutes: budgetMinutes }),
             deleted: [],
             description: ends.description,
             files: [],
@@ -107,7 +107,7 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
             id,
             lensesOff: input.lensesOff,
             mode: input.mode,
-            owner: input.owner?.agent ?? REVIEWER,
+            owner: input.owner?.agent ?? Liaison.id,
             ownerSession: input.owner?.session ?? "",
             panel,
             pid,
@@ -336,9 +336,14 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     const createdAt = yield* DateTime.now;
     const id = yield* sealId(createdAt);
 
-    const budgetMinutes =
+    const window = Window.open(
+      createdAt,
       input.budgetMinutes ??
-      Math.max(RECHECK_MIN_MINUTES, Math.round(DEFAULT_BUDGET[prior.mode] / 2));
+        Math.max(
+          RECHECK_MIN_MINUTES,
+          Math.round(DEFAULT_BUDGET[prior.mode] / 2)
+        )
+    );
 
     return yield* store.create(
       id,
@@ -371,10 +376,8 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           {
             baseSha: cur.baseSha,
             baseTip: cur.baseTip ?? prior.baseTip,
-            budgetMinutes,
+            ...window.toStored(),
             children: [],
-            createdAt,
-            deadline: DateTime.add(createdAt, { minutes: budgetMinutes }),
             deleted: [],
             description: describedAt(prior, cur),
             files: [],
@@ -386,7 +389,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             id,
             lensesOff: prior.lensesOff,
             mode: prior.mode,
-            owner: input.owner?.agent ?? REVIEWER,
+            owner: input.owner?.agent ?? Liaison.id,
             ownerSession: input.owner?.session ?? "",
             pid,
             postImage: prior.postImage,

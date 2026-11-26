@@ -3,7 +3,7 @@ import { Data, Effect, FileSystem, Path, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
 import { Host } from "../../platform/platform.ts";
-import { ROLES } from "./agent.ts";
+import { AgentIdSchema } from "./agent.ts";
 
 const AgentFrontmatter = Schema.Struct({
   color: Agent.Info.fields.color,
@@ -49,7 +49,7 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
   function* registerBundled() {
     const host = yield* Host;
 
-    const agents = yield* Effect.forEach([...ROLES], (id) =>
+    const agents = yield* Effect.forEach([...AgentIdSchema.literals], (id) =>
       Effect.gen(function* loadAgent() {
         const { data, content } = yield* readMarkdown(
           new URL(`../../../agents/${id}.md`, import.meta.url)

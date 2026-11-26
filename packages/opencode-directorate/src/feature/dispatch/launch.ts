@@ -6,7 +6,7 @@ import { ignore } from "../../platform/error.ts";
 import { adapter, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { CHILD_ROLE_SET, CHILD_ROLES, PANELIST } from "../agents/agent.ts";
+import { childNamed, Liaison, Seat } from "../agents/agent.ts";
 import {
   followUpPrompt,
   launchTitle,
@@ -21,7 +21,7 @@ import type { Child } from "./lifecycle.ts";
 /** An Auditor, Seat, or Compliance launch, as the subagent tool's input; with a sessionID it continues an existing child. */
 const decodeAssignment = Schema.decodeUnknownOption(
   Schema.Struct({
-    agent: Schema.Literals(CHILD_ROLES),
+    agent: Schema.Literals(Liaison.dispatches),
     description: Schema.optional(Schema.String),
     model: Schema.optional(Schema.String),
     prompt: Schema.optional(Schema.String),
@@ -52,7 +52,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       if (ev.tool !== "subagent") {
         const id = yield* sessions.boundTo(ev.sessionID);
 
-        if (!id || !CHILD_ROLE_SET.has(ev.agent)) {
+        if (!id || !childNamed(ev.agent)) {
           return;
         }
 
@@ -112,7 +112,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
           }
 
           const model =
-            assignment.agent === PANELIST && !assignment.model
+            assignment.agent === Seat.id && !assignment.model
               ? openSeat(s)
               : undefined;
 

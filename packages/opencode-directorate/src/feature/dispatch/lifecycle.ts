@@ -6,7 +6,7 @@ import { DateTime, Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
-import { PANELIST, REFUTER, SCOUT } from "../agents/agent.ts";
+import { Auditor, Compliance, Seat } from "../agents/agent.ts";
 import type { Actor } from "../agents/agent.ts";
 import type { Ledger } from "../ledger/entry.ts";
 
@@ -63,7 +63,7 @@ export const seatName = (model: string) => model.slice(model.indexOf("/") + 1);
 
 /** A child as readers see it: a Seat by its model, anyone else by role. */
 export const childName = (c: Pick<Child, "agent" | "model">) =>
-  c.agent === PANELIST && c.model ? seatName(c.model) : c.agent;
+  c.agent === Seat.id && c.model ? seatName(c.model) : c.agent;
 
 /** Whoever raised or decided something, named as `childName` names them. */
 export const actorName = (seal: Seal, a: Actor) => {
@@ -76,7 +76,7 @@ export const actorName = (seal: Seal, a: Actor) => {
 export const panelSeats = (seal: Seal) =>
   (seal.panel ?? []).map((model) => {
     const runs = seal.children.filter(
-      (c) => c.agent === PANELIST && c.model === model
+      (c) => c.agent === Seat.id && c.model === model
     );
 
     const completed = runs.filter((c) => c.status === "completed");
@@ -136,7 +136,7 @@ const childKey = (c: Child) =>
 
 /** A Compliance run is answered once every entry on its entries line is decided, whichever run decided it. */
 const decided = (c: Child, ledger: Ledger) => {
-  if (c.agent !== REFUTER || !/^entries:/imu.test(c.prompt)) {
+  if (c.agent !== Compliance.id || !/^entries:/imu.test(c.prompt)) {
     return false;
   }
 
@@ -156,7 +156,7 @@ export const questionText = (text: string) =>
 
 /** An Auditor run whose question the Liaison recorded as answered itself. */
 const answered = (c: Child, ledger: Ledger) =>
-  c.agent === SCOUT &&
+  c.agent === Auditor.id &&
   ledger.notes.some(
     (n) => n.kind === "answered" && questionText(n.text) === childQuestion(c)
   );
@@ -189,7 +189,7 @@ export const childFailures = (seal: Seal, ledger: Ledger) => {
 export const unansweredQuestions = (seal: Seal, ledger: Ledger) => [
   ...new Set(
     [...childOutstanding(seal), ...childFailures(seal, ledger)].flatMap((c) =>
-      c.agent === SCOUT ? [childQuestion(c)] : []
+      c.agent === Auditor.id ? [childQuestion(c)] : []
     )
   ),
 ];

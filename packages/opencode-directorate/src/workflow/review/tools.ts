@@ -35,7 +35,7 @@ import {
   ReviewScopeSchema,
 } from "./request.ts";
 import type { ReviewScope } from "./request.ts";
-import { budget } from "./window.ts";
+import { budget, Window, windowOf } from "./window.ts";
 
 /** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
 const RECHECK_FIXED = [
@@ -267,15 +267,20 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
                     );
                   }
 
-                  // A spent budget gets more time: half the original, at least 5 minutes, unless the caller names a budget.
+                  // A spent budget gets more time (Window.takeover), unless the caller names a budget.
                   const now = yield* DateTime.now;
-                  const { phase } = yield* budget(s);
+                  const window = windowOf(s);
+                  const { phase } = yield* budget(window);
 
-                  const minutes =
-                    input.budget_minutes ??
-                    (s.ownerSession === a.session || phase === "normal"
+                  const takeover =
+                    s.ownerSession === a.session || phase === "normal"
                       ? undefined
-                      : Math.max(5, Math.round(s.budgetMinutes / 2)));
+                      : window.takeover(now);
+
+                  const restarted =
+                    input.budget_minutes === undefined
+                      ? takeover
+                      : Window.open(now, input.budget_minutes);
 
                   // An explicit resume continues a review the user had interrupted.
                   const resumedSeal: Seal = {
@@ -288,14 +293,9 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
                   };
 
                   const taken: Seal =
-                    minutes === undefined
+                    restarted === undefined
                       ? resumedSeal
-                      : {
-                          ...resumedSeal,
-                          budgetMinutes: minutes,
-                          createdAt: now,
-                          deadline: DateTime.add(now, { minutes }),
-                        };
+                      : { ...resumedSeal, ...restarted.toStored() };
 
                   const updated =
                     s.ownerSession && s.ownerSession !== a.session

@@ -2,7 +2,7 @@
 import { Match } from "effect";
 
 import type { Anchor } from "../../seal/region.ts";
-import { REFUTER, REVIEWER } from "../agents/agent.ts";
+import { Compliance, Liaison } from "../agents/agent.ts";
 import type { Actor } from "../agents/agent.ts";
 import type { Entry, Ledger, Severity, Verdict } from "./entry.ts";
 
@@ -55,17 +55,17 @@ const liaisonVerdictError = (
   affirms: boolean
 ) => {
   if (entry.status !== "open") {
-    return `${entry.id} is ${entry.status}. Only ${REFUTER} may re-decide a decided entry.`;
+    return `${entry.id} is ${entry.status}. Only ${Compliance.id} may re-decide a decided entry.`;
   }
 
-  if (entry.raisedBy.agent === REVIEWER && affirms) {
-    return `${entry.id} was raised by ${REVIEWER}; only ${REFUTER} may ${input.verdict === "resolved" ? "resolve" : "confirm"} it.`;
+  if (entry.raisedBy.agent === Liaison.id && affirms) {
+    return `${entry.id} was raised by ${Liaison.id}; only ${Compliance.id} may ${input.verdict === "resolved" ? "resolve" : "confirm"} it.`;
   }
 
   const sev = currentSeverity(entry);
 
   if (sev !== "minor") {
-    return `${entry.id} is ${sev}. Any verdict on a blocking or important entry needs ${REFUTER}; route it there with your evidence.`;
+    return `${entry.id} is ${sev}. Any verdict on a blocking or important entry needs ${Compliance.id}; route it there with your evidence.`;
   }
 
   if (
@@ -73,7 +73,7 @@ const liaisonVerdictError = (
     input.severity &&
     input.severity !== "minor"
   ) {
-    return `You may confirm only as minor; route it to ${REFUTER} to raise its severity.`;
+    return `You may confirm only as minor; route it to ${Compliance.id} to raise its severity.`;
   }
 };
 
@@ -98,10 +98,10 @@ const duplicateError = (
   }
 
   if (
-    by.agent === REVIEWER &&
+    by.agent === Liaison.id &&
     RANK[currentSeverity(target)] > RANK[currentSeverity(entry)]
   ) {
-    return `${target.id} is ${currentSeverity(target)} and ${entry.id} claims ${currentSeverity(entry)}; merging would hide the higher claim. Route both to ${REFUTER}.`;
+    return `${target.id} is ${currentSeverity(target)} and ${entry.id} claims ${currentSeverity(entry)}; merging would hide the higher claim. Route both to ${Compliance.id}.`;
   }
 };
 
@@ -129,8 +129,8 @@ export const verdictError = (
   input: VerdictInput,
   ledger: Ledger
 ): string | undefined => {
-  if (by.agent !== REVIEWER && by.agent !== REFUTER) {
-    return `Only ${REVIEWER} or ${REFUTER} may record verdicts (you are ${by.agent}).`;
+  if (by.agent !== Liaison.id && by.agent !== Compliance.id) {
+    return `Only ${Liaison.id} or ${Compliance.id} may record verdicts (you are ${by.agent}).`;
   }
 
   if (input.verdict === "resolved" && !entry.carried) {
@@ -138,8 +138,8 @@ export const verdictError = (
   }
 
   // A verified finding was confirmed by Compliance (or within its rules); only Compliance may overturn or re-confirm it.
-  if (entry.carried?.status === "confirmed" && by.agent !== REFUTER) {
-    return `${entry.id} carries a verified finding from the earlier review; route it to ${REFUTER} to decide whether it is still present, resolved, or was wrong.`;
+  if (entry.carried?.status === "confirmed" && by.agent !== Compliance.id) {
+    return `${entry.id} carries a verified finding from the earlier review; route it to ${Compliance.id} to decide whether it is still present, resolved, or was wrong.`;
   }
 
   // Resolving claims the fix works, which needs the same independence as confirming.
@@ -147,14 +147,14 @@ export const verdictError = (
   const own = by.session === entry.raisedBy.session;
 
   if (own && affirms) {
-    return `${entry.id} was raised in this session. A different session must ${input.verdict === "resolved" ? "resolve" : "confirm"} it: ${REFUTER} for the Liaison's own entries.`;
+    return `${entry.id} was raised in this session. A different session must ${input.verdict === "resolved" ? "resolve" : "confirm"} it: ${Compliance.id} for the Liaison's own entries.`;
   }
 
   if (own && entry.status !== "open") {
     return `${entry.id} is ${entry.status}; you can only withdraw your own open entries.`;
   }
 
-  if (by.agent === REVIEWER && !own) {
+  if (by.agent === Liaison.id && !own) {
     const error = liaisonVerdictError(entry, input, affirms);
 
     if (error) {

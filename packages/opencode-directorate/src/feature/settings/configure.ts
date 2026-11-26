@@ -8,7 +8,7 @@ import { failure, ignore } from "../../platform/error.ts";
 import { Host, optional, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { ROLE_SET } from "../agents/agent.ts";
+import { agentNamed } from "../agents/agent.ts";
 import { DEFAULT_PANEL } from "../dispatch/seat.ts";
 import { LENSES } from "../ledger/entry.ts";
 import {
@@ -107,7 +107,7 @@ export const configureTool = (
     description:
       "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
     *execute(input, c) {
-      if (ROLE_SET.has(c.agent)) {
+      if (agentNamed(c.agent)) {
         return yield* failure(
           "Directorate review agents cannot modify Directorate settings."
         );

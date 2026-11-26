@@ -9,7 +9,7 @@ import { activity, createdAt, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { CHILD_ROLE_SET } from "../agents/agent.ts";
+import { childNamed } from "../agents/agent.ts";
 import {
   childOutstanding,
   claimed,
@@ -168,7 +168,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
       agent: string,
       title: string | undefined
     ) {
-      if (!CHILD_ROLE_SET.has(agent)) {
+      if (!childNamed(agent)) {
         return;
       }
 

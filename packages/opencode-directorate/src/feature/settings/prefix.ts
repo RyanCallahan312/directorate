@@ -6,7 +6,7 @@ import { Effect } from "effect";
 import { Host } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 import { Sessions } from "../../seal/seal.ts";
-import { REVIEWER } from "../agents/agent.ts";
+import { agentNamed, Liaison } from "../agents/agent.ts";
 import { describe } from "./file.ts";
 import { SettingsStore } from "./store.ts";
 
@@ -27,9 +27,7 @@ export const settingsLines = Effect.fnUntraced(function* settingsLines() {
       event: SessionContext,
       seal: Seal | undefined
     ) {
-      const agent: string = event.agent;
-
-      if (agent !== REVIEWER) {
+      if (agentNamed(event.agent) !== Liaison) {
         return;
       }
 

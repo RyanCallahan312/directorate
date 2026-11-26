@@ -16,7 +16,7 @@ import {
   writable,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
-import { budget, GRACE_MS } from "../../workflow/review/window.ts";
+import { budget, GRACE_MS, windowOf } from "../../workflow/review/window.ts";
 import type { Ledger } from "../ledger/entry.ts";
 import { assess } from "./directive.ts";
 import type { Freshness } from "./directive.ts";
@@ -82,7 +82,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
     staleFiles: stale,
   };
 
-  const { phase } = yield* budget(seal);
+  const { phase } = yield* budget(windowOf(seal));
 
   const a = assess(assessed, ledger, { stale, unverified }, phase);
 
@@ -189,7 +189,7 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
 
             yield* writable(seal, c, "directorate_report", true);
             const ledger = yield* store.loadLedger(seal.id);
-            const { phase } = yield* budget(seal);
+            const { phase } = yield* budget(windowOf(seal));
 
             const pushBack = (gates: Seal["gates"], message: string) =>
               store

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { DateTime } from "effect";
 
-import { PANELIST } from "../src/feature/agents/agent.ts";
+import { Seat } from "../src/feature/agents/agent.ts";
 import type { Entry } from "../src/feature/ledger/entry.ts";
 import type { Seal } from "../src/seal/record.ts";
 import { decideShip, shipKickoff } from "../src/workflow/ship/step.ts";
@@ -262,7 +262,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
     ...panelSeal,
     children: [
       {
-        agent: PANELIST,
+        agent: Seat.id,
         call: "call",
         model,
         prompt: "Review",

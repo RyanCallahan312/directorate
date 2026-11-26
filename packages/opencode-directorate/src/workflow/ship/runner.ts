@@ -24,7 +24,7 @@ import {
 import { SecureRandom } from "effect/crypto";
 import type { Digest } from "effect/crypto";
 
-import { REVIEWER, ROLE_SET } from "../../feature/agents/agent.ts";
+import { agentNamed, Liaison } from "../../feature/agents/agent.ts";
 import type { SessionEvent } from "../../feature/dispatch/dispatch.ts";
 import { failure, recover } from "../../platform/error.ts";
 import {
@@ -232,7 +232,7 @@ const describe = (state: ShipState) => {
 };
 
 const assertAgent = (agent: string | undefined) =>
-  agent && ROLE_SET.has(agent)
+  agentNamed(agent)
     ? failure(
         "Use /directorate-ship from the calling session, not from a Directorate agent."
       )
@@ -454,7 +454,7 @@ export const registerShip = Effect.fn("Ship.register")(
       shipID?: string,
       scope?: ReviewScope
     ) {
-      if (seal.owner !== REVIEWER || (!shipID && !seal.recheckOf)) {
+      if (seal.owner !== Liaison.id || (!shipID && !seal.recheckOf)) {
         return;
       }
 

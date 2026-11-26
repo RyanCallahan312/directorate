@@ -25,7 +25,7 @@ import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { isSecret } from "../src/exclusions.ts";
-import { budgetLine } from "../src/feature/agents/agent.ts";
+import { agentOf, budgetLine } from "../src/feature/agents/agent.ts";
 import type { Actor } from "../src/feature/agents/agent.ts";
 import { childFailures } from "../src/feature/dispatch/lifecycle.ts";
 import {
@@ -78,7 +78,7 @@ import {
   recheckSeal,
   refreshSeal,
 } from "../src/workflow/review/review.ts";
-import { budget } from "../src/workflow/review/window.ts";
+import { budget, Window } from "../src/workflow/review/window.ts";
 import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {
@@ -2514,9 +2514,9 @@ test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", asyn
   await Effect.runPromise(
     Effect.gen(function* testBudget() {
       for (const [minutes, elapsed, phase] of cases) {
-        const seal = { createdAt: T0, deadline: DateTime.add(T0, { minutes }) };
+        const window = Window.open(T0, minutes);
         yield* TestClock.setTime(DateTime.toEpochMillis(T0) + elapsed * 60_000);
-        assert.equal((yield* budget(seal)).phase, phase);
+        assert.equal((yield* budget(window)).phase, phase);
       }
     }).pipe(Effect.provide(TestClock.layer()))
   );
@@ -3310,29 +3310,29 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
 test("budget lines are written for each role", async () => {
   const now = Date.parse("2026-01-01T00:00:00Z");
 
-  const s = {
+  const s = Window.make({
     budgetMinutes: 10,
     createdAt: DateTime.makeUnsafe(now - 9 * 60_000),
     deadline: DateTime.makeUnsafe(now + 60_000),
-  };
+  });
 
   await Effect.runPromise(
     Effect.gen(function* testBudgetLines() {
       yield* TestClock.setTime(now);
       assert.match(
-        yield* budgetLine(s, "directorate_auditor"),
+        yield* budgetLine(agentOf("directorate_auditor"), s),
         /file surviving candidates now and hand off/u
       );
       assert.match(
-        yield* budgetLine(s, "directorate_compliance"),
+        yield* budgetLine(agentOf("directorate_compliance"), s),
         /finish the entry in hand/u
       );
       assert.match(
-        yield* budgetLine(s, "directorate_liaison"),
+        yield* budgetLine(agentOf("directorate_liaison"), s),
         /call directorate_report/u
       );
       assert.doesNotMatch(
-        yield* budgetLine(s, "directorate_auditor"),
+        yield* budgetLine(agentOf("directorate_auditor"), s),
         /directorate_report/u
       );
     }).pipe(Effect.provide(TestClock.layer()))

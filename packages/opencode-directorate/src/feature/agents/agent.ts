@@ -1,4 +1,5 @@
-// Directorate agents: the roles, who acted, and what each role reads in each phase of the budget (Window × Agent).
+// Directorate agents: what each agent is and may do, who acted, and what each agent reads in each phase of the budget
+// (Window × Agent).
 import { Effect, Schema } from "effect";
 
 import {
@@ -6,39 +7,144 @@ import {
   PHASE_HEADERS,
   PhaseSchema,
 } from "../../workflow/review/window.ts";
-import type { Phase, StoredWindow } from "../../workflow/review/window.ts";
+import type { Phase, Window } from "../../workflow/review/window.ts";
 
 /**
- * The Directorate roles: the Liaison (lead reviewer), Auditors (narrow investigators), Directorate Seats (independent
- * panel reviewers, one model each), and Compliance (the adversarial verifier).
+ * The Directorate agents, in registration order: the Liaison (lead reviewer), Auditors (narrow investigators), Directorate
+ * Seats (independent panel reviewers, one model each), and Compliance (the adversarial verifier).
  */
-export const REVIEWER = "directorate_liaison";
-export const REFUTER = "directorate_compliance";
-export const SCOUT = "directorate_auditor";
-export const PANELIST = "directorate_seat";
-
-/** Every Directorate role, in registration order. */
-export const ROLES = [REVIEWER, SCOUT, PANELIST, REFUTER] as const;
-
-/** The roles the Liaison dispatches as child sessions. */
-export const CHILD_ROLES = [SCOUT, PANELIST, REFUTER] as const;
-export const ROLE_SET: ReadonlySet<string> = new Set(ROLES);
-export const CHILD_ROLE_SET: ReadonlySet<string> = new Set(CHILD_ROLES);
-
-/** What each role may still call once the budget is locked. */
-export const LOCKED_TOOLS = new Map([
-  [
-    REVIEWER,
-    new Set([
-      "directorate_report",
-      "directorate_ledger_list",
-      "directorate_note",
-    ]),
-  ],
-  [SCOUT, new Set(["directorate_ledger_add", "directorate_note"])],
-  [PANELIST, new Set(["directorate_ledger_add", "directorate_note"])],
-  [REFUTER, new Set(["directorate_ledger_verdict", "directorate_ledger_list"])],
+export const AgentIdSchema = Schema.Literals([
+  "directorate_liaison",
+  "directorate_auditor",
+  "directorate_seat",
+  "directorate_compliance",
 ]);
+
+export type AgentId = typeof AgentIdSchema.Type;
+
+/** An agent of a kind: whom it dispatches, the phases it may be launched in, and its orders in each phase. */
+export class Agent extends Schema.Class<
+  Agent,
+  { readonly brand: unique symbol }
+>("directorate/Agent")({
+  dispatches: Schema.Array(AgentIdSchema),
+  id: AgentIdSchema,
+  launchableIn: Schema.Array(PhaseSchema),
+  orders: Schema.Record(PhaseSchema, Schema.String),
+  title: Schema.String,
+}) {
+  /** Whether this agent may launch `child` in `phase`. */
+  mayLaunch(child: Agent, phase: Phase) {
+    return (
+      this.dispatches.includes(child.id) && child.launchableIn.includes(phase)
+    );
+  }
+
+  /** What this agent reads in `phase`. */
+  orderFor(phase: Phase) {
+    return this.orders[phase];
+  }
+}
+
+export const Liaison = Agent.make({
+  dispatches: [
+    "directorate_auditor",
+    "directorate_seat",
+    "directorate_compliance",
+  ],
+  id: "directorate_liaison",
+  launchableIn: [],
+  orders: {
+    drain:
+      "DRAIN: dispatch no new Auditors or Seats; route open entries to Compliance, then call directorate_report",
+    locked:
+      "LOCKED: <Containment/Window> expired — call directorate_report now",
+    normal: "observe and investigate",
+  },
+  title: "Liaison",
+});
+
+export const Auditor = Agent.make({
+  dispatches: [],
+  id: "directorate_auditor",
+  launchableIn: ["normal"],
+  orders: {
+    drain: "DRAIN: file surviving candidates now and hand off",
+    locked: "LOCKED: file final candidates or notes and stop",
+    normal: "investigate",
+  },
+  title: "Auditor",
+});
+
+export const Seat = Agent.make({
+  dispatches: [],
+  id: "directorate_seat",
+  launchableIn: ["normal"],
+  orders: {
+    drain:
+      "DRAIN: file surviving candidates now, note what you did not reach, and hand off",
+    locked: "LOCKED: file final candidates or notes and stop",
+    normal: "review in isolation",
+  },
+  title: "Directorate Seat",
+});
+
+export const Compliance = Agent.make({
+  dispatches: [],
+  id: "directorate_compliance",
+  launchableIn: ["normal", "drain"],
+  orders: {
+    drain:
+      "DRAIN: finish the entry in hand; decide the rest only where evidence is clear, then hand off",
+    locked: "LOCKED: record proved verdicts and stop",
+    normal: "verify",
+  },
+  title: "Compliance",
+});
+
+const Agents = Schema.Record(AgentIdSchema, Agent).make({
+  directorate_auditor: Auditor,
+  directorate_compliance: Compliance,
+  directorate_liaison: Liaison,
+  directorate_seat: Seat,
+});
+
+export const agentOf = (id: AgentId) => Agents[id];
+
+export const isAgentId = Schema.is(AgentIdSchema);
+
+/** The Directorate agent a host-supplied name denotes, or undefined for any other agent. */
+export const agentNamed = (name: string | undefined) =>
+  isAgentId(name) ? agentOf(name) : undefined;
+
+/** The Auditor, Seat, or Compliance a name denotes: an agent the Liaison dispatches. */
+export const childNamed = (name: string | undefined) => {
+  const agent = agentNamed(name);
+
+  return agent && Liaison.dispatches.includes(agent.id) ? agent : undefined;
+};
+
+/** What each agent may still call once the budget is locked. */
+const LOCKED_TOOLS = Schema.Record(
+  AgentIdSchema,
+  Schema.Array(Schema.String)
+).make({
+  directorate_auditor: ["directorate_ledger_add", "directorate_note"],
+  directorate_compliance: [
+    "directorate_ledger_verdict",
+    "directorate_ledger_list",
+  ],
+  directorate_liaison: [
+    "directorate_report",
+    "directorate_ledger_list",
+    "directorate_note",
+  ],
+  directorate_seat: ["directorate_ledger_add", "directorate_note"],
+});
+
+/** Whether `name`'s agent still calls `tool` once the budget is locked; other agents call nothing. */
+export const keepsAtLockdown = (name: string | undefined, tool: string) =>
+  isAgentId(name) && LOCKED_TOOLS[name].includes(tool);
 
 export const ActorSchema = Schema.Struct({
   agent: Schema.String,
@@ -47,56 +153,24 @@ export const ActorSchema = Schema.Struct({
 
 export type Actor = typeof ActorSchema.Type;
 
-const RoleSchema = Schema.Literals(ROLES);
+/** "[header] <middle> · <agent's order>" */
+const phaseLine = (agent: Agent, phase: Phase, middle: string) =>
+  `[${PHASE_HEADERS[phase]}] ${middle} · ${agent.orderFor(phase)}`;
 
-const isRole = Schema.is(RoleSchema);
-
-/** The instruction every role reads in each phase. */
-const PHASE_TEXT = Schema.Record(
-  PhaseSchema,
-  Schema.Record(RoleSchema, Schema.String)
-).make({
-  drain: {
-    [REVIEWER]:
-      "DRAIN: dispatch no new Auditors or Seats; route open entries to Compliance, then call directorate_report",
-    [SCOUT]: "DRAIN: file surviving candidates now and hand off",
-    [PANELIST]:
-      "DRAIN: file surviving candidates now, note what you did not reach, and hand off",
-    [REFUTER]:
-      "DRAIN: finish the entry in hand; decide the rest only where evidence is clear, then hand off",
-  },
-  locked: {
-    [REVIEWER]:
-      "LOCKED: <Containment/Window> expired — call directorate_report now",
-    [SCOUT]: "LOCKED: file final candidates or notes and stop",
-    [PANELIST]: "LOCKED: file final candidates or notes and stop",
-    [REFUTER]: "LOCKED: record proved verdicts and stop",
-  },
-  normal: {
-    [REVIEWER]: "observe and investigate",
-    [SCOUT]: "investigate",
-    [PANELIST]: "review in isolation",
-    [REFUTER]: "verify",
-  },
-});
-
-/** "[header] <middle> · <role instruction>"; unknown agents read the Liaison's instruction. */
-const phaseLine = (phase: Phase, agent: string, middle: string) =>
-  `[${PHASE_HEADERS[phase]}] ${middle} · ${PHASE_TEXT[phase][isRole(agent) ? agent : REVIEWER]}`;
-
+/** The ticking budget footer under a tool result. */
 export const budgetLine = Effect.fnUntraced(function* budgetLine(
-  seal: typeof StoredWindow.Type,
-  agent: string = REVIEWER
+  agent: Agent,
+  window: Window
 ) {
-  const b = yield* budget(seal);
+  const b = yield* budget(window);
 
   return phaseLine(
-    b.phase,
     agent,
-    `${b.minutesLeft} min left of ${seal.budgetMinutes} · phase ${b.phase}`
+    b.phase,
+    `${b.minutesLeft} min left of ${window.budgetMinutes} · phase ${b.phase}`
   );
 });
 
 /** Static phase notice for system prompts (no ticking minutesLeft, so KV-cache prefixes stay stable). */
-export const budgetNotice = (phase: Phase, agent: string = REVIEWER) =>
-  phaseLine(phase, agent, `phase ${phase}`);
+export const budgetNotice = (agent: Agent, phase: Phase) =>
+  phaseLine(agent, phase, `phase ${phase}`);

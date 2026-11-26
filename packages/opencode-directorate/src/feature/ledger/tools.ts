@@ -24,7 +24,7 @@ import {
   done,
   mutate,
 } from "../../seal/seal.ts";
-import { PANELIST, REVIEWER, SCOUT } from "../agents/agent.ts";
+import { Auditor, Liaison, Seat } from "../agents/agent.ts";
 import {
   actorName,
   childFailures,
@@ -86,7 +86,7 @@ export const ledgerTools = (
           const evidence = yield* checkEvidence(seal, input.evidence);
           const ledger = yield* store.loadLedger(seal.id);
           // Seats operate under memetic isolation: never reveal other entries' titles or ids.
-          const near = c.agent === PANELIST ? [] : nearby(ledger, anchor);
+          const near = c.agent === Seat.id ? [] : nearby(ledger, anchor);
 
           const entry: Entry = {
             anchor,
@@ -416,16 +416,16 @@ export const ledgerTools = (
           let { text } = input;
 
           if (input.kind === "answered") {
-            if (c.agent !== REVIEWER) {
+            if (c.agent !== Liaison.id) {
               return yield* failure(
-                `Only ${REVIEWER} records an answered question.`
+                `Only ${Liaison.id} records an answered question.`
               );
             }
 
             text = questionText(input.text);
 
             const failed = childFailures(seal, ledger)
-              .filter((x) => x.agent === SCOUT)
+              .filter((x) => x.agent === Auditor.id)
               .map(childQuestion);
 
             if (!failed.includes(text)) {

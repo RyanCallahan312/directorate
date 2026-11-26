@@ -6035,7 +6035,7 @@ test(
     const dir = repo();
     const start = Date.now();
 
-    /** Moves a seal's deadline back to the start; `reopen` drops its report too, as no reported seal could. */
+    /** Moves a seal's window (start and deadline) back to the start; `reopen` drops its report too, as no reported seal could. */
     const overdue = (id: string, reopen = false) => {
       const file = path.join(state, id, "seal.json");
       const s = JSON.parse(readFileSync(file, "utf-8"));
@@ -6046,7 +6046,11 @@ test(
 
       writeFileSync(
         file,
-        JSON.stringify({ ...s, deadline: new Date(start).toISOString() })
+        JSON.stringify({
+          ...s,
+          createdAt: new Date(start).toISOString(),
+          deadline: new Date(start).toISOString(),
+        })
       );
     };
 

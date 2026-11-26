@@ -7,7 +7,7 @@ import { Protocol } from "../feature/report/directive.ts";
 import { Count, since, sortedFields } from "../platform/stored.ts";
 import { Custody } from "../workflow/review/custody.ts";
 import { ModeSchema } from "../workflow/review/request.ts";
-import { StoredWindow } from "../workflow/review/window.ts";
+import { StoredWindow, windowCheck } from "../workflow/review/window.ts";
 import { FileEntrySchema, RegionSchema } from "./region.ts";
 import { TargetSchema } from "./target.ts";
 
@@ -52,7 +52,8 @@ const SealSchema = Schema.Struct(
     /** The ship whose loop this review belongs to. Only that ship continues it, even after the ship is stopped. */
     ship: opt(Schema.String),
   })
-);
+  // Spreading StoredWindow's fields drops its check; the root re-applies it.
+).check(windowCheck);
 
 export type Seal = typeof SealSchema.Type;
 

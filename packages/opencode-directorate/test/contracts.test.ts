@@ -234,3 +234,25 @@ for (const contract of contracts) {
 test("directorate.json: an unknown key is rejected, not dropped", () => {
   assert.throws(() => settingsRoundTrip('{\n  "mdoe": "full"\n}\n'));
 });
+
+test("seal.json: the root re-applies the Window check, so a deadline before createdAt does not decode", () => {
+  const text = read("seal.json");
+  const stored = JSON.parse(text);
+
+  assert.throws(
+    () =>
+      sealRoundTrip(
+        JSON.stringify({ ...stored, deadline: "2026-03-01T09:59:59.999Z" })
+      ),
+    /deadline must not precede createdAt/u
+  );
+
+  // A deadline at createdAt is a spent window, not a broken one.
+  const spent = JSON.stringify(
+    { ...stored, deadline: stored.createdAt },
+    undefined,
+    2
+  );
+
+  assert.equal(sealRoundTrip(spent), spent);
+});

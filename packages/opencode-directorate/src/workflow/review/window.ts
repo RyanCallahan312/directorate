@@ -1,8 +1,8 @@
 // Directorate time budget: normal until the last 20% (at least 6 minutes when the budget allows), then drain, then locked.
-import { Clock, DateTime, Effect, Schema } from "effect";
+import { DateTime, Effect, Schema } from "effect";
 
 import { Time } from "../../platform/stored.ts";
-import type { Mode } from "./request.ts";
+import { ModeSchema } from "./request.ts";
 
 export const PhaseSchema = Schema.Literals(["normal", "drain", "locked"]);
 
@@ -12,50 +12,123 @@ export type Phase = typeof PhaseSchema.Type;
  * Minutes a review gets when neither the request nor directorate.json sets them. A panel's verification load grows with its
  * seats, so its default is PANEL_BUDGET_FACTOR times longer.
  */
-export const DEFAULT_BUDGET: Record<Mode, number> = {
+export const DEFAULT_BUDGET = Schema.Record(ModeSchema, Schema.Finite).make({
   "code-quality": 30,
   default: 20,
   full: 60,
-};
+});
 
 export const PANEL_BUDGET_FACTOR = 1.5;
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 export const GRACE_MS = 120_000;
 
-/** The Window field group of seal.json. */
-export const StoredWindow = Schema.Struct({
-  budgetMinutes: Schema.Finite,
-  createdAt: Time,
-  deadline: Time,
-});
+/** A taken-over review whose budget was spent restarts with half of it, at least this many minutes. */
+const TAKEOVER_MIN_MINUTES = 5;
 
-const BudgetSchema = Schema.Struct({
-  minutesLeft: Schema.Number,
-  phase: PhaseSchema,
-});
-
-/** Each phase's header; the instruction every role reads in it is the role's own. */
+/** Each phase's header; the instruction every agent reads in it is the agent's own. */
 export const PHASE_HEADERS = Schema.Record(PhaseSchema, Schema.String).make({
   drain: "DIRECTORATE // EVACUATION",
   locked: "DIRECTORATE // LOCKDOWN",
   normal: "DIRECTORATE // WINDOW",
 });
 
-export const budget = Effect.fnUntraced(function* budget(
-  seal: Pick<typeof StoredWindow.Type, "createdAt" | "deadline">
-) {
-  const now = yield* Clock.currentTimeMillis;
-  const start = DateTime.toEpochMillis(seal.createdAt);
-  const end = DateTime.toEpochMillis(seal.deadline);
-  const total = Math.max(1, end - start);
-  const drainMs = Math.max(0.2 * total, Math.min(6 * 60_000, 0.5 * total));
+/** A window's deadline never precedes its start. Spreading StoredWindow's fields drops it, so the seal root re-applies it. */
+export const windowCheck = Schema.makeFilter(
+  (w: { readonly createdAt: DateTime.Utc; readonly deadline: DateTime.Utc }) =>
+    !DateTime.isLessThan(w.deadline, w.createdAt) ||
+    "deadline must not precede createdAt"
+);
 
-  const openPhase = now >= end - drainMs ? "drain" : "normal";
-  const phase = now >= end ? "locked" : openPhase;
+/** The Window field group of seal.json. */
+export const StoredWindow = Schema.Struct({
+  budgetMinutes: Schema.Finite,
+  createdAt: Time,
+  deadline: Time,
+}).check(windowCheck);
+
+/** A review's clock: when it opened, when it locks, and the minutes it was given. */
+export class Window extends Schema.Class<
+  Window,
+  { readonly brand: unique symbol }
+>("directorate/Window")(
+  Schema.Struct({
+    budgetMinutes: Schema.Finite,
+    createdAt: Schema.DateTimeUtc,
+    deadline: Schema.DateTimeUtc,
+  }).check(windowCheck)
+) {
+  /** A window of `minutes` opening at `createdAt`. */
+  static open(createdAt: DateTime.Utc, minutes: number) {
+    return Window.make({
+      budgetMinutes: minutes,
+      createdAt,
+      deadline: DateTime.add(createdAt, { minutes }),
+    });
+  }
+
+  /** A taken-over review's restart at `now`: half the budget, at least TAKEOVER_MIN_MINUTES. */
+  takeover(now: DateTime.Utc) {
+    return Window.open(
+      now,
+      Math.max(TAKEOVER_MIN_MINUTES, Math.round(this.budgetMinutes / 2))
+    );
+  }
+
+  /** Normal, then drain for the last 20% (6 minutes if longer, but never more than half), then locked at the deadline. */
+  phaseAt(now: DateTime.Utc) {
+    const at = DateTime.toEpochMillis(now);
+    const end = DateTime.toEpochMillis(this.deadline);
+    const total = Math.max(1, end - DateTime.toEpochMillis(this.createdAt));
+    const drainMs = Math.max(0.2 * total, Math.min(6 * 60_000, 0.5 * total));
+
+    if (at >= end) {
+      return "locked";
+    }
+
+    return at >= end - drainMs ? "drain" : "normal";
+  }
+
+  /** Minutes left at `now`, to a tenth, never negative. */
+  minutesLeftAt(now: DateTime.Utc) {
+    return Math.max(
+      0,
+      Math.round(
+        (DateTime.toEpochMillis(this.deadline) - DateTime.toEpochMillis(now)) /
+          6000
+      ) / 10
+    );
+  }
+
+  /** The seal.json fields this window stores. */
+  toStored() {
+    return {
+      budgetMinutes: this.budgetMinutes,
+      createdAt: this.createdAt,
+      deadline: this.deadline,
+    };
+  }
+}
+
+/** A stored seal's window. */
+export const windowOf = (seal: typeof StoredWindow.Type) =>
+  Window.make({
+    budgetMinutes: seal.budgetMinutes,
+    createdAt: seal.createdAt,
+    deadline: seal.deadline,
+  });
+
+const BudgetSchema = Schema.Struct({
+  minutesLeft: Schema.Finite,
+  phase: PhaseSchema,
+});
+
+/** The window's phase and minutes left now. */
+export const budget = Effect.fnUntraced(function* budget(window: Window) {
+  const now = yield* DateTime.now;
 
   return BudgetSchema.make({
-    minutesLeft: Math.max(0, Math.round((end - now) / 6000) / 10),
-    phase,
+    minutesLeft: window.minutesLeftAt(now),
+    phase: window.phaseAt(now),
   });
 });

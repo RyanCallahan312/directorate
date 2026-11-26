@@ -15,17 +15,18 @@ import {
 } from "effect";
 
 import {
+  agentNamed,
   budgetLine,
-  CHILD_ROLE_SET,
-  LOCKED_TOOLS,
-  REVIEWER,
+  childNamed,
+  keepsAtLockdown,
+  Liaison,
 } from "../feature/agents/agent.ts";
 import { childOutstanding } from "../feature/dispatch/lifecycle.ts";
 import { failure, ignore } from "../platform/error.ts";
 import { Host } from "../platform/platform.ts";
 import type { Body } from "../platform/platform.ts";
 import { ActiveSeal, Store } from "../records/records.ts";
-import { budget } from "../workflow/review/window.ts";
+import { budget, windowOf } from "../workflow/review/window.ts";
 import type { Seal } from "./record.ts";
 
 const SEAL_ENTRY = "directorate-seal";
@@ -139,7 +140,7 @@ const make = Effect.gen(function* make() {
         seal = yield* loadActive(yield* recordedSeal(child.parentID));
 
         // After takeover the host's parent link is unchanged, but the former Liaison no longer records this seal.
-        if (!seal && CHILD_ROLE_SET.has(String(child.agent))) {
+        if (!seal && childNamed(child.agent)) {
           seal = (yield* store.list()).find(
             (s) =>
               !s.reportedAt && s.children.some((ch) => ch.session === sessionID)
@@ -305,7 +306,7 @@ export const sealLayer = Layer.effect(
   )
 ).pipe(Layer.provideMerge(Sessions.layer));
 
-/** A tool result; while the seal is open, it ends with the caller's budget line. */
+/** A tool result; while the seal is open, it ends with the caller's budget line (the Liaison's for unknown callers). */
 export const done = Effect.fnUntraced(function* done(
   seal: Seal,
   text: string,
@@ -314,7 +315,7 @@ export const done = Effect.fnUntraced(function* done(
   return {
     content: seal.reportedAt
       ? text
-      : `${text}\n\n${yield* budgetLine(seal, agent)}`,
+      : `${text}\n\n${yield* budgetLine(agentNamed(agent) ?? Liaison, windowOf(seal))}`,
   };
 });
 
@@ -359,11 +360,11 @@ export const unlocked = Effect.fnUntraced(function* unlocked(
 ) {
   if (
     !seal.reportedAt &&
-    !LOCKED_TOOLS.get(c.agent)?.has(name) &&
-    (yield* budget(seal)).phase === "locked"
+    !keepsAtLockdown(c.agent, name) &&
+    (yield* budget(windowOf(seal))).phase === "locked"
   ) {
     return yield* failure(
-      `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === REVIEWER ? "Call directorate_report now." : "Hand off what you hold now."}`
+      `Directorate lockdown: the budget for ${seal.id} is locked, so ${name} no longer runs. ${c.agent === Liaison.id ? "Call directorate_report now." : "Hand off what you hold now."}`
     );
   }
 });

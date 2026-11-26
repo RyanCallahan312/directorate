@@ -4,7 +4,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { Clock, DateTime, Effect, Schedule } from "effect";
 
-import { REVIEWER } from "../../feature/agents/agent.ts";
+import { Liaison } from "../../feature/agents/agent.ts";
 import { settleChildren } from "../../feature/dispatch/dispatch.ts";
 import { ignore, recover } from "../../platform/error.ts";
 import {
@@ -84,7 +84,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
    * the user stopped, or one a ship owns, is not this sweep's to continue.
    */
   const recoverable = (seal: Seal) =>
-    seal.owner === REVIEWER &&
+    seal.owner === Liaison.id &&
     !seal.reportedAt &&
     !seal.halted &&
     seal.ship === undefined &&
@@ -108,7 +108,7 @@ export const watchdog = Effect.fnUntraced(function* watchdog(
         if (
           !session ||
           locationKey(session.location) !== locationKey(host.location) ||
-          session.agent !== REVIEWER ||
+          session.agent !== Liaison.id ||
           session.time.archived ||
           session.revert
         ) {

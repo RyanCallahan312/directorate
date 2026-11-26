@@ -120,7 +120,7 @@ Rules:
 - **Imports point down.** An entry may import any primitive and any entry in a lower band. A primitive imports only primitives.
 - **Features are siblings.** A feature entry never imports another feature entry. Features share through primitives and the seal aggregate; only workflows compose features. `ship` may import `review`.
 - **No module cycles.** `seal/record.ts` imports the field-group modules of its owners (`workflow/review/window.ts`, `feature/dispatch/lifecycle.ts`, …), so those modules must never import `seal/record.ts`. Modules that need the whole `Seal` (`feature/report/gates.ts`, `workflow/ship/step.ts`) import it and are imported by nothing it needs. A class used before its module initializes breaks plugin load.
-- **Ports point up.** When something below needs something above, it declares a `Context.Service` port and the higher slice provides it in its `Layer`. `records/` declares `ActiveSeal`; `seal/` implements it.
+- **Ports point up.** When something below needs something above, it declares the port and the composition root wires in the higher slice's implementation. A capability is a `Context.Service` provided in a `Layer`: `records/` declares `ActiveSeal`; `seal/` implements it. A callback into closure state built at registration is a registration parameter: `review` takes `sealed` from `ship`, `dispatch` takes a session-event listener from `ship`, and `report` takes `recovered` from `review`.
 - **Package entries stay at `src/`.** `index.ts`, `tui.ts`, `gui.ts`, and `rpc.ts` are the only root modules besides `exclusions.ts`.
 
 ## The slices
@@ -220,7 +220,7 @@ The budget belongs to the review, not to agents: its length varies per review (m
 Review, fix, and re-check until the Directive is clean or the loop pauses.
 
 - **Owns:** ship state as a tagged union (Waiting, Active, Paused, Complete) decoded from its stored `status` shape; the next-step policy, read from the saved Directive and never from the model's reply; the 6-review and 30-round limits; the kickoff text.
-- **Commands and hooks:** `/directorate-ship`, its own host-event subscription, auto-resume after reload or restart.
+- **Commands and hooks:** `/directorate-ship`; its own `context` and idle session hooks; a session-event listener that `dispatch`'s one ordered consumer calls before its own handler; auto-resume after reload or restart.
 - **Storage:** `ship:<sessionID>` in OpenCode plugin storage. Ship is its own aggregate; it reacts to the review's filed Directive and never writes the seal.
 
 ### `records/`: Records
@@ -334,8 +334,9 @@ Each tool declares the agents that keep it once the budget locks. The `ToolCatal
 | Hook or command | Slice |
 | --- | --- |
 | `permission.evaluate` | `feature/agents` |
-| Session prefix: lockdown notice and tool stripping | `feature/agents` |
+| Session prefix hook (one hook per request kind, so one span and one seal load) | `workflow/review`, composing the two rows below in order |
 | Session prefix: `[directorate settings]` line | `feature/settings` |
+| Session prefix: harness withholding, lockdown notice and tool stripping | `feature/agents` |
 | Subagent `execute.before` / `execute.after`, ordered session events | `feature/dispatch` |
 | Watchdog sweep, recovery wake | `workflow/review` |
 | `/directorate-review` | `workflow/review` |
