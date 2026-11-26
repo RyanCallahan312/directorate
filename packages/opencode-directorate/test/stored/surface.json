@@ -1,0 +1,1284 @@
+{
+  "agents": [
+    {
+      "id": "directorate_liaison",
+      "name": "directorate_liaison",
+      "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+      },
+      "mode": "all",
+      "hidden": false,
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "directorate-lenses",
+          "effect": "allow"
+        },
+        {
+          "action": "read",
+          "resource": "*/skills/directorate-lenses/references/*.md",
+          "effect": "allow"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*/skills/directorate-lenses/*",
+          "effect": "allow"
+        },
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_*",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_configure",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "subagent",
+          "resource": "directorate_auditor",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "directorate_seat",
+          "effect": "allow"
+        },
+        {
+          "action": "subagent",
+          "resource": "directorate_compliance",
+          "effect": "allow"
+        }
+      ],
+      "color": "#2f8f5b",
+      "description": "Lead code reviewer for The Directorate (Liaison). Runs an evidence-gated,\nadversarially verified review (single-model or multi-model panel) and returns\na Directive. Modes: default, code-quality, full. Read-only; reports in the\nconversation. Give it the target and focus (plus mode or panel if asked), wait\nfor its result, and relay the Directive verbatim, starting with its verdict\nand status lines; never call a partial or stale Directive clean. To re-check\nafter fixes, send a follow-up with its sessionID (or pass the Directive's seal\nid to a new Liaison). Do not use for editing code or non-review tasks.\n",
+      "system": {
+        "length": 17684,
+        "sha256": "437fc23a3da87750e969a4520ebf536478c3b3b921e3069a4253abd41ecd8a55"
+      }
+    },
+    {
+      "id": "directorate_auditor",
+      "name": "directorate_auditor",
+      "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+      },
+      "mode": "subagent",
+      "hidden": true,
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "directorate-lenses",
+          "effect": "allow"
+        },
+        {
+          "action": "read",
+          "resource": "*/skills/directorate-lenses/references/*.md",
+          "effect": "allow"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*/skills/directorate-lenses/*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_diff",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ls",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_history",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ledger_add",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_note",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ],
+      "color": "#4f7fbf",
+      "description": "Field investigator for The Directorate. Answers one falsifiable question\nabout a sealed change through one lens, files candidate findings in the\nDirectorate dossier as it finds them, and returns a short handoff. Dispatched\nby directorate_liaison. Read-only.\nDo not use for whole-change reviews or final verdicts.\n",
+      "steps": 80,
+      "system": {
+        "length": 3629,
+        "sha256": "eeae2b174f0a8bf744d3c2e342065b3fc6f32e29729b5d8a2800387df449b573"
+      }
+    },
+    {
+      "id": "directorate_seat",
+      "name": "directorate_seat",
+      "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+      },
+      "mode": "subagent",
+      "hidden": true,
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "directorate-lenses",
+          "effect": "allow"
+        },
+        {
+          "action": "read",
+          "resource": "*/skills/directorate-lenses/references/*.md",
+          "effect": "allow"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*/skills/directorate-lenses/*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_diff",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ls",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_history",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ledger_add",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_note",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ],
+      "color": "#d9822b",
+      "description": "Independent panel reviewer (Seat) for The Directorate. In a panel review,\nreviews the whole sealed change on its own model under memetic isolation\n(blind to other Seats' entries), files candidate findings in the Directorate\ndossier, and returns a short handoff. Convened by directorate_liaison.\nRead-only. Do not use outside a Directorate panel review.\n",
+      "steps": 150,
+      "system": {
+        "length": 3856,
+        "sha256": "006003a6bbef172d0fb4329aaa9dd019cf8fe6aad7616d017321939dc8da00c5"
+      }
+    },
+    {
+      "id": "directorate_compliance",
+      "name": "directorate_compliance",
+      "request": {
+        "settings": {},
+        "headers": {},
+        "body": {}
+      },
+      "mode": "subagent",
+      "hidden": true,
+      "permissions": [
+        {
+          "action": "*",
+          "resource": "*",
+          "effect": "deny"
+        },
+        {
+          "action": "webfetch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "websearch",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "skill",
+          "resource": "directorate-lenses",
+          "effect": "allow"
+        },
+        {
+          "action": "read",
+          "resource": "*/skills/directorate-lenses/references/*.md",
+          "effect": "allow"
+        },
+        {
+          "action": "external_directory",
+          "resource": "*/skills/directorate-lenses/*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_diff",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_read",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_grep",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ls",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_history",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ledger_list",
+          "resource": "*",
+          "effect": "allow"
+        },
+        {
+          "action": "directorate_ledger_verdict",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ],
+      "color": "#b5473a",
+      "description": "Adversarial code-review verifier for The Directorate (Compliance).\nGiven a seal and dossier entry ids, tries to disprove each candidate finding\nagainst the sealed code and records a confirmed, refuted, duplicate, or (in a\nre-check) resolved verdict with the deciding evidence. Dispatched by directorate_liaison.\nRead-only. Do not use for initial diff discovery or creating new dossier\nentries.\n",
+      "steps": 80,
+      "system": {
+        "length": 4728,
+        "sha256": "eab414a781e4ece99d0ebc1b61fb79a7fbcd1c01f780e884491a6b71e1d94289"
+      }
+    }
+  ],
+  "commands": [
+    {
+      "description": "Export full, unredacted Directorate reviews [seal ID or request in plain language]",
+      "name": "directorate-export"
+    },
+    {
+      "description": "Start a Directorate review [request, --scope branch|local|repository, or --recheck <seal>]",
+      "name": "directorate-review"
+    },
+    {
+      "description": "Review, fix, and re-check until the Directive is clean [request, --scope branch|local|repository] | status | pause | resume | stop | forget <pending-id>",
+      "name": "directorate-ship"
+    }
+  ],
+  "hooks": [
+    "session.experimental.idle",
+    "session.context",
+    "tool.execute.before",
+    "tool.execute.after",
+    "session.context",
+    "session.compaction",
+    "session.generate",
+    "permission.evaluate"
+  ],
+  "rpcs": [
+    {
+      "handlers": [
+        "settings",
+        "write"
+      ],
+      "id": "directorate",
+      "methods": [
+        "settings",
+        "write"
+      ]
+    }
+  ],
+  "skills": [
+    {
+      "autoinvoke": false,
+      "description": "Shared judgment rules (§1–§9) and lens playbooks for The Directorate code reviews. Use only when running inside directorate_liaison, directorate_auditor, directorate_seat, or directorate_compliance; do not load outside Directorate reviews.",
+      "id": "directorate-lenses",
+      "name": "directorate-lenses",
+      "path": "skills/directorate-lenses/SKILL.md",
+      "content": {
+        "length": 13911,
+        "sha256": "5236113c264bea1148bd1ebb6f0255002bce4ab5ac0d3408701279f65d888828"
+      }
+    }
+  ],
+  "subscriptions": [
+    [
+      "session.created",
+      "session.deleted",
+      "session.inbox.enqueued",
+      "session.inbox.delivered",
+      "session.inbox.cancelled",
+      "session.idle",
+      "session.moved",
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted"
+    ]
+  ],
+  "tools": [
+    {
+      "description": "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "regions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_diff",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Read a file as sealed (new side = reviewed post-image, old side = base), with line numbers. Unchanged files come from the base; installed dependencies (gitignored node_modules, vendor, venv) from disk. Secret-like paths and .git are withheld.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "end": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "path": {
+              "type": "string"
+            },
+            "seal": {
+              "type": "string"
+            },
+            "side": {
+              "type": "string",
+              "enum": [
+                "new",
+                "old"
+              ]
+            },
+            "start": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "path",
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_read",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "List file names at the seal (the head tree for commit, range, and PR seals; the base tree plus the changes captured at sealing for local and paths seals), optionally under one directory. Withheld files are marked. A dependency directory (node_modules, vendor, venv, …) with nothing sealed is listed one level from disk, with each link's resolved target: use it to find installed files for directorate_read instead of guessing paths.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string"
+            },
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_ls",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Search code with git grep (extended regex unless fixed; literal paths; no pager or shell). Commit, range, and PR seals search the sealed head; local and paths seals search the live tree, so confirm deciding lines with directorate_read.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "fixed": {
+              "type": "boolean"
+            },
+            "ignore_case": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pattern": {
+              "type": "string"
+            },
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern",
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_grep",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Git history with fixed arguments: log (commits, optionally for a path), blame (a file's lines), or show (a commit's message and file list; with a file path, that file's patch). Paths are literal; secret-like paths are withheld.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "end": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "log",
+                "blame",
+                "show"
+              ]
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "path": {
+              "type": "string"
+            },
+            "rev": {
+              "type": "string"
+            },
+            "seal": {
+              "type": "string"
+            },
+            "start": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_history",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Record a disposition with a reason for regions you did not read through directorate_diff: reviewed (an Auditor or Seat read it and you assessed it), skimmed, or skipped. Skimmed and skipped regions make the report partial and are listed under Outside Containment (Not Reviewed).",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "disposition": {
+              "type": "string",
+              "enum": [
+                "reviewed",
+                "skimmed",
+                "skipped"
+              ]
+            },
+            "note": {
+              "type": "string"
+            },
+            "regions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "disposition",
+            "note",
+            "regions",
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_coverage",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "File a candidate finding to the dossier the moment you find it. The quote must contain at least one complete line (8+ non-space characters) of the code at the anchor on the sealed side; the anchor snaps to the nearest place it is. Evidence is path:line refs you read. Entries stay unverified until a different session clears them.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "brief": {
+              "type": "string",
+              "description": "Optional technical brief: affected sites, required outcome, approach, open questions."
+            },
+            "consequence": {
+              "type": "string",
+              "description": "What goes wrong, for whom (or, for quality, the concrete benefit and tradeoff)."
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "description": "The deciding lines and the guards you checked. Each item is only a bare ref: path:line, path:start-end, or a URL. No side marker such as (old) (both sides are checked), and no prose or \"none: searched …\" (say what a search found in trigger or brief)."
+            },
+            "fix": {
+              "type": "string",
+              "description": "Smallest safe correction plus the test scenario that would catch it."
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "defect",
+                "test-gap",
+                "quality"
+              ]
+            },
+            "lens": {
+              "type": "string",
+              "enum": [
+                "correctness",
+                "security",
+                "performance",
+                "impact",
+                "tests",
+                "quality",
+                "architecture",
+                "ops",
+                "docs",
+                "ux"
+              ]
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "path": {
+              "type": "string"
+            },
+            "quote": {
+              "type": "string",
+              "description": "Exact code at the anchor: at least one full line."
+            },
+            "seal": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "blocking",
+                "important",
+                "minor"
+              ]
+            },
+            "side": {
+              "type": "string",
+              "enum": [
+                "new",
+                "old"
+              ],
+              "description": "old = base side, for removed code"
+            },
+            "title": {
+              "type": "string",
+              "description": "One line: what is wrong."
+            },
+            "trigger": {
+              "type": "string",
+              "description": "Concrete input, state, timing, or actor that makes it happen."
+            }
+          },
+          "required": [
+            "consequence",
+            "evidence",
+            "kind",
+            "lens",
+            "line",
+            "path",
+            "quote",
+            "seal",
+            "severity",
+            "title",
+            "trigger"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_ledger_add",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Decide a dossier (ledger) entry: confirmed (you retraced trigger → path → consequence; evidence = deciding lines), refuted (evidence = counterevidence), duplicate (of an open or confirmed entry), or, in a re-check, resolved (a finding carried from the earlier review no longer holds; evidence = the lines that fix it). directorate_liaison decides only minor entries raised by others and may withdraw its own open entries; directorate_compliance decides everything else, including every carried verified finding, and may re-decide. Refuting or resolving an entry reopens its duplicates. Pass path/line/quote (and side) to re-anchor a reopened entry.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The deciding lines (or counterevidence). Each item is only a bare ref: path:line, path:start-end, or a URL. No side marker such as (old) (both sides are checked), and no prose or \"none: searched …\" (put those in rationale)."
+            },
+            "id": {
+              "type": "string"
+            },
+            "line": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "of": {
+              "type": "string",
+              "description": "For duplicate: the entry id it repeats."
+            },
+            "path": {
+              "type": "string"
+            },
+            "quote": {
+              "type": "string"
+            },
+            "rationale": {
+              "type": "string"
+            },
+            "seal": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "blocking",
+                "important",
+                "minor"
+              ],
+              "description": "Verified severity when confirming (Compliance)."
+            },
+            "side": {
+              "type": "string",
+              "enum": [
+                "new",
+                "old"
+              ]
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "confirmed",
+                "refuted",
+                "duplicate",
+                "resolved"
+              ]
+            }
+          },
+          "required": [
+            "evidence",
+            "id",
+            "rationale",
+            "seal",
+            "verdict"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_ledger_verdict",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Show dossier (ledger) entries (optionally by status or ids; brief = one line each), with the seal's SHAs, coverage, and budget. Without a seal, lists recent seals for this repository so an interrupted review can be resumed (directorate_seal resume) or reported.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "brief": {
+              "type": "boolean"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "seal": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "open",
+                "confirmed",
+                "refuted",
+                "duplicate",
+                "resolved"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_ledger_list",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Record a coverage limit, an unanswered question (such as an Auditor that failed twice, or a candidate you could not anchor), or an assumption. Limits and unanswered questions render under Outside Containment (Not Reviewed); unanswered questions make the report partial. directorate_liaison only: kind answered, with text = a failed Auditor's question: line verbatim, records that you answered it yourself, so it no longer counts as unanswered.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "unanswered",
+                "limit",
+                "assumption",
+                "answered"
+              ]
+            },
+            "seal": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "seal",
+            "text"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_note",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Show or write Directorate settings (directorate.json): default review scope and mode, panel on/off and its models (Directorate Seats) with thinking levels, time budgets, and disabled lenses. show: both files and the effective settings; with find, also the available models and their thinking levels. write: replaces one scope's file (global: OpenCode's config directory, ~/.config/opencode/directorate.json; project: <repo>/.opencode/directorate.json) with settings; {} removes it. Use only when the user asks to configure The Directorate.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "show",
+                "write"
+              ]
+            },
+            "find": {
+              "type": "string",
+              "description": "For show: list available models whose id or name contains this text."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "global",
+                "project"
+              ],
+              "description": "For write: global (every repository) or project (this repository)."
+            },
+            "settings": {
+              "type": "object",
+              "properties": {
+                "budget_minutes": {
+                  "type": "object",
+                  "properties": {
+                    "code-quality": {
+                      "type": "number",
+                      "minimum": 2,
+                      "maximum": 240
+                    },
+                    "default": {
+                      "type": "number",
+                      "minimum": 2,
+                      "maximum": 240
+                    },
+                    "full": {
+                      "type": "number",
+                      "minimum": 2,
+                      "maximum": 240
+                    }
+                  },
+                  "additionalProperties": true,
+                  "description": "Time budget per mode, used as-is (panel reviews too)."
+                },
+                "default_scope": {
+                  "type": "string",
+                  "enum": [
+                    "branch",
+                    "local",
+                    "repository"
+                  ],
+                  "description": "Review scope when the request names no scope or target."
+                },
+                "lenses": {
+                  "type": "object",
+                  "properties": {
+                    "disabled": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "correctness",
+                          "security",
+                          "performance",
+                          "impact",
+                          "tests",
+                          "quality",
+                          "architecture",
+                          "ops",
+                          "docs",
+                          "ux"
+                        ]
+                      },
+                      "description": "Lenses reviews skip; entries under them are rejected."
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "default",
+                    "code-quality",
+                    "full"
+                  ],
+                  "description": "Review mode when the request names none."
+                },
+                "panel": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Run a panel review unless the request asks for a single model."
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string"
+                          },
+                          "variant": {
+                            "type": "string",
+                            "description": "Thinking level: one of the model's variant ids, such as high or xhigh."
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": true
+                      },
+                      "minItems": 1,
+                      "description": "The panel's seats, in order."
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": true,
+              "description": "For write: the complete settings for the scope."
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_configure",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "List retained Directorate reviews in this project and its registered Git worktrees, newest seal IDs first. Continue with nextBefore. Returns review metadata, not transcripts or source. Use only when the user asks to list or export past Directorate reviews.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "before": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_export_list",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Write a full, unredacted ZIP for one existing Directorate seal to the local exports directory. Use only when the user requests an export. Returns the saved path and warns of unavailable data; does not upload anything.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_export",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Start a Directorate review: pin the target in containment and start the time budget. Pass scope or a specific target, not both. Omit both to use the configured default scope (branch if unset). target.kind auto = local changes plus any commits on this branch beyond the default branch. Also: local, commit, range (base may be @default), pr, paths (no paths = whole repository). Returns the seal id every other directorate_* tool needs. resume takes over an interrupted review. panel convenes independent whole-change reviews by several models (Directorate Seats), combined in one Directive.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "abandon": {
+              "type": "boolean",
+              "description": "Close this session's unreported review (its partial report is saved) and seal a new one."
+            },
+            "budget_minutes": {
+              "type": "number",
+              "minimum": 2,
+              "maximum": 240
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "default",
+                "code-quality",
+                "full"
+              ],
+              "description": "Omit to use the configured default (directorate.json), else default."
+            },
+            "panel": {
+              "type": "boolean",
+              "description": "Panel review: several models (Directorate Seats) each review the whole change independently. true when the user asks for a panel or several models, false when they ask for one model; omit to use the configured default."
+            },
+            "panel_models": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The panel's models, only when the user names them (implies panel)."
+            },
+            "question": {
+              "type": "string",
+              "description": "The user's focus, if any; shown in the report."
+            },
+            "recheck": {
+              "type": "string",
+              "description": "Seal id of a reported review to re-check after fixes: seals its target as it is now, keeps what was read in unchanged regions, and carries its findings for re-decision. Takes no target, scope, mode, or panel."
+            },
+            "repo": {
+              "type": "string",
+              "description": "Repository directory; defaults to the session's directory."
+            },
+            "resume": {
+              "type": "string",
+              "description": "Seal id of an unreported review to take over instead of sealing a new one."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "branch",
+                "local",
+                "repository"
+              ]
+            },
+            "ship": {
+              "type": "string",
+              "description": "Only for an initial /directorate-ship review: copy the ship ID from the calling session. Omit on other reviews and re-checks."
+            },
+            "target": {
+              "type": "object",
+              "properties": {
+                "base": {
+                  "type": "string"
+                },
+                "commit": {
+                  "type": "string"
+                },
+                "head": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "auto",
+                    "local",
+                    "commit",
+                    "range",
+                    "pr",
+                    "paths"
+                  ]
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Literal file or directory restrictions, supported only by local and paths targets."
+                },
+                "pr": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_seal",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "After directorate_report's freshness gate (Containment Drift): re-pin the target once and re-capture it (diff, snapshot, regions); regions whose content is unchanged keep their read receipts, and entries whose anchor or evidence changed reopen for re-verification.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_refresh",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Issue the final Directorate Directive. Protocol gates push back once for each new gap (unread regions, missing Seats, subagents still running, containment drift, unverified entries); calling again proceeds and records the gap. Renders the directive from the dossier: only verified entries become findings. Output the returned markdown verbatim.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "approach": {
+              "type": "string",
+              "description": "1–3 sentences: does the overall approach fit the goal?"
+            },
+            "seal": {
+              "type": "string"
+            },
+            "synthesis": {
+              "type": "string",
+              "description": "Optional: shared root causes, how fixes interact, order of work. No new claims."
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_report",
+      "options": {
+        "codemode": false
+      }
+    },
+    {
+      "description": "Wait, without ending your turn, until one of this review's Auditor, Seat, or Compliance runs finishes or the budget phase changes. Returns who finished, the entries and verdicts each recorded, and who is still running; their handoffs follow as subagent messages. Call it whenever you would otherwise end your turn while they run.",
+      "input": {
+        "dialect": "draft-2020-12",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "seal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seal"
+          ],
+          "additionalProperties": true
+        },
+        "definitions": {}
+      },
+      "name": "directorate_wait",
+      "options": {
+        "codemode": false
+      }
+    }
+  ]
+}
