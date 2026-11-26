@@ -7,6 +7,7 @@ import type { Anchor } from "../../seal/region.ts";
 import { Compliance, Liaison } from "../agents/agent.ts";
 import type { Actor, Agent } from "../agents/agent.ts";
 import {
+  CarriedStatusSchema,
   Entry,
   EntryStatusSchema,
   SeveritySchema,
@@ -21,19 +22,37 @@ export const RANK = Schema.Record(SeveritySchema, Schema.Int).make({
   minor: 2,
 });
 
+const isOpen = Schema.is(EntryStatusSchema.pick(["open"]));
+
+const isConfirmed = Schema.is(EntryStatusSchema.pick(["confirmed"]));
+
+const isDuplicate = Schema.is(EntryStatusSchema.pick(["duplicate"]));
+
+const isRefuted = Schema.is(EntryStatusSchema.pick(["refuted"]));
+
+const isConfirming = Schema.is(VerdictKindSchema.pick(["confirmed"]));
+
+const isDuplicating = Schema.is(VerdictKindSchema.pick(["duplicate"]));
+
+const isResolving = Schema.is(VerdictKindSchema.pick(["resolved"]));
+
+const isMinor = Schema.is(SeveritySchema.pick(["minor"]));
+
+const carriedConfirmed = Schema.is(CarriedStatusSchema.pick(["confirmed"]));
+
 /** Severity of the current verification generation: the latest confirmation, else the claim. */
 export const currentSeverity = (e: Entry) =>
-  e.verdicts.findLast((v) => v.verdict === "confirmed")?.severity ?? e.severity;
+  e.verdicts.findLast((v) => isConfirming(v.verdict))?.severity ?? e.severity;
 
 const lastOf = (e: Entry) =>
-  e.verdicts.findLast((v) => v.verdict === "duplicate")?.of;
+  e.verdicts.findLast((v) => isDuplicating(v.verdict))?.of;
 
 const followDuplicate = (
   ledger: Ledger,
   e: Entry | undefined,
   seen: Set<string>
 ): Entry | undefined => {
-  if (!e || e.status !== "duplicate") {
+  if (!e || !isDuplicate(e.status)) {
     return e;
   }
 
@@ -54,9 +73,8 @@ export const resolvedTarget = (ledger: Ledger, e: Entry) =>
 export const unresolved = (ledger: Ledger) =>
   ledger.entries.filter(
     (e) =>
-      e.status === "open" ||
-      (e.status === "duplicate" &&
-        resolvedTarget(ledger, e)?.status !== "confirmed")
+      isOpen(e.status) ||
+      (isDuplicate(e.status) && !isConfirmed(resolvedTarget(ledger, e)?.status))
   );
 
 /** A verdict as its caller claims it: the parts of a `Verdict` the decision reads. */
@@ -67,7 +85,7 @@ const VerdictClaimSchema = Schema.Struct({
   verdict: Verdict.fields.verdict,
 });
 
-export type VerdictClaim = typeof VerdictClaimSchema.Type;
+type VerdictClaim = typeof VerdictClaimSchema.Type;
 
 // ---------- Specifications: who may decide what ----------
 
@@ -84,17 +102,15 @@ const affirms = (claim: VerdictClaim) => isAffirming(claim.verdict);
 
 /** Resolved applies only to findings carried from the review a re-check follows. */
 const resolvesOnlyCarried = (entry: Entry, claim: VerdictClaim) =>
-  claim.verdict !== "resolved" || entry.carried !== undefined;
+  !isResolving(claim.verdict) || entry.carried !== undefined;
 
 /** A verified finding carried into a re-check was confirmed by Compliance (or within its rules); only Compliance re-decides it. */
 const decidesCarriedFinding = (agent: Agent, entry: Entry) =>
-  entry.carried?.status !== "confirmed" || agent === Compliance;
+  !carriedConfirmed(entry.carried?.status) || agent === Compliance;
 
 /** The caller's own session raised the entry. */
 const raisedBy = (by: Actor, entry: Entry) =>
   by.session === entry.raisedBy.session;
-
-const isOpen = Schema.is(EntryStatusSchema.pick(["open"]));
 
 /** A duplicate may point only at an entry still in play. */
 const isDuplicable = Schema.is(EntryStatusSchema.pick(["open", "confirmed"]));
@@ -110,19 +126,19 @@ const liaisonReachError = (entry: Entry, claim: VerdictClaim) => {
   }
 
   if (entry.raisedBy.role === Liaison && affirms(claim)) {
-    return `${entry.id} was raised by ${Liaison.id}; only ${Compliance.id} may ${claim.verdict === "resolved" ? "resolve" : "confirm"} it.`;
+    return `${entry.id} was raised by ${Liaison.id}; only ${Compliance.id} may ${isResolving(claim.verdict) ? "resolve" : "confirm"} it.`;
   }
 
   const sev = currentSeverity(entry);
 
-  if (sev !== "minor") {
+  if (!isMinor(sev)) {
     return `${entry.id} is ${sev}. Any verdict on a blocking or important entry needs ${Compliance.id}; route it there with your evidence.`;
   }
 
   if (
-    claim.verdict === "confirmed" &&
+    isConfirming(claim.verdict) &&
     claim.severity &&
-    claim.severity !== "minor"
+    !isMinor(claim.severity)
   ) {
     return `You may confirm only as minor; route it to ${Compliance.id} to raise its severity.`;
   }
@@ -165,10 +181,13 @@ const evidenceError = (verdict: VerdictClaim["verdict"]) =>
       () =>
         "resolved needs the lines that fix it (path:line of the new guard, check, or test)."
     ),
-    Match.orElse(
+    Match.whenOr(
+      "confirmed",
+      "duplicate",
       () =>
         "a verdict needs at least one deciding evidence reference (path:line)."
-    )
+    ),
+    Match.exhaustive
   );
 
 /** A verdict the caller may not record on an entry, or one whose confirmation does not tie to the sealed code. */
@@ -202,7 +221,7 @@ export const verdictError = (
 
   // No session affirms its own entry; its author may only withdraw it while it is open.
   if (own && affirms(claim)) {
-    return `${entry.id} was raised in this session. A different session must ${claim.verdict === "resolved" ? "resolve" : "confirm"} it: ${Compliance.id} for the Liaison's own entries.`;
+    return `${entry.id} was raised in this session. A different session must ${isResolving(claim.verdict) ? "resolve" : "confirm"} it: ${Compliance.id} for the Liaison's own entries.`;
   }
 
   if (own && !isOpen(entry.status)) {
@@ -221,7 +240,7 @@ export const verdictError = (
     return evidenceError(claim.verdict);
   }
 
-  return claim.verdict === "duplicate"
+  return isDuplicating(claim.verdict)
     ? duplicateError(entry, agent, claim.of, ledger)
     : undefined;
 };
@@ -231,7 +250,7 @@ export const nearby = (ledger: Ledger, a: Anchor) =>
     (e) =>
       e.anchor.path === a.path &&
       Math.abs(e.anchor.line - a.line) <= 8 &&
-      e.status !== "refuted"
+      !isRefuted(e.status)
   );
 
 // ---------- Transitions: each returns the next entry or ledger ----------
@@ -262,14 +281,13 @@ export const decide = (ledger: Ledger, entry: Entry) => {
   }
 
   // After the entry was refuted or resolved, entries merged into it are open questions again.
-  const reopened: string[] = [];
+  const merged = (d: Entry) => isDuplicate(d.status) && lastOf(d) === entry.id;
+  const reopened = placed.filter(merged).map((d) => d.id);
 
   const entries = placed.map((d) => {
-    if (d.status !== "duplicate" || lastOf(d) !== entry.id) {
+    if (!merged(d)) {
       return d;
     }
-
-    reopened.push(d.id);
 
     return reopen(
       d,

@@ -36,9 +36,9 @@ export const REVIEW_SCOPE_TARGET = Schema.Record(
  * What a request with no words and no scope does: `ask` offers the mode and panel first (/directorate-review);
  * `defaults` starts with the configured defaults (/directorate-ship, whose loop must not stop for questions).
  */
-export const BareRequestSchema = Schema.Literals(["ask", "defaults"]);
+const BareRequestSchema = Schema.Literals(["ask", "defaults"]);
 
-export type BareRequest = typeof BareRequestSchema.Type;
+type BareRequest = typeof BareRequestSchema.Type;
 
 const SCOPE_FLAG = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u;
 
@@ -49,7 +49,7 @@ export class InvalidRequest extends Schema.TaggedError<
 >()("InvalidRequest", { message: Schema.String }) {}
 
 /** A review request: the user's words without the flag, and the scope the flag selected. */
-export class ReviewRequest extends Schema.Class<
+class ReviewRequest extends Schema.Class<
   ReviewRequest,
   { readonly brand: unique symbol }
 >("directorate/ReviewRequest")({

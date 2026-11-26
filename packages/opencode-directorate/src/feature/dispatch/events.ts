@@ -27,7 +27,7 @@ import {
 } from "./lifecycle.ts";
 
 /** A promoted follow-up belongs to the first terminal marker after that exact input. */
-export const recoverFollowUps = (
+const recoverFollowUps = (
   seal: Seal,
   session: string,
   messages: readonly SessionMessage.Info[]

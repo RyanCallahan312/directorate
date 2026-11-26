@@ -46,7 +46,9 @@ const dispatchFields = {
   startedAt: Schema.DateTimeUtc,
 };
 
-const DispatchFields = Schema.Struct(dispatchFields);
+const DispatchFieldsSchema = Schema.Struct(dispatchFields);
+
+type DispatchFields = typeof DispatchFieldsSchema.Type;
 
 /** Registered by the subagent tool's hook, before OpenCode creates its session (a follow-up already has one). */
 export class Launching extends Schema.TaggedClass<
@@ -96,7 +98,7 @@ const DispatchStatusSchema = Schema.Literals([
 type DispatchStatus = typeof DispatchStatusSchema.Type;
 
 /** A dispatch in seal.json's children: its state is a `status` field, not a tag. */
-export const StoredDispatch = Schema.Struct({
+const StoredDispatch = Schema.Struct({
   agent: Schema.String,
   call: Schema.String,
   /** The human-readable part of the OpenCode child session's title. */
@@ -139,17 +141,18 @@ const stateFor = (status: DispatchStatus) =>
   );
 
 /** A dispatch's fields without its state: what carries over when it changes state. */
-const fieldsOf = (d: Dispatch) => DispatchFields.make(d);
+const fieldsOf = (d: Dispatch) => DispatchFieldsSchema.make(d);
 
 /** The same state with some fields changed. */
-const rebuilt = (d: Dispatch, change: Partial<typeof DispatchFields.Type>) =>
+const rebuilt = (d: Dispatch, change: Partial<DispatchFields>) =>
   new (stateOf(d))({ ...fieldsOf(d), ...change });
 
 /** A dispatch as seal.json stores it, every field it was stored with kept. */
 export const DispatchFromStored = StoredDispatch.pipe(
   Schema.decodeTo(Schema.toType(DispatchSchema), {
     decode: SchemaGetter.transform(
-      (stored) => new (stateFor(stored.status))(DispatchFields.make(stored))
+      (stored) =>
+        new (stateFor(stored.status))(DispatchFieldsSchema.make(stored))
     ),
     encode: SchemaGetter.transform((d) => ({
       ...fieldsOf(d),
@@ -159,7 +162,7 @@ export const DispatchFromStored = StoredDispatch.pipe(
 );
 
 /** The agent a dispatch runs, or undefined for a name no Directorate version dispatches today. */
-export const dispatchedAgent = (d: Pick<Dispatch, "agent">) =>
+const dispatchedAgent = (d: Pick<Dispatch, "agent">) =>
   dispatchableNamed(d.agent);
 
 export const outstandingDispatches = (seal: Seal) =>
@@ -198,7 +201,7 @@ export const SeatStatusSchema = Schema.Literals([
   "not launched",
 ]);
 
-export type SeatStatus = typeof SeatStatusSchema.Type;
+type SeatStatus = typeof SeatStatusSchema.Type;
 
 /** A seat's status as the report shows it: completed, partial (a run completed but did not read everything), or its latest run's. */
 const seatStatus = (
@@ -353,9 +356,9 @@ export const claimed = (
   session: string,
   agent: string,
   title: string | undefined
-): Seal | undefined => {
+) => {
   if (seal.children.some((c) => c.session === session)) {
-    return undefined;
+    return;
   }
 
   const claim = seal.children.find(

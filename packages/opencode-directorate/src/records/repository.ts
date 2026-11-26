@@ -1,5 +1,5 @@
-// Directorate seal store: one directory per seal under the state root, holding seal.json, ledger.json, each generation's diff
-// and snapshot, the report, and the cross-process mutation lock.
+// The records repository: one directory per seal under the state root, holding seal.json, ledger.json, each generation's
+// diff and snapshot, the report, and the cross-process mutation lock.
 import {
   Context,
   Effect,
@@ -12,13 +12,13 @@ import {
 } from "effect";
 
 import { Ledger, LedgerJson } from "../feature/ledger/entry.ts";
+import { IO_CONCURRENCY } from "../platform/platform.ts";
 import { SealJson } from "../seal/record.ts";
 import type { Seal } from "../seal/record.ts";
 import { mutationLocks } from "./locks.ts";
 import { retentionOf } from "./retention.ts";
 import { StateRoot } from "./state-root.ts";
 
-const IO_CONCURRENCY = 16;
 const SEAL_ID = /^directorate-\d{14}-[0-9a-f]{6}$/u;
 
 const decodeSeal = Schema.decodeEffect(SealJson);
@@ -34,13 +34,13 @@ const encodeLedger = (l: Ledger) =>
 export const emptyLedger = Ledger.make({ entries: [], notes: [] });
 
 /** No seal by that id: a malformed id, or one with no record under the state root. */
-export class SealNotFound extends Schema.TaggedError<
+class SealNotFound extends Schema.TaggedError<
   SealNotFound,
   { readonly brand: unique symbol }
 >()("SealNotFound", { message: Schema.String }) {}
 
 /** A review record that exists, or must, cannot be read: unreadable, missing, or failing its schema. */
-export class RecordDamaged extends Schema.TaggedError<
+class RecordDamaged extends Schema.TaggedError<
   RecordDamaged,
   { readonly brand: unique symbol }
 >()("RecordDamaged", { message: Schema.String }) {}
@@ -334,6 +334,7 @@ const make = Effect.gen(function* make() {
   };
 });
 
+/** The service key and the `Store.*` span names keep the repository's former name: both are observable, so they stay. */
 export class Records extends Context.Service<
   Records,
   Effect.Success<typeof make>

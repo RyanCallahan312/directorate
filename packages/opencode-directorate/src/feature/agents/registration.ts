@@ -5,7 +5,7 @@ import { Yaml } from "effect/encoding";
 import { Host } from "../../platform/platform.ts";
 import { AgentIdSchema } from "./agent.ts";
 
-const AgentFrontmatter = Schema.Struct({
+const AgentFrontmatterSchema = Schema.Struct({
   color: Agent.Info.fields.color,
   description: Agent.Info.fields.description,
   hidden: Schema.optionalKey(Schema.Boolean),
@@ -14,7 +14,7 @@ const AgentFrontmatter = Schema.Struct({
   steps: Agent.Info.fields.steps,
 });
 
-const SkillFrontmatter = Schema.Struct({
+const SkillFrontmatterSchema = Schema.Struct({
   description: Schema.String,
   metadata: Schema.Struct({ "opencode/autoinvoke": Schema.Boolean }),
   name: Skill.Name,
@@ -57,8 +57,9 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
           new URL(`../../../agents/${id}.md`, import.meta.url)
         );
 
-        const fields =
-          yield* Schema.decodeUnknownEffect(AgentFrontmatter)(data);
+        const fields = yield* Schema.decodeUnknownEffect(
+          AgentFrontmatterSchema
+        )(data);
 
         return { fields, id, system: content };
       })
@@ -69,7 +70,7 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
     );
 
     const { name, description, metadata } = yield* Schema.decodeUnknownEffect(
-      SkillFrontmatter
+      SkillFrontmatterSchema
     )(skill.data);
 
     const skillID = Skill.ID.make("directorate-lenses");

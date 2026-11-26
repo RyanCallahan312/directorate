@@ -20,7 +20,7 @@ export const AgentIdSchema = Schema.Literals([
   "directorate_compliance",
 ]);
 
-export type AgentId = typeof AgentIdSchema.Type;
+type AgentId = typeof AgentIdSchema.Type;
 
 /** An agent of a kind: whom it dispatches, the phases it may be launched in, and its orders in each phase. */
 export class Agent extends Schema.Class<
@@ -111,7 +111,7 @@ const Agents = Schema.Record(AgentIdSchema, Agent).make({
 
 export const agentOf = (id: AgentId) => Agents[id];
 
-export const isAgentId = Schema.is(AgentIdSchema);
+const isAgentId = Schema.is(AgentIdSchema);
 
 /** The Directorate agent a host-supplied name denotes, or undefined for any other agent. */
 export const agentNamed = (name: string | undefined) =>

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { Schema, SchemaAST } from "effect";
 
 // ---------- Stored codecs under test ----------
-// Later refactor phases update only these import paths; nothing below depends on where the schemas live.
+// Moving a codec updates only these import paths; nothing below depends on where the schemas live.
 import { LedgerJson } from "../src/feature/ledger/entry.ts";
 import {
   normalizeSettings,
@@ -31,7 +31,7 @@ const sealRoundTrip = (text: string) =>
 const ledgerRoundTrip = (text: string) =>
   Schema.encodeSync(LedgerJson)(Schema.decodeSync(LedgerJson)(text));
 
-// settings.ts reads with excess keys rejected, normalizes before writing, and ends the file with a newline.
+// feature/settings/store.ts reads with excess keys rejected, normalizes before writing, and ends the file with a newline.
 const settingsRoundTrip = (text: string) =>
   `${Schema.encodeSync(SettingsJson)(
     normalizeSettings(
@@ -39,7 +39,7 @@ const settingsRoundTrip = (text: string) =>
     )
   )}\n`;
 
-// ship.ts decodes with default options (unknown keys dropped) and writes the decoded value back.
+// workflow/ship/runner.ts decodes with default options (unknown keys dropped) and writes the decoded value back.
 const shipRoundTrip = (text: string) =>
   Schema.encodeSync(ShipJson)(Schema.decodeSync(ShipJson)(text));
 

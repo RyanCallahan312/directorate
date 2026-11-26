@@ -40,16 +40,10 @@ import {
 import type { Activity, Worktree } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
-import {
-  currentFingerprint,
-  FreshnessUnchecked,
-  Sessions,
-  ShipLink,
-} from "../../seal/seal.ts";
+import { currentFingerprint, FreshnessUnchecked } from "../../seal/seal.ts";
 import { parseRequest, reviewRequest } from "../review/request.ts";
 import type { ReviewScope } from "../review/request.ts";
-import { interruptedReview } from "../review/review.ts";
-import { shipped } from "../review/ship-link.ts";
+import { interruptedReview, shipStamp } from "../review/review.ts";
 import {
   Active,
   changed,
@@ -80,13 +74,16 @@ const NOTICE_GRACE_MS = 30_000;
 
 type SessionID = Session.ID;
 
-type InboxKind = "user" | "other" | { readonly child: string };
+/** What an input is to Ship: the user's, a finished subagent's completion notice, or anything else. */
+const InboxKindSchema = Schema.Union([
+  Schema.Literals(["user", "other"]),
+  Schema.Struct({ child: Schema.String }),
+]);
+
+type InboxKind = typeof InboxKindSchema.Type;
 
 /** What an input is to Ship, by its type and metadata, whether still queued or already a message. */
-const kindOf = (
-  type: string,
-  metadata: SessionMessage.Info["metadata"]
-): InboxKind => {
+const kindOf = (type: string, metadata: SessionMessage.Info["metadata"]) => {
   if (type === "user" && metadata?.source !== "directorate-ship") {
     return "user";
   }
@@ -102,7 +99,7 @@ const kindOf = (
   return "other";
 };
 
-const inboxKind = (item: SessionInbox.Item): InboxKind =>
+const inboxKind = (item: SessionInbox.Item) =>
   item.type === "user" || item.type === "synthetic"
     ? kindOf(item.type, item.payload.metadata)
     : "other";
@@ -405,7 +402,7 @@ export const registerShip = Effect.fn("Ship.register")(
     const host = yield* Host;
     const git = yield* Git;
     const store = yield* Records;
-    const sessions = yield* Sessions;
+    const stampShip = yield* shipStamp;
     const services = yield* Effect.context<Git | Worktree | Digest.Digest>();
     const random = yield* SecureRandom.SecureRandom;
     const uuid = random.uuidV4();
@@ -538,12 +535,7 @@ export const registerShip = Effect.fn("Ship.register")(
           }
 
           // The seal names its ship first, so the review stays the ship's even once this record is stopped or replaced.
-          yield* sessions.mutate(seal.id, ShipLink.make({}), (review) =>
-            Effect.succeed({
-              out: undefined,
-              seal: shipped(review.seal, state.id),
-            })
-          );
+          yield* stampShip(seal.id, state.id);
           yield* write(
             parentID,
             changed(state, { chain: [...state.chain, seal.id] })

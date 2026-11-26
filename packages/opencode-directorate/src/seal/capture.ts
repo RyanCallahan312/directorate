@@ -3,8 +3,7 @@
 import { Bytes, Effect, FileSystem, Path, Predicate, Schema } from "effect";
 
 import { exclusionReason, isSecret, scopeOf } from "../exclusions.ts";
-import { sha256 } from "../platform/hash.ts";
-import { Git, Worktree } from "../platform/platform.ts";
+import { Git, IO_CONCURRENCY, sha256, Worktree } from "../platform/platform.ts";
 import type { LiveEntry } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
@@ -16,7 +15,6 @@ import type { Seal } from "./record.ts";
 import { FileEntry, Region } from "./region.ts";
 
 const FILE_REGION_LINES = 300;
-const IO_CONCURRENCY = 16;
 
 /** Raw records (exact names) and the patch, in one run so they describe the same tree. */
 const RAW_DIFF = [
@@ -40,7 +38,7 @@ class CaptureDrift extends Schema.TaggedError<
 >()("CaptureDrift", {}) {}
 
 /** The target could not be captured consistently. */
-export class CaptureFailed extends Schema.TaggedError<
+class CaptureFailed extends Schema.TaggedError<
   CaptureFailed,
   { readonly brand: unique symbol }
 >()("CaptureFailed", { message: Schema.String }) {}

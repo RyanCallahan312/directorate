@@ -11,7 +11,12 @@ import { reopen, unresolved } from "../../feature/ledger/decide.ts";
 import { CarriedStatusSchema, Ledger } from "../../feature/ledger/entry.ts";
 import type { CarriedStatus, Entry } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
-import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
+import {
+  Git,
+  Host,
+  IO_CONCURRENCY,
+  ProcessIdentity,
+} from "../../platform/platform.ts";
 import { emptyLedger } from "../../records/records.ts";
 import { carryMarks } from "../../seal/coverage.ts";
 import { Seal } from "../../seal/record.ts";
@@ -26,12 +31,15 @@ import {
   readable,
   repinned,
   resolveEnds,
+  Sessions,
   settled,
+  ShipLink,
 } from "../../seal/seal.ts";
 import type { Current } from "../../seal/seal.ts";
 import { Target } from "../../seal/target.ts";
 import { started } from "./custody.ts";
 import type { Mode } from "./request.ts";
+import { shipped } from "./ship-link.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
@@ -46,12 +54,10 @@ export class ReviewConflict extends Schema.TaggedError<
 >()("ReviewConflict", { message: Schema.String }) {}
 
 /** The target's current ends cannot be told or are not fetched, so the review cannot be refreshed or re-checked. */
-export class TargetUnresolved extends Schema.TaggedError<
+class TargetUnresolved extends Schema.TaggedError<
   TargetUnresolved,
   { readonly brand: unique symbol }
 >()("TargetUnresolved", { message: Schema.String }) {}
-
-const IO_CONCURRENCY = 16;
 
 /** A new seal's id: its creation time, and a random suffix. */
 const sealId = Effect.fnUntraced(function* sealId(createdAt: DateTime.Utc) {
@@ -462,3 +468,16 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
     );
   }
 );
+
+/**
+ * Stamps a review with the ship that owns it, through the door as the ship link: review's write, at the point the ship
+ * hands over its id. The ship never writes the seal.
+ */
+export const shipStamp = Effect.gen(function* shipStamp() {
+  const sessions = yield* Sessions;
+
+  return (sealID: string, shipID: string) =>
+    sessions.mutate(sealID, ShipLink.make({}), (review) =>
+      Effect.succeed({ out: undefined, seal: shipped(review.seal, shipID) })
+    );
+});

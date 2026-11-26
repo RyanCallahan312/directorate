@@ -8,13 +8,13 @@ import { command } from "./command.ts";
 import { decodeUtf8 } from "./utf8.ts";
 
 /** A git or GitHub CLI command failed, or answered in a shape Directorate cannot read. */
-export class GitFailed extends Schema.TaggedError<
+class GitFailed extends Schema.TaggedError<
   GitFailed,
   { readonly brand: unique symbol }
 >()("GitFailed", { message: Schema.String }) {}
 
 /** History the review needs is not in the local repository: an unfetched ref, a parent, a merge base, a default branch. */
-export class MissingHistory extends Schema.TaggedError<
+class MissingHistory extends Schema.TaggedError<
   MissingHistory,
   { readonly brand: unique symbol }
 >()("MissingHistory", { message: Schema.String }) {}

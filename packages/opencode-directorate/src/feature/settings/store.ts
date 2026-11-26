@@ -28,7 +28,7 @@ export class SettingsUnavailable extends Schema.TaggedError<
 >()("SettingsUnavailable", { message: Schema.String }) {}
 
 /** Another writer holds the settings lock. */
-export class SettingsBusy extends Schema.TaggedError<
+class SettingsBusy extends Schema.TaggedError<
   SettingsBusy,
   { readonly brand: unique symbol }
 >()("SettingsBusy", { lock: Schema.String }) {
@@ -38,7 +38,7 @@ export class SettingsBusy extends Schema.TaggedError<
 }
 
 /** The settings file changed since the dialog that edits it opened. */
-export class SettingsChanged extends Schema.TaggedError<
+class SettingsChanged extends Schema.TaggedError<
   SettingsChanged,
   { readonly brand: unique symbol }
 >()("SettingsChanged", { at: Schema.String }) {

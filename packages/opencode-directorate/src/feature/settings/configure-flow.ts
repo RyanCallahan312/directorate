@@ -23,7 +23,7 @@ import type { Settings, SettingsScope } from "./file.ts";
 import type { SettingsView, WriteResult } from "./rpc.ts";
 
 /** One choice in a select. A host without disabled options leaves disabled ones out. */
-export interface Option<V> {
+export interface DialogChoice<V> {
   readonly title: string;
   readonly value: V;
   readonly description?: string;
@@ -37,7 +37,7 @@ export interface Dialogs {
     readonly title: string;
     readonly placeholder?: string;
     readonly current?: V | undefined;
-    readonly options: readonly Option<V>[];
+    readonly options: readonly DialogChoice<V>[];
   }) => Effect.Effect<V | undefined, SettingsError>;
   prompt: (options: {
     readonly title: string;
@@ -151,7 +151,7 @@ const choose = <V>(
   dialog: Dialogs,
   title: string,
   current: V,
-  options: readonly Option<V>[]
+  options: readonly DialogChoice<V>[]
 ) => dialog.select<V>({ current, options, title });
 
 const selectScope = (dialog: Dialogs, now: SettingsView) =>
@@ -597,7 +597,7 @@ const menuOptions = (ctx: FlowContext, draft: Settings, changed: boolean) =>
       title: changed ? "Save" : "Save (no changes)",
       value: "save",
     },
-  ] satisfies readonly Option<MenuItem>[];
+  ] satisfies readonly DialogChoice<MenuItem>[];
 
 /** The editor behind a menu item other than Save. */
 const menuAction = (item: Exclude<MenuItem, "save">) =>

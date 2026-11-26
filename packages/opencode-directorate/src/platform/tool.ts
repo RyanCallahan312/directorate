@@ -18,7 +18,7 @@ import { recover } from "./error.ts";
 import { Host } from "./host.ts";
 
 /** A tool, hook, or locked-section body: a generator over Effects that may use the services R. */
-export type Body<Args extends unknown[], A, R> = (
+type Body<Args extends unknown[], A, R> = (
   ...args: Args
 ) => Effect.fn.Return<A, Error, R>;
 
@@ -44,7 +44,7 @@ export type DefineTool<R> = <
 }) => void;
 
 /** What a tool declares about its callers: who keeps it at lockdown, and whether only Directorate agents call it. */
-export class ToolDeclaration extends Schema.Class<
+class ToolDeclaration extends Schema.Class<
   ToolDeclaration,
   { readonly brand: unique symbol }
 >("directorate/ToolDeclaration")({

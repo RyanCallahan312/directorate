@@ -1,8 +1,9 @@
 // Retention: seals not written for KEEP_DAYS are removed.
 import { Clock, Effect, FileSystem, Option } from "effect";
 
+import { IO_CONCURRENCY } from "../platform/platform.ts";
+
 const KEEP_DAYS = 31;
-const IO_CONCURRENCY = 16;
 
 /** Pruning of the seal directories `ids` lists; `file(id)` is a seal's directory. */
 export const retentionOf = (

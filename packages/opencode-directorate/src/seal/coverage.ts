@@ -3,9 +3,16 @@ import { Schema } from "effect";
 
 import { Count } from "../platform/stored.ts";
 import type { Seal } from "./record.ts";
+import { DispositionSchema } from "./region.ts";
 import type { Disposition, Region } from "./region.ts";
 
 const CHUNK_MAX_LINES = 600;
+
+const isReviewed = Schema.is(DispositionSchema.pick(["reviewed"]));
+
+const isSkimmed = Schema.is(DispositionSchema.pick(["skimmed"]));
+
+const isSkipped = Schema.is(DispositionSchema.pick(["skipped"]));
 
 /** How a region was shown to a reader: complete, or where the next call continues. */
 export class Shown extends Schema.Class<
@@ -26,11 +33,11 @@ const regionSize = (r: Region) =>
 
 export const coverageSummary = (seal: Seal) => {
   const total = seal.regions.length;
-  const skipped = seal.regions.filter((r) => r.disposition === "skipped");
-  const skimmed = seal.regions.filter((r) => r.disposition === "skimmed");
+  const skipped = seal.regions.filter((r) => isSkipped(r.disposition));
+  const skimmed = seal.regions.filter((r) => isSkimmed(r.disposition));
 
   const assessed = seal.regions.filter(
-    (r) => r.disposition === "reviewed" && !r.ownerRead
+    (r) => isReviewed(r.disposition) && !r.ownerRead
   );
 
   const read = seal.regions.filter((r) => r.isRead);
@@ -125,7 +132,7 @@ export const dispose = (
       return r;
     }
 
-    const unread = disposition === "reviewed" && !r.readBy.length;
+    const unread = isReviewed(disposition) && !r.readBy.length;
 
     if (unread) {
       coerced.push(r.id);

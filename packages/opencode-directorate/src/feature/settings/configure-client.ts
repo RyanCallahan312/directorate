@@ -1,3 +1,5 @@
+// The configure flow's host adapter: runs the dialog walk from an OpenCode command callback (tui.ts, gui.ts), turning host
+// promises and throws into SettingsError and a failed walk into the alert the user sees.
 import { Cause, Effect, Exit, Predicate } from "effect";
 
 import { configure, SettingsError } from "./configure-flow.ts";

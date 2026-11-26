@@ -44,7 +44,7 @@ import {
   ReviewScopeSchema,
 } from "./request.ts";
 import type { ReviewScope } from "./request.ts";
-import { budget, restarted, Window } from "./window.ts";
+import { budget, BudgetMinutesSchema, restarted, Window } from "./window.ts";
 
 /** directorate_seal options a re-check takes from the review it follows, so a caller may not pass them. */
 const RECHECK_FIXED = [
@@ -149,7 +149,7 @@ const recheckSummary = (
 };
 
 /** Files a review without its Liaison: abandoned for a new one, or past its deadline. */
-export type AutoReport = Effect.Success<
+export type AutoReporter = Effect.Success<
   ReturnType<typeof registerReport>
 >["autoReport"];
 
@@ -158,11 +158,11 @@ type SealServices =
   | Effect.Services<ReturnType<typeof createSeal>>
   | Effect.Services<ReturnType<typeof recheckSeal>>
   | Effect.Services<ReturnType<typeof refreshSeal>>
-  | Effect.Services<ReturnType<AutoReport>>;
+  | Effect.Services<ReturnType<AutoReporter>>;
 
 /** directorate_seal and directorate_refresh. `sealed` hands each new seal to the ship loop, which may own it. */
 export const reviewTools = Effect.fnUntraced(function* reviewTools(
-  autoReport: AutoReport,
+  autoReport: AutoReporter,
   sealed: (
     seal: Seal,
     shipID?: string,
@@ -368,12 +368,7 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
               "Close this session's unreported review (its partial report is saved) and seal a new one.",
           })
         ),
-        budget_minutes: optional(
-          Schema.Finite.check(
-            Schema.isGreaterThanOrEqualTo(2),
-            Schema.isLessThanOrEqualTo(240)
-          )
-        ),
+        budget_minutes: optional(BudgetMinutesSchema),
         mode: optional(
           ModeSchema.annotate({
             description:

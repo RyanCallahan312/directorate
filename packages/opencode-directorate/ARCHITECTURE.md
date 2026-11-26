@@ -19,11 +19,11 @@ Both lead to the same rule: **every slice has a pure primitive layer and a behav
 src/
 ├── index.ts                composition root: Layers + every slice's register()
 ├── tui.ts · gui.ts · rpc.ts package entries (rpc.ts re-exports feature/settings/rpc.ts by name)
-├── exclusions.ts           shared kernel: withheld paths
+├── exclusions.ts*          shared kernel: withheld paths
 ├── platform/               seams + the OpenCode anti-corruption layer
 │   ├── platform.ts         entry
 │   ├── stored.ts*          since · orLegacyTrue · Time · Count · invalid
-│   ├── error.ts* · utf8.ts* · hash.ts*
+│   ├── error.ts* · utf8.ts* · hash.ts
 │   ├── git.ts · command.ts · worktree.ts · host.ts · process-identity.ts
 │   ├── host-record.ts      activity · turns · locationKey
 │   └── tool.ts             DefineTool adapter · ToolCatalog · error → model text

@@ -21,7 +21,7 @@ import { RecoveryWake, Sessions, Watchdog } from "../../seal/seal.ts";
 import { halted, Recovery, waking, woken } from "./custody.ts";
 import { interruptedReview } from "./interrupted.ts";
 import { shipped } from "./ship-link.ts";
-import type { AutoReport } from "./tools.ts";
+import type { AutoReporter } from "./tools.ts";
 import { GRACE_MS } from "./window.ts";
 
 /** Tells the caller of a review the watchdog woke that its Liaison filed the Directive, if the caller is still here. */
@@ -60,7 +60,7 @@ export const notifyRecoveredReview = Effect.fnUntraced(
  */
 export const watchdog = Effect.fnUntraced(function* watchdog(
   loadedAt: number,
-  autoReport: AutoReport,
+  autoReport: AutoReporter,
   recoverShips: Effect.Effect<ReadonlyMap<string, string>>
 ) {
   const host = yield* Host;

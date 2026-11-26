@@ -31,7 +31,7 @@ const SEAL_ENTRY = "directorate-seal";
 const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
 
 /** A reported seal accepts no changes. */
-export class SealReported extends Schema.TaggedError<
+class SealReported extends Schema.TaggedError<
   SealReported,
   { readonly brand: unique symbol }
 >()("SealReported", {
@@ -44,7 +44,7 @@ export class SealReported extends Schema.TaggedError<
 }
 
 /** An owner-only tool called from a session other than the one that sealed. */
-export class NotOwner extends Schema.TaggedError<
+class NotOwner extends Schema.TaggedError<
   NotOwner,
   { readonly brand: unique symbol }
 >()("NotOwner", {
@@ -57,7 +57,7 @@ export class NotOwner extends Schema.TaggedError<
 }
 
 /** Once the budget locks, a tool the caller's agent does not keep at lockdown no longer runs. */
-export class Lockdown extends Schema.TaggedError<
+class Lockdown extends Schema.TaggedError<
   Lockdown,
   { readonly brand: unique symbol }
 >()("Lockdown", {

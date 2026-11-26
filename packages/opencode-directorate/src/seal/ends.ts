@@ -3,8 +3,7 @@
 import { Effect, Match, Schema } from "effect";
 
 import { scopeOf } from "../exclusions.ts";
-import { sha256 } from "../platform/hash.ts";
-import { Git, Worktree } from "../platform/platform.ts";
+import { Git, sha256, Worktree } from "../platform/platform.ts";
 import type { Seal } from "./record.ts";
 import {
   PostImageSchema,
@@ -14,7 +13,7 @@ import {
 } from "./target.ts";
 
 /** A review target that cannot be resolved to two ends to compare. */
-export class InvalidTarget extends Schema.TaggedError<
+class InvalidTarget extends Schema.TaggedError<
   InvalidTarget,
   { readonly brand: unique symbol }
 >()("InvalidTarget", { message: Schema.String }) {}

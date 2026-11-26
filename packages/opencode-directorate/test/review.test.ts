@@ -47,8 +47,8 @@ import {
   Verdict,
 } from "../src/feature/ledger/entry.ts";
 import { assess, Gates } from "../src/feature/report/directive.ts";
+import { finalize } from "../src/feature/report/filing.ts";
 import { renderReport } from "../src/feature/report/render.ts";
-import { finalize } from "../src/feature/report/report.ts";
 import { SettingsStore } from "../src/feature/settings/settings.ts";
 import { platformLayer } from "../src/index.ts";
 import type { Platform } from "../src/index.ts";
@@ -85,12 +85,12 @@ import {
   readLines,
   renderRegions,
 } from "../src/seal/views.ts";
-import type { Mode } from "../src/workflow/review/request.ts";
 import {
   createSeal,
   recheckSeal,
   refreshSeal,
-} from "../src/workflow/review/review.ts";
+} from "../src/workflow/review/lifecycle.ts";
+import type { Mode } from "../src/workflow/review/request.ts";
 import { budget, Window } from "../src/workflow/review/window.ts";
 import { commandFixture } from "./fixtures.ts";
 

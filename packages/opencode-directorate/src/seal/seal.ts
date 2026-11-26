@@ -20,7 +20,7 @@ export { currentFingerprint, FreshnessUnchecked, resolveEnds } from "./ends.ts";
 
 export type { Current } from "./ends.ts";
 
-export { LineRef, RepoPath, RepoScope } from "./repo-path.ts";
+export { RepoPath, RepoScope } from "./repo-path.ts";
 
 export {
   AutoReport,

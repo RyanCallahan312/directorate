@@ -9,6 +9,7 @@ import {
   ReviewScopeSchema,
 } from "../../workflow/review/request.ts";
 import type { Mode } from "../../workflow/review/request.ts";
+import { BudgetMinutesSchema } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL, SeatSpecSchema, seatRef } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
 
@@ -17,18 +18,13 @@ export const SettingsScopeSchema = Schema.Literals(["global", "project"]);
 
 export type SettingsScope = typeof SettingsScopeSchema.Type;
 
-const Minutes = Schema.Finite.check(
-  Schema.isGreaterThanOrEqualTo(2),
-  Schema.isLessThanOrEqualTo(240)
-);
-
 /** directorate.json. Every key is optional; an absent key falls through to the global file, then to Directorate defaults. */
 export const SettingsSchema = Schema.Struct({
   budget_minutes: Schema.optionalKey(
     Schema.Struct({
-      "code-quality": Schema.optionalKey(Minutes),
-      default: Schema.optionalKey(Minutes),
-      full: Schema.optionalKey(Minutes),
+      "code-quality": Schema.optionalKey(BudgetMinutesSchema),
+      default: Schema.optionalKey(BudgetMinutesSchema),
+      full: Schema.optionalKey(BudgetMinutesSchema),
     }).annotate({
       description: "Time budget per mode, used as-is (panel reviews too).",
     })
@@ -71,7 +67,10 @@ export const SettingsSchema = Schema.Struct({
 
 export type Settings = typeof SettingsSchema.Type;
 
-/** Drops unset fields and empty sections, but keeps an explicit empty disabled-lens list. */
+/**
+ * Drops unset fields and empty sections, but keeps an explicit empty disabled-lens list. The return type is annotated so
+ * every caller sees `Settings` rather than the spread-built shape.
+ */
 export const normalizeSettings = (s: Settings): Settings => {
   const b = s.budget_minutes;
 
@@ -155,7 +154,7 @@ export const resolve = (
 };
 
 /** One line for a model: the effective settings, or nothing when no file sets anything. */
-export const describe = (settings: Settings): string | undefined => {
+export const describe = (settings: Settings) => {
   const s = normalizeSettings(settings);
 
   const parts = [

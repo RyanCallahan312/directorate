@@ -3,7 +3,7 @@
 import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
 import { exclusionReason } from "../exclusions.ts";
-import { sha256 } from "../platform/hash.ts";
+import { sha256 } from "../platform/platform.ts";
 import { Count, invalid } from "../platform/stored.ts";
 import { FileEntry, FileStatusSchema, Region } from "./region.ts";
 

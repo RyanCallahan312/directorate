@@ -21,14 +21,14 @@ import { parseRequest, requestText } from "../review/request.ts";
 import { ShipFieldsSchema } from "./state.ts";
 
 /** What the policy reads from the ship itself: its request, how far this run has gone, and the step it last took. */
-export const ShipProgressSchema = ShipFieldsSchema.mapFields(
+const ShipProgressSchema = ShipFieldsSchema.mapFields(
   Struct.pick(["id", "request", "reviewsAtResume", "rounds", "step"])
 );
 
-export type ShipProgress = typeof ShipProgressSchema.Type;
+type ShipProgress = typeof ShipProgressSchema.Type;
 
 /** What the runner observed before asking: the seals so far, the latest one, its ledger and target fingerprint, or why not. */
-export const ShipObservationSchema = Schema.Struct({
+const ShipObservationSchema = Schema.Struct({
   error: Schema.optional(Schema.String),
   fingerprint: Schema.optional(Schema.String),
   ledger: Schema.optional(Ledger),
@@ -36,7 +36,7 @@ export const ShipObservationSchema = Schema.Struct({
   seal: Schema.optional(Seal),
 });
 
-export type ShipObservation = typeof ShipObservationSchema.Type;
+type ShipObservation = typeof ShipObservationSchema.Type;
 
 /** Take `step` next: `text` is the prompt that asks for it. */
 export class Proceed extends Schema.TaggedClass<

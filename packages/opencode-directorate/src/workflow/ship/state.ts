@@ -6,7 +6,7 @@ import { Match, Schema, SchemaGetter } from "effect";
 import { Count, sortedFields } from "../../platform/stored.ts";
 
 /** An automatic continuation's prompt, rendered in place of its inert marker once the host promotes the marker. */
-export const PlanSchema = Schema.Struct({
+const PlanSchema = Schema.Struct({
   checkpoint: Schema.optionalKey(Schema.String),
   id: Schema.String,
   origin: Schema.String,
@@ -17,7 +17,7 @@ export const PlanSchema = Schema.Struct({
 export type Plan = typeof PlanSchema.Type;
 
 /** The ship's last input in the session's inbox: queued until the host delivers it. */
-export const InboxSchema = Schema.Struct({
+const InboxSchema = Schema.Struct({
   continuation: Schema.optionalKey(Schema.Boolean),
   deliveredAt: Schema.optionalKey(Schema.Finite),
   id: Schema.String,
@@ -84,17 +84,14 @@ export class Paused extends Schema.TaggedClass<
 >()("Paused", shipFields) {}
 
 /** The Directive is clean: the loop ended with nothing to fix. */
-export class Complete extends Schema.TaggedClass<
+class Complete extends Schema.TaggedClass<
   Complete,
   { readonly brand: unique symbol }
 >()("Complete", shipFields) {}
 
-export const ShipStateSchema = Schema.Union([
-  Waiting,
-  Active,
-  Paused,
-  Complete,
-]).pipe(Schema.toTaggedUnion("_tag"));
+const ShipStateSchema = Schema.Union([Waiting, Active, Paused, Complete]).pipe(
+  Schema.toTaggedUnion("_tag")
+);
 
 export type ShipState = typeof ShipStateSchema.Type;
 
@@ -118,7 +115,7 @@ const ShipStatusSchema = Schema.Literals([
 ]);
 
 /** A ship as plugin storage holds it: its state is a `status` field, not a tag, and keys are in alphabetical order. */
-export const StoredShipState = Schema.Struct(
+const StoredShipState = Schema.Struct(
   sortedFields({ ...shipFields, status: ShipStatusSchema })
 );
 

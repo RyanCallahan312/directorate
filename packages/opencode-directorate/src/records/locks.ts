@@ -14,7 +14,7 @@ import {
 import { ProcessIdentity } from "../platform/platform.ts";
 
 /** Another writer holds the lock at `path`. */
-export class LockBusy extends Schema.TaggedError<
+class LockBusy extends Schema.TaggedError<
   LockBusy,
   { readonly brand: unique symbol }
 >()("LockBusy", { id: Schema.String, path: Schema.String }) {
@@ -24,7 +24,7 @@ export class LockBusy extends Schema.TaggedError<
 }
 
 /** The lock for `id` could not be placed. */
-export class LockFailed extends Schema.TaggedError<
+class LockFailed extends Schema.TaggedError<
   LockFailed,
   { readonly brand: unique symbol }
 >()("LockFailed", { id: Schema.String, reason: Schema.String }) {

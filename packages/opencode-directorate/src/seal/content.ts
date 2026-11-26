@@ -3,15 +3,13 @@ import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "../exclusions.ts";
 import type { Entry } from "../feature/ledger/entry.ts";
-import { Git } from "../platform/platform.ts";
+import { Git, IO_CONCURRENCY } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import type { Seal } from "./record.ts";
 import { Anchor } from "./region.ts";
 import type { Side } from "./region.ts";
 import { LineRef } from "./repo-path.ts";
-
-const IO_CONCURRENCY = 16;
 
 const isUrl = (ref: string) => /^https?:\/\//u.test(ref.trim());
 
@@ -85,13 +83,13 @@ export class Withheld extends Schema.TaggedError<
 >()("Withheld", { message: Schema.String }) {}
 
 /** An anchor or quote that does not tie to the sealed code. */
-export class AnchorRejected extends Schema.TaggedError<
+class AnchorRejected extends Schema.TaggedError<
   AnchorRejected,
   { readonly brand: unique symbol }
 >()("AnchorRejected", { message: Schema.String }) {}
 
 /** Evidence refs that do not fit the sealed files, each with its reason. */
-export class EvidenceRejected extends Schema.TaggedError<
+class EvidenceRejected extends Schema.TaggedError<
   EvidenceRejected,
   { readonly brand: unique symbol }
 >()("EvidenceRejected", { problems: Schema.Array(Schema.String) }) {

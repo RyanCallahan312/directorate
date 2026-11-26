@@ -11,7 +11,9 @@ import { nodeProcessIdentity } from "./process-identity.ts";
 
 export { command } from "./command.ts";
 
-export { Git, GitFailed, MissingHistory, UnreadableFile } from "./git.ts";
+export { Git } from "./git.ts";
+
+export { sha256 } from "./hash.ts";
 
 export { Host } from "./host.ts";
 
@@ -37,9 +39,9 @@ export {
   ToolCatalog,
 } from "./tool.ts";
 
-export type { Body, DefineTool } from "./tool.ts";
+export type { DefineTool } from "./tool.ts";
 
-export { Worktree } from "./worktree.ts";
+export { IO_CONCURRENCY, Worktree } from "./worktree.ts";
 
 export type { LiveEntry } from "./worktree.ts";
 

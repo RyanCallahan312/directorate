@@ -46,7 +46,7 @@ export class Seat extends Schema.Class<Seat, { readonly brand: unique symbol }>(
 }
 
 /** The seats of a panel review when the caller names no models. */
-export const DEFAULT_SEATS = [
+const DEFAULT_SEATS = [
   Seat.make({ model: "openai/gpt-6.2-astra", variant: "xhigh" }),
   Seat.make({ model: "claude-agent/claude-fable-5-2", variant: "high" }),
   Seat.make({ model: "claude-agent/opus", variant: "high" }),

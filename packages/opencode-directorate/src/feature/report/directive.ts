@@ -82,7 +82,7 @@ export const Protocol = Schema.Struct({
 });
 
 /** What the freshness check at filing found: the files that changed since the seal, or why it could not tell. */
-export const FreshnessSchema = Schema.Struct({
+const FreshnessSchema = Schema.Struct({
   stale: opt(list(Schema.String)),
   unverified: opt(Schema.String),
 });

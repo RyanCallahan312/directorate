@@ -1,5 +1,6 @@
-// Guardrails for ARCHITECTURE.md: the GUI bundle stays effect-only, every slice entry loads on its own, and imports
-// follow the bands. The checker is tested on small in-memory graphs first, so a pass on src/ means something.
+// Guardrails for ARCHITECTURE.md: the GUI bundle stays effect-only, every slice entry loads on its own, imports follow
+// the bands, and the Layout block lists exactly src/'s modules and primitives. The checker and the Layout parser are
+// tested on small inputs first, so a pass on src/ means something.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -11,7 +12,8 @@ import { promisify } from "node:util";
 import {
   checkBoundaries,
   entryOf,
-  LEGACY_ROOT_MODULES,
+  parseLayout,
+  PRIMITIVE_MODULES,
   ROOT_MODULES,
   RULES,
   scanModule,
@@ -26,6 +28,8 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const srcRoot = path.join(packageRoot, "src");
 
 const builtGui = path.join(packageRoot, "dist", "gui-experimental.cjs");
+
+const architectureDoc = path.join(packageRoot, "ARCHITECTURE.md");
 
 const graph = scanTree(srcRoot);
 
@@ -69,6 +73,28 @@ test("the scanner tells value imports from type-only imports", () => {
   );
 
   assert.equal(scanned.exportsStar, true);
+  assert.deepEqual(scanned.namespaceExports, []);
+});
+
+test("the scanner finds namespace imports a module re-exports", () => {
+  const scanned = scanModule(
+    "seal/seal.ts",
+    [
+      'import * as Capture from "./capture.ts";',
+      'import type * as Views from "./views.ts";',
+      'import * as Ends from "./ends.ts";',
+      'import { Sessions } from "./sessions.ts";',
+      "export {",
+      "  Capture,",
+      "  type Views as ReadViews,",
+      "  Sessions,",
+      "};",
+      'export { Ends } from "./elsewhere.ts";',
+    ].join("\n")
+  );
+
+  assert.equal(scanned.exportsStar, false);
+  assert.deepEqual(scanned.namespaceExports, ["Capture", "Views"]);
 });
 
 test("the scanner finds the imports src/ has today", () => {
@@ -106,6 +132,7 @@ const typeOnly = (target: string): ImportRef => ({
 const mod = (modulePath: string, ...imports: ImportRef[]): Module => ({
   exportsStar: false,
   imports,
+  namespaceExports: [],
   path: modulePath,
 });
 
@@ -137,10 +164,8 @@ const withModules = (...modules: Module[]) => [
   ...modules,
 ];
 
-const strict = { ...RULES, legacy: [] };
-
 const check = (...modules: Module[]) =>
-  checkBoundaries(withModules(...modules), strict);
+  checkBoundaries(withModules(...modules), RULES);
 
 test("the checker passes a legal workflow -> feature -> seal -> platform chain", () => {
   assert.deepEqual(
@@ -259,6 +284,7 @@ test("the checker rejects package-entry, placement, and export * mistakes", () =
       mod("tui.ts", value("feature/settings/settings.ts")),
       mod("feature/settings/settings.ts", value("rpc.ts")),
       { ...mod("seal/seal.ts"), exportsStar: true },
+      { ...mod("feature/ledger/ledger.ts"), namespaceExports: ["Entry"] },
       mod("feature/stray.ts"),
       mod("leftover.ts"),
       mod("workflow/audit/audit.ts", value("seal/missing.ts")),
@@ -268,25 +294,66 @@ test("the checker rejects package-entry, placement, and export * mistakes", () =
       "tui.ts -> feature/settings/settings.ts: tui.ts may import only primitive modules",
       "feature/settings/settings.ts -> rpc.ts: a slice module may not import a package entry",
       "seal/seal.ts: export * in a slice module; export selected names",
+      "feature/ledger/ledger.ts: re-exports namespace Entry in a slice module; export selected names",
       "feature/stray.ts: not inside a slice directory (platform/, records/, seal/, feature/<name>/, workflow/<name>/)",
-      "leftover.ts: not a root module; move it into its slice (or list it in LEGACY_ROOT_MODULES while it waits)",
+      "leftover.ts: not a root module; move it into its slice",
       "workflow/audit/audit.ts: slice workflow/audit has no band; add it to SLICE_BANDS",
       "workflow/audit/audit.ts -> seal/missing.ts: no such module under src/",
     ]
   );
 });
 
-test("legacy root modules may import and be imported by anything", () => {
+test("a module directly in src/ other than the root modules breaks no import rule but is reported", () => {
   assert.deepEqual(
-    checkBoundaries(
-      withModules(
-        mod("seal/record.ts", value("model.ts")),
-        mod("model.ts", value("seal/capture.ts"), value("node:fs"))
-      ),
-      { ...RULES, legacy: ["model.ts"] }
+    check(
+      mod("seal/record.ts", value("model.ts")),
+      mod("model.ts", value("seal/capture.ts"), value("node:fs"))
     ),
-    []
+    ["model.ts: not a root module; move it into its slice"]
   );
+});
+
+test("the Layout parser reads directories, module runs, stars, and comments", () => {
+  const markdown = [
+    "## Layout",
+    "",
+    "```text",
+    "src/",
+    "├── index.ts                composition root",
+    "├── tui.ts · gui.ts package entries (gui.ts re-exports x.ts)",
+    "├── exclusions.ts*          shared kernel",
+    "├── platform/               seams · and more",
+    "│   ├── platform.ts         entry",
+    "│   ├── stored.ts*          since · Time",
+    "│   └── error.ts* · git.ts",
+    "└── feature/",
+    "    └── ledger/             ledger.ts · entry.ts* · tools.ts",
+    "```",
+    "",
+    "`*` marks a primitive module.",
+  ].join("\n");
+
+  assert.deepEqual(parseLayout(markdown), {
+    files: [
+      "index.ts",
+      "tui.ts",
+      "gui.ts",
+      "exclusions.ts",
+      "platform/platform.ts",
+      "platform/stored.ts",
+      "platform/error.ts",
+      "platform/git.ts",
+      "feature/ledger/ledger.ts",
+      "feature/ledger/entry.ts",
+      "feature/ledger/tools.ts",
+    ],
+    primitives: [
+      "exclusions.ts",
+      "platform/stored.ts",
+      "platform/error.ts",
+      "feature/ledger/entry.ts",
+    ],
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -302,28 +369,53 @@ test("src/ follows the import boundaries", () => {
   );
 });
 
-test("LEGACY_ROOT_MODULES lists exactly the flat modules still waiting to move", () => {
-  const files = readdirSync(srcRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name);
-
-  const stale = LEGACY_ROOT_MODULES.filter((name) => !files.includes(name)).map(
-    (name) => `remove ${name} from LEGACY_ROOT_MODULES: it no longer exists`
-  );
-
-  const extra = files
+test("the only files directly in src/ are the root modules and AGENTS.md", () => {
+  const extra = readdirSync(srcRoot, { withFileTypes: true })
     .filter(
-      (name) =>
-        name !== "AGENTS.md" &&
-        !ROOT_MODULES.includes(name) &&
-        !LEGACY_ROOT_MODULES.includes(name)
+      (entry) =>
+        entry.isFile() &&
+        entry.name !== "AGENTS.md" &&
+        !ROOT_MODULES.includes(entry.name)
     )
     .map(
-      (name) =>
-        `src/${name} is neither an end-state root module nor in LEGACY_ROOT_MODULES; move it into its slice`
+      (entry) =>
+        `src/${entry.name} is not a root module (${ROOT_MODULES.join(", ")}); move it into its slice`
     );
 
-  assert.deepEqual([...stale, ...extra], []);
+  assert.deepEqual(extra, []);
+});
+
+test("ARCHITECTURE.md's Layout lists every module under src/ and nothing else", () => {
+  const listed = parseLayout(readFileSync(architectureDoc, "utf-8")).files;
+  const modules = graph.map((m) => m.path);
+
+  const problems = [
+    ...modules
+      .filter((m) => !listed.includes(m))
+      .map((m) => `src/${m} is missing from the Layout block`),
+    ...listed
+      .filter((f) => !modules.includes(f))
+      .map((f) => `the Layout block lists ${f}, which is not under src/`),
+  ];
+
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("the Layout's *-marked modules are exactly PRIMITIVE_MODULES", () => {
+  const { primitives } = parseLayout(readFileSync(architectureDoc, "utf-8"));
+
+  const problems = [
+    ...PRIMITIVE_MODULES.filter((m) => !primitives.includes(m)).map(
+      (m) => `${m} is in PRIMITIVE_MODULES but not marked * in the Layout`
+    ),
+    ...primitives
+      .filter((m) => !PRIMITIVE_MODULES.includes(m))
+      .map(
+        (m) => `${m} is marked * in the Layout but not in PRIMITIVE_MODULES`
+      ),
+  ];
+
+  assert.deepEqual(problems, [], problems.join("\n"));
 });
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 import { Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 
 import { inScope, isSecret, scopeOf } from "../exclusions.ts";
-import { Git } from "../platform/platform.ts";
+import { Git, IO_CONCURRENCY } from "../platform/platform.ts";
 import { encodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import {
@@ -485,7 +485,7 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
 
         return `${shown} -> ${linkTarget}`;
       }),
-      { concurrency: 16 }
+      { concurrency: IO_CONCURRENCY }
     );
 
     const shown = rows.slice(0, fitting(rows));
@@ -552,7 +552,7 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
 });
 
 /** A history request missing what its kind needs, or naming no such revision or file. */
-export class InvalidRead extends Schema.TaggedError<
+class InvalidRead extends Schema.TaggedError<
   InvalidRead,
   { readonly brand: unique symbol }
 >()("InvalidRead", { message: Schema.String }) {}
@@ -614,7 +614,7 @@ const historyShow = Effect.fnUntraced(function* historyShow(
 /** What directorate_history shows: a log, a blame, or one commit. */
 export const HistoryKindSchema = Schema.Literals(["log", "blame", "show"]);
 
-export type HistoryKind = typeof HistoryKindSchema.Type;
+type HistoryKind = typeof HistoryKindSchema.Type;
 
 export const history = Effect.fn("Directorate.history")(function* history(
   seal: Seal,

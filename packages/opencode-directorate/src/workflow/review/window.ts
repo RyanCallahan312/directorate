@@ -22,6 +22,12 @@ export const DEFAULT_BUDGET = Schema.Record(ModeSchema, Schema.Finite).make({
 
 export const PANEL_BUDGET_FACTOR = 1.5;
 
+/** The minutes a request or directorate.json may give a review. */
+export const BudgetMinutesSchema = Schema.Finite.check(
+  Schema.isGreaterThanOrEqualTo(2),
+  Schema.isLessThanOrEqualTo(240)
+);
+
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 export const GRACE_MS = 120_000;
 

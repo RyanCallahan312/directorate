@@ -1,4 +1,5 @@
-// The import graph of src/ and the rules ARCHITECTURE.md sets on it ("Layout", "Slice anatomy", "Dependency bands").
+// The import graph of src/ and the rules ARCHITECTURE.md sets on it ("Layout", "Slice anatomy", "Dependency bands"), and
+// the files and primitive modules its Layout block lists.
 // Modules are named by their path under src/ ("seal/record.ts"). The scanner is a regex over oxfmt-formatted source; the
 // checker takes the graph in memory, so architecture.test.ts can exercise it on tiny graphs as well as on src/.
 import { readdirSync, readFileSync } from "node:fs";
@@ -16,15 +17,16 @@ export interface Module {
   readonly path: string;
   readonly imports: readonly ImportRef[];
   readonly exportsStar: boolean;
+  /** Namespace imports the module re-exports by name (`import * as X from "…"; export { X };`). */
+  readonly namespaceExports: readonly string[];
 }
 
-/** The `*`-marked modules of ARCHITECTURE.md's Layout, plus the exclusions.ts shared kernel. Extend it deliberately. */
+/** The `*`-marked modules of ARCHITECTURE.md's Layout (architecture.test.ts holds the two equal). Extend it deliberately. */
 export const PRIMITIVE_MODULES: readonly string[] = [
   "exclusions.ts",
   "platform/stored.ts",
   "platform/error.ts",
   "platform/utf8.ts",
-  "platform/hash.ts",
   "seal/record.ts",
   "seal/target.ts",
   "seal/region.ts",
@@ -55,7 +57,7 @@ export const PRIMITIVE_EXTRA_SPECIFIERS: ReadonlyMap<
   readonly string[]
 > = new Map([["feature/settings/rpc.ts", ["@opencode/plugin/rpc"]]]);
 
-/** The files that stay directly in src/ in the end state. */
+/** The only files directly in src/. */
 export const ROOT_MODULES: readonly string[] = [
   "index.ts",
   "tui.ts",
@@ -63,9 +65,6 @@ export const ROOT_MODULES: readonly string[] = [
   "rpc.ts",
   "exclusions.ts",
 ];
-
-/** Flat src/*.ts files still awaiting their move. Remove each one as it moves; when empty, the checker is fully strict. */
-export const LEGACY_ROOT_MODULES: readonly string[] = [];
 
 /** Dependency bands, lowest first. Features share one band: they are siblings. */
 export const SLICE_BANDS: ReadonlyMap<string, number> = new Map([
@@ -93,13 +92,11 @@ const SLICE_GROUPS: ReadonlySet<string> = new Set(["feature", "workflow"]);
 export interface Rules {
   readonly primitives: readonly string[];
   readonly primitiveExtras: ReadonlyMap<string, readonly string[]>;
-  readonly legacy: readonly string[];
   readonly bands: ReadonlyMap<string, number>;
 }
 
 export const RULES: Rules = {
   bands: SLICE_BANDS,
-  legacy: LEGACY_ROOT_MODULES,
   primitiveExtras: PRIMITIVE_EXTRA_SPECIFIERS,
   primitives: PRIMITIVE_MODULES,
 };
@@ -115,6 +112,26 @@ const SIDE_EFFECT_IMPORT = /^import\s+"(?<specifier>[^"]+)";?/gmu;
 const DYNAMIC_IMPORT = /\bimport\(\s*"(?<specifier>[^"]+)"\s*\)/gu;
 
 const EXPORT_STAR = /^export\s+\*/mu;
+
+const NAMESPACE_IMPORT =
+  /^import\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\*\s+as\s+(?<name>[\w$]+)\s+from\s/gmu;
+
+/** `export { … }` without `from`: names declared or imported in the module itself. */
+const LOCAL_EXPORT_LIST =
+  /^export\s+(?:type\s+)?\{(?<names>[^}]*)\}(?!\s*from\s)/gmu;
+
+/** The local names an `export { … }` list re-exports (`X`, `type X`, and `X as Y` all name `X`). */
+const exportedLocals = (names: string) =>
+  names
+    .split(",")
+    .map(
+      (s) =>
+        s
+          .trim()
+          .replace(/^type\s+/u, "")
+          .split(/\s+as\s+/u)[0] ?? ""
+    )
+    .filter((s) => s !== "");
 
 /** True when the clause is `{ ... }` and every specifier in it is marked `type`. */
 const everySpecifierIsType = (clause: string) => {
@@ -165,7 +182,21 @@ export const scanModule = (modulePath: string, source: string): Module => {
     imports.push(reference(modulePath, groups?.specifier ?? "", false));
   }
 
-  return { exportsStar: EXPORT_STAR.test(source), imports, path: modulePath };
+  const namespaces = new Set(
+    [...source.matchAll(NAMESPACE_IMPORT)].map(({ groups }) => groups?.name)
+  );
+
+  const namespaceExports = [...source.matchAll(LOCAL_EXPORT_LIST)].flatMap(
+    ({ groups }) =>
+      exportedLocals(groups?.names ?? "").filter((n) => namespaces.has(n))
+  );
+
+  return {
+    exportsStar: EXPORT_STAR.test(source),
+    imports,
+    namespaceExports,
+    path: modulePath,
+  };
 };
 
 const listTs = (root: string, dir: string): string[] =>
@@ -191,7 +222,7 @@ export const scanTree = (srcRoot: string): Module[] =>
 // Classifying
 
 export interface Placement {
-  readonly kind: "root" | "legacy" | "entry" | "internal" | "unplaced";
+  readonly kind: "root" | "entry" | "internal" | "unplaced";
   readonly primitive: boolean;
   /** The slice directory ("seal", "feature/ledger") for entries and internal modules. */
   readonly slice?: string;
@@ -219,12 +250,8 @@ export const placementOf = (rules: Rules, modulePath: string): Placement => {
   const primitive = rules.primitives.includes(modulePath);
 
   if (!modulePath.includes("/")) {
-    if (ROOT_MODULES.includes(modulePath)) {
-      return { kind: "root", primitive };
-    }
-
     return {
-      kind: rules.legacy.includes(modulePath) ? "legacy" : "unplaced",
+      kind: ROOT_MODULES.includes(modulePath) ? "root" : "unplaced",
       primitive,
     };
   }
@@ -305,13 +332,8 @@ const localViolations = (rules: Rules, importer: string, imported: string) => {
   const from = placementOf(rules, importer);
   const to = placementOf(rules, imported);
 
-  // Legacy modules are tolerated both ways; unplaced ones are reported once, on their own.
-  if (
-    from.kind === "legacy" ||
-    to.kind === "legacy" ||
-    from.kind === "unplaced" ||
-    to.kind === "unplaced"
-  ) {
+  // Unplaced modules are reported once, on their own.
+  if (from.kind === "unplaced" || to.kind === "unplaced") {
     return [];
   }
 
@@ -337,7 +359,7 @@ const placementViolations = (rules: Rules, m: Module) => {
     violations.push(
       m.path.includes("/")
         ? `${m.path}: not inside a slice directory (platform/, records/, seal/, feature/<name>/, workflow/<name>/)`
-        : `${m.path}: not a root module; move it into its slice (or list it in LEGACY_ROOT_MODULES while it waits)`
+        : `${m.path}: not a root module; move it into its slice`
     );
   }
 
@@ -350,6 +372,12 @@ const placementViolations = (rules: Rules, m: Module) => {
   if (placement.slice !== undefined && m.exportsStar) {
     violations.push(
       `${m.path}: export * in a slice module; export selected names`
+    );
+  }
+
+  for (const name of placement.slice === undefined ? [] : m.namespaceExports) {
+    violations.push(
+      `${m.path}: re-exports namespace ${name} in a slice module; export selected names`
     );
   }
 
@@ -536,4 +564,89 @@ export const valueClosure = (modules: readonly Module[], start: string) => {
     modules: [...reached].toSorted(),
     specifiers: [...specifiers].toSorted(),
   };
+};
+
+// ---------------------------------------------------------------------------
+// The Layout block
+
+export interface Layout {
+  /** Every module the block lists, as a path under src/. */
+  readonly files: readonly string[];
+  /** The `*`-marked ones. */
+  readonly primitives: readonly string[];
+}
+
+const TREE_LINE = /^(?<indent>(?:│ {3}| {4})*)(?:├──|└──) (?<body>.*)$/u;
+
+const NAME = String.raw`[\w.-]+\.ts\*?`;
+
+/** A `·`-separated run of module names at the start of a string. */
+const NAME_LIST = new RegExp(String.raw`^${NAME}(?: · ${NAME})*`, "u");
+
+const DIRECTORY = /^(?<dir>[\w-]+)\/(?<rest>.*)$/u;
+
+/**
+ * The modules ARCHITECTURE.md's fenced Layout block lists. Each tree line holds a directory (`seal/`), optionally followed
+ * by its modules, or a `·`-separated run of modules; whatever follows the names is a comment.
+ */
+export const parseLayout = (markdown: string): Layout => {
+  const section = markdown.split(/^## Layout$/mu)[1] ?? "";
+  const block = /```text\n(?<tree>[\s\S]*?)```/u.exec(section)?.groups?.tree;
+
+  if (block === undefined) {
+    throw new Error("ARCHITECTURE.md has no ```text block under ## Layout");
+  }
+
+  const dirs: string[] = [];
+  const files: string[] = [];
+  const primitives: string[] = [];
+
+  const add = (depth: number, names: string) => {
+    for (const name of names.split(" · ")) {
+      const file = [...dirs.slice(0, depth), name.replace(/\*$/u, "")].join(
+        "/"
+      );
+
+      files.push(file);
+
+      if (name.endsWith("*")) {
+        primitives.push(file);
+      }
+    }
+  };
+
+  for (const line of block.split("\n")) {
+    const match = TREE_LINE.exec(line);
+
+    if (!match?.groups) {
+      continue;
+    }
+
+    const depth = (match.groups.indent ?? "").length / 4;
+    const body = match.groups.body ?? "";
+    const directory = DIRECTORY.exec(body)?.groups;
+
+    if (directory) {
+      dirs.length = depth;
+      dirs.push(directory.dir ?? "");
+
+      const listed = NAME_LIST.exec((directory.rest ?? "").trim())?.[0];
+
+      if (listed !== undefined) {
+        add(depth + 1, listed);
+      }
+
+      continue;
+    }
+
+    const listed = NAME_LIST.exec(body)?.[0];
+
+    if (listed === undefined) {
+      throw new Error(`ARCHITECTURE.md Layout: cannot read line "${line}"`);
+    }
+
+    add(depth, listed);
+  }
+
+  return { files, primitives };
 };

@@ -16,10 +16,11 @@ import { Git, UnreadableFile } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { encodeUtf8 } from "./utf8.ts";
 
-const IO_CONCURRENCY = 16;
+/** How many filesystem operations (reads, stats, removals) one fan-out runs at once. */
+export const IO_CONCURRENCY = 16;
 
 /** What a working-tree path is: absent, a symlink, an executable or plain file, or a checked-out submodule. */
-export const EntryModeSchema = Schema.Literals([
+const EntryModeSchema = Schema.Literals([
   "absent",
   "link",
   "exec",
