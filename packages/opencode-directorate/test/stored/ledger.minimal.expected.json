@@ -1,0 +1,42 @@
+{
+  "entries": [
+    {
+      "anchor": {
+        "endLine": 12,
+        "line": 10,
+        "path": "src/modified.ts",
+        "side": "new"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "id": "E1",
+      "kind": "defect",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "blocking",
+      "status": "open",
+      "title": "Finding E1",
+      "trigger": "Call with empty input",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_c"
+          },
+          "evidence": [],
+          "rationale": "Holds",
+          "verdict": "confirmed"
+        }
+      ]
+    }
+  ],
+  "notes": []
+}

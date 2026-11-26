@@ -1,0 +1,232 @@
+// Stored contracts: seal.json, ledger.json, directorate.json, and ship state outlive the code that wrote them. Each
+// fixture under test/stored/ is in the exact bytes Directorate writes; current fixtures must survive decode → encode
+// unchanged, and legacy fixtures must re-encode to their committed *.expected.json golden, which pins today's behavior.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+import { Schema, SchemaAST } from "effect";
+
+// ---------- Stored codecs under test ----------
+// Later refactor phases update only these import paths; nothing below depends on where the schemas live.
+import { LedgerJson, normalizeSettings, SealJson } from "../src/model.ts";
+import { SettingsJson } from "../src/settings.ts";
+import { ShipStateSchema } from "../src/ship.ts";
+// ---------- end stored codecs ----------
+
+/** The host's plugin storage holds ship state as a JSON value under `ship:<sessionID>`; it is stored as this text. */
+const ShipJson = Schema.fromJsonString(ShipStateSchema, { space: 2 });
+
+const read = (name: string) =>
+  readFileSync(new URL(`stored/${name}`, import.meta.url), "utf-8");
+
+/** What each contract's reader and writer do to stored text, end to end. */
+const sealRoundTrip = (text: string) =>
+  Schema.encodeSync(SealJson)(Schema.decodeSync(SealJson)(text));
+
+const ledgerRoundTrip = (text: string) =>
+  Schema.encodeSync(LedgerJson)(Schema.decodeSync(LedgerJson)(text));
+
+// settings.ts reads with excess keys rejected, normalizes before writing, and ends the file with a newline.
+const settingsRoundTrip = (text: string) =>
+  `${Schema.encodeSync(SettingsJson)(
+    normalizeSettings(
+      Schema.decodeSync(SettingsJson)(text, { onExcessProperty: "error" })
+    )
+  )}\n`;
+
+// ship.ts decodes with default options (unknown keys dropped) and writes the decoded value back.
+const shipRoundTrip = (text: string) =>
+  Schema.encodeSync(ShipJson)(Schema.decodeSync(ShipJson)(text));
+
+const contracts = [
+  {
+    current: ["seal.json"],
+    legacy: ["seal.oldest.json", "seal.legacy-gates.json"],
+    name: "seal.json",
+    roundTrip: sealRoundTrip,
+    stored: SealJson.to.ast,
+  },
+  {
+    current: ["ledger.json"],
+    legacy: ["ledger.minimal.json"],
+    name: "ledger.json",
+    roundTrip: ledgerRoundTrip,
+    stored: LedgerJson.to.ast,
+  },
+  {
+    current: ["directorate.json"],
+    legacy: ["directorate.sparse.json", "directorate.empty-sections.json"],
+    name: "directorate.json",
+    roundTrip: settingsRoundTrip,
+    stored: SettingsJson.to.ast,
+  },
+  {
+    current: ["ship.json", "ship.paused.json"],
+    legacy: ["ship.pre-recovery.json", "ship.minimal.json"],
+    name: "ship state",
+    roundTrip: shipRoundTrip,
+    stored: ShipJson.to.ast,
+  },
+];
+
+const expectedFor = (legacy: string) =>
+  legacy.replace(/\.json$/u, ".expected.json");
+
+// ---------- completeness: every encoded key path and every shape-changing union member appears in a fixture ----------
+const isJsonObject = Schema.is(Schema.JsonObject);
+const isJsonArray = Schema.is(Schema.Array(Schema.Json));
+
+/**
+ * Whether a union member is one of several stored shapes, as in `orLegacyTrue`. Literal sets are one shape, and the
+ * `undefined` that `Schema.optional` adds never reaches JSON.
+ */
+const isStoredVariant = (union: SchemaAST.Union, member: SchemaAST.AST) => {
+  const stored = union.types.filter((type) => !SchemaAST.isUndefined(type));
+
+  return (
+    stored.some((type) => type === member) &&
+    stored.length > 1 &&
+    !stored.every(SchemaAST.isLiteral)
+  );
+};
+
+/** Every path the encoded schema can write: `.key` per property, `.*` per record key, `[]` per array element. */
+const schemaPaths = (ast: SchemaAST.AST, path: string, out: Set<string>) => {
+  if (SchemaAST.isObjects(ast)) {
+    for (const property of ast.propertySignatures) {
+      const at = `${path}.${String(property.name)}`;
+      out.add(at);
+      schemaPaths(property.type, at, out);
+    }
+
+    for (const index of ast.indexSignatures) {
+      out.add(`${path}.*`);
+      schemaPaths(index.type, `${path}.*`, out);
+    }
+  } else if (SchemaAST.isArrays(ast)) {
+    for (const element of [...ast.elements, ...ast.rest]) {
+      out.add(`${path}[]`);
+      schemaPaths(element, `${path}[]`, out);
+    }
+  } else if (SchemaAST.isUnion(ast)) {
+    for (const [i, member] of ast.types.entries()) {
+      if (isStoredVariant(ast, member)) {
+        out.add(`${path} member ${i}`);
+      }
+
+      schemaPaths(member, path, out);
+    }
+  }
+
+  return out;
+};
+
+/** The paths of `schemaPaths` that a stored value actually exercises. */
+const fixturePaths = (
+  ast: SchemaAST.AST,
+  path: string,
+  value: Schema.Json,
+  out: Set<string>
+) => {
+  if (SchemaAST.isObjects(ast) && isJsonObject(value)) {
+    const named = new Set<PropertyKey>();
+
+    for (const property of ast.propertySignatures) {
+      named.add(property.name);
+      const key = String(property.name);
+      const child = value[key];
+
+      if (Object.hasOwn(value, key) && child !== undefined) {
+        out.add(`${path}.${key}`);
+        fixturePaths(property.type, `${path}.${key}`, child, out);
+      }
+    }
+
+    for (const index of ast.indexSignatures) {
+      for (const [key, child] of Object.entries(value)) {
+        if (!named.has(key)) {
+          out.add(`${path}.*`);
+          fixturePaths(index.type, `${path}.*`, child, out);
+        }
+      }
+    }
+  } else if (SchemaAST.isArrays(ast) && isJsonArray(value)) {
+    for (const element of value) {
+      for (const type of ast.rest) {
+        out.add(`${path}[]`);
+        fixturePaths(type, `${path}[]`, element, out);
+      }
+    }
+  } else if (SchemaAST.isUnion(ast)) {
+    for (const [i, member] of ast.types.entries()) {
+      if (
+        isStoredVariant(ast, member) &&
+        Schema.is(Schema.make(member))(value)
+      ) {
+        out.add(`${path} member ${i}`);
+      }
+
+      fixturePaths(member, path, value, out);
+    }
+  }
+
+  return out;
+};
+
+const parseJson = Schema.decodeSync(Schema.fromJsonString(Schema.Json));
+
+for (const contract of contracts) {
+  test(`${contract.name}: current fixtures decode and re-encode byte for byte`, () => {
+    for (const name of contract.current) {
+      const text = read(name);
+      assert.equal(contract.roundTrip(text), text, name);
+    }
+  });
+
+  test(`${contract.name}: legacy fixtures re-encode to their golden files byte for byte`, () => {
+    for (const name of contract.legacy) {
+      const golden = read(expectedFor(name));
+      assert.equal(contract.roundTrip(read(name)), golden, name);
+      // A golden is itself current: it must survive another round trip unchanged.
+      assert.equal(contract.roundTrip(golden), golden, expectedFor(name));
+    }
+  });
+
+  test(`${contract.name}: the first current fixture sets every encoded field`, () => {
+    const encoded = SchemaAST.toEncoded(contract.stored);
+    const [first = ""] = contract.current;
+
+    const covered = fixturePaths(
+      encoded,
+      "",
+      parseJson(read(first)),
+      new Set()
+    );
+
+    const missing = [...schemaPaths(encoded, "", new Set())].filter(
+      (path) => !path.includes(" member ") && !covered.has(path)
+    );
+
+    assert.deepEqual(missing, [], `${first} lacks these schema paths`);
+  });
+
+  test(`${contract.name}: fixtures together exercise every shape-changing union member`, () => {
+    const encoded = SchemaAST.toEncoded(contract.stored);
+    const covered = new Set<string>();
+
+    for (const name of [...contract.current, ...contract.legacy]) {
+      fixturePaths(encoded, "", parseJson(read(name)), covered);
+    }
+
+    const missing = [...schemaPaths(encoded, "", new Set())].filter(
+      (path) => path.includes(" member ") && !covered.has(path)
+    );
+
+    assert.deepEqual(missing, []);
+  });
+}
+
+test("directorate.json: an unknown key is rejected, not dropped", () => {
+  assert.throws(() => settingsRoundTrip('{\n  "mdoe": "full"\n}\n'));
+});

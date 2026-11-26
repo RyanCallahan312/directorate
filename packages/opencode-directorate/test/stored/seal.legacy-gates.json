@@ -1,0 +1,59 @@
+{
+  "baseSha": "1111111111111111111111111111111111111111",
+  "budgetMinutes": 60,
+  "children": [
+    {
+      "agent": "directorate_auditor",
+      "call": "call_1",
+      "prompt": "Investigate",
+      "startedAt": "2026-03-01T10:00:00Z",
+      "status": "completed"
+    }
+  ],
+  "createdAt": "2026-03-01T10:00:00Z",
+  "deadline": "2026-03-02T10:00:00.000Z",
+  "deleted": [],
+  "description": "commit abc",
+  "files": [
+    {
+      "added": 1,
+      "path": "src/a.ts",
+      "removed": 0,
+      "status": "modified"
+    }
+  ],
+  "fingerprint": "fp",
+  "gates": {
+    "children": true,
+    "coverage": true,
+    "freshness": true,
+    "open": true
+  },
+  "gen": 0,
+  "headSha": "3333333333333333333333333333333333333333",
+  "id": "directorate-legacy-gates",
+  "mode": "code-quality",
+  "owner": "directorate_liaison",
+  "ownerSession": "ses_liaison",
+  "postImage": "commit",
+  "recovery": {
+    "id": "rec_1",
+    "ownerSession": "ses_liaison"
+  },
+  "refreshes": 0,
+  "regions": [
+    {
+      "file": "src/a.ts",
+      "id": "R1",
+      "newEnd": 1,
+      "newStart": 1,
+      "patchEnd": 1,
+      "patchStart": 0
+    }
+  ],
+  "repo": "/repo",
+  "target": {
+    "commit": "abc",
+    "kind": "commit"
+  }
+}

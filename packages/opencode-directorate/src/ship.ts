@@ -54,7 +54,7 @@ const Plan = Schema.Struct({
   text: Schema.String,
 });
 
-const ShipStateSchema = Schema.Struct({
+export const ShipStateSchema = Schema.Struct({
   /** An automatic continuation whose admission was not confirmed. */
   admitting: Schema.optionalKey(Schema.Boolean),
   /** Background subagents the settled turn left running, and when each was seen: their notices come before the next step. */

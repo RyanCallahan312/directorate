@@ -1,0 +1,19 @@
+{
+  "boot": "boot-1",
+  "chain": [
+    "directorate-a",
+    "directorate-b"
+  ],
+  "id": "ship-1",
+  "inbox": {
+    "id": "inb_1"
+  },
+  "location": "/repo",
+  "reason": "User interrupted",
+  "request": "ship the feature",
+  "reviewsAtResume": 1,
+  "rounds": 2,
+  "startedAt": 1767261600000,
+  "status": "paused",
+  "step": "fix"
+}

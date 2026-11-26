@@ -24,7 +24,7 @@ import {
 } from "./model.ts";
 import type { Mode, Settings, SettingsScope as Scope } from "./model.ts";
 
-const SettingsJson = Schema.fromJsonString(SettingsSchema, { space: 2 });
+export const SettingsJson = Schema.fromJsonString(SettingsSchema, { space: 2 });
 
 /** A typo in a settings file is an error, not a silently ignored key. */
 const decodeSettings = Schema.decodeEffect(SettingsJson);

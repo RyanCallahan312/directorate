@@ -1,0 +1,25 @@
+{
+  "baseSha": "1111111111111111111111111111111111111111",
+  "budgetMinutes": 20,
+  "children": [],
+  "createdAt": "2026-03-01T10:00:00.000Z",
+  "deadline": "2026-03-02T10:00:00.000Z",
+  "deleted": [],
+  "description": "working tree changes",
+  "files": [],
+  "fingerprint": "fp-old",
+  "gates": {},
+  "gen": 0,
+  "headSha": "3333333333333333333333333333333333333333",
+  "id": "directorate-oldest",
+  "mode": "default",
+  "owner": "directorate_liaison",
+  "ownerSession": "ses_liaison",
+  "postImage": "commit",
+  "refreshes": 0,
+  "regions": [],
+  "repo": "/repo",
+  "target": {
+    "kind": "local"
+  }
+}
