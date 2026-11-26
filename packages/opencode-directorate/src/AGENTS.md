@@ -2,7 +2,7 @@
 
 Rules for everything under `packages/opencode-directorate/src/`. Read the root `AGENTS.md` and the [`effect-ts` skill](../../../.agents/skills/effect-ts/SKILL.md) for general Effect 4 mechanics; this file sets Directorate's domain modeling, slice boundaries, and ownership map.
 
-Existing `src/` files predate these rules (flat files, a shared `model.ts`, loose role constants). See [Migrating](#migrating).
+Some `src/` code predates these rules. See [Migrating](#migrating).
 
 ## 1. Schema First
 
@@ -195,34 +195,26 @@ export const transition = (state: ShipState, event: ShipEvent) =>
 
 ## 4. Deep Modules, Vertical Slices & Ownership
 
-Model the domain from `../README.md` and `../THEME.md` with one clear owner per bounded context:
+[`../ARCHITECTURE.md`](../ARCHITECTURE.md) is the ownership map: which slices exist, what each owns, which field group of `seal.json` each may change, and how slices may depend on each other. Read it before adding or moving a module. In short:
 
-| Bounded Context / Slice | Owns | Current Home |
-| --- | --- | --- |
-| Roles & Budget | Roles, permissions/copy per role, window phases, footer & prompt notices | `budget.ts`, role definitions in `model.ts` |
-| Target & Seal | Target resolution, diff/snapshot/region capture, drift checks | `target.ts`, `seal.ts`, `diff.ts`, `content.ts`, `exclusions.ts`, `coverage.ts` |
-| Ledger & Findings | Candidate filing, verification verdicts, dossier mutations & read/ledger tools | `ledger.ts`, `ledger-tools.ts`, `read-tools.ts` |
-| Report (Directive) | Protocol gates, verdict calculation, Directive markdown rendering | `report.ts`, `inspect.ts` |
-| Ship Loop | Bounded ship state machine, next-step policy, persisted ship runner | `ship-step.ts`, `ship.ts` |
-| Settings & Configure | `directorate.json` merge/validation, `/directorate-configure`, GUI/RPC flow | `settings.ts`, `configure.ts`, `configure-flow.ts`, `configure-client.ts`, `gui.ts` |
-| Export & Archive | Retention listing and unredacted ZIP archive creation | `export.ts`, `archive.ts` |
-| Host & Infrastructure Seams | `Store`, `Sessions`, `Git`, `Worktree`, `Host`, `StateRoot`, `ProcessIdentity`, `DefineTool` | `store.ts`, `session.ts`, `git.ts`, `worktree.ts`, `host.ts`, `tool.ts`, `state-root.ts`, `process-identity.ts` |
-
-- **Vertical slices**: each slice owns its schema classes, pure logic, `Context.Service` + `Layer`, tool handlers, prompt text, and errors. Start as one file (`src/budget.ts`); promote to a directory when it needs multiple files, with one public entry module named after the slice:
+- **Vertical slices**: each slice is a directory that owns its schema classes, pure logic, `Context.Service` + `Layer`, tool handlers, prompt text, and errors. Features live under `src/feature/`, workflows under `src/workflow/`; `seal/`, `records/`, and `platform/` sit beside them.
+- **Two public surfaces**: a slice's _primitive modules_ (schemas, tagged errors, pure functions, copy, defaults; they import only `effect` and other primitive modules) may be imported by anyone. Its _entry_ (`<slice>/<slice>.ts`: service, Layer, `register()`, workflows) is imported only by higher bands and `index.ts`. Every other module is internal to its slice.
   ```text
-  src/budget/
-  ├── budget.ts   # Only module other slices import (selective named exports; no export * / namespace)
-  ├── role.ts     # Internal primitive & factories
-  └── window.ts   # Internal policy
+  src/workflow/review/
+  ├── review.ts    # entry: selective named exports; no export * / namespace
+  ├── window.ts    # primitive: importable by any slice
+  └── watchdog.ts  # internal
   ```
 - **Deep interfaces**: hide multi-step orchestration behind a small set of cohesive exports, while keeping distinct contracts separate (e.g., ticking tool footer vs. cache-stable prompt notice).
-- **Colocate by change, not kind**: never create `types.ts`, `constants.ts`, `utils.ts`, or add new concepts to `model.ts`.
-- **One-way dependencies**: slices may import another slice's public primitives and service contracts, never its internals or cycles. `src/index.ts` is the composition root (Layers, tool/hook registration only). Package entry points (`src/index.ts`, `src/tui.ts`, `src/rpc.ts`) stay at `src/` root.
+- **Colocate by change, not kind**: never create `types.ts`, `constants.ts`, `utils.ts`, or a shared `model.ts`.
+- **One-way dependencies**: imports point down the bands (workflow → feature → seal → records/platform → primitives). Features never import each other's entries; only workflows compose features. When a lower slice needs a higher one, it declares a `Context.Service` port. No module cycles.
+- **One aggregate, one door**: every write to a review goes through `Sessions.mutate`, and each `seal.json` field group is rebuilt only by its owner's transitions.
+- **Composition root**: `src/index.ts` builds Layers and calls each slice's `register()`; it holds no tool bodies, hooks, or policy. Package entry points (`index.ts`, `tui.ts`, `gui.ts`, `rpc.ts`) stay at `src/` root.
 - **Services as capability seams**: use `Context.Service` only for I/O or state (filesystem, sessions, store) with dependencies captured in the `Layer` (`R = never` on methods). Keep pure logic on schema classes or exported functions.
 
 ## Gotchas
 
-- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` (`since` in `model.ts`) or `Schema.decodeTo` (`orLegacyTrue`) plus a legacy-fixture test.
+- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` (`since` in `platform/stored.ts`) or `Schema.decodeTo` (`orLegacyTrue`) plus a legacy-fixture test.
 - **Tool input vs. domain vs. storage**: share field schemas, not whole codecs. Tool inputs passed to `DefineTool` are decoded by the host (do not re-decode) and must use `Schema.optionalKey` — `Schema.optional` emits `anyOf: [..., null]` in JSON Schema.
 - **Decoding functions**: use `Schema.decodeUnknownEffect` for `unknown`, `Schema.decodeUnknownOption` for best-effort hook metadata, and `Schema.decodeEffect` when input already matches `Encoded` (e.g., JSON strings into `Schema.fromJsonString`).
 - **`schema.make` vs. `Schema.make`**: call `MyClass.make(...)` / `new MyClass(...)` or `.makeEffect(...)` (which fails with `SchemaIssue.Issue` — map it to a domain error). Module-level `Schema.make` builds a schema from an AST, not a value. `.make` drops unknown keys by default.
@@ -231,8 +223,8 @@ Model the domain from `../README.md` and `../THEME.md` with one clear owner per 
 
 ## Migrating
 
-- New concepts belong in their owning slice, never in `model.ts`.
-- Move code out of `model.ts` or into `src/<slice>/` in its own change — do not mix structural moves with behavior changes.
+- New concepts belong in their owning slice.
+- Move code between modules in its own change — do not mix structural moves with behavior changes.
 - Bring code you touch closer to these rules without pulling unrelated files into scope.
 
 ## Verification
