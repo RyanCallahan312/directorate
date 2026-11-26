@@ -27,7 +27,12 @@ import { TestClock } from "effect/testing";
 import { isSecret } from "../src/exclusions.ts";
 import { agentOf, budgetLine } from "../src/feature/agents/agent.ts";
 import type { Actor } from "../src/feature/agents/agent.ts";
-import { childFailures } from "../src/feature/dispatch/lifecycle.ts";
+import {
+  Completed,
+  Failed,
+  failedDispatches,
+  Running,
+} from "../src/feature/dispatch/lifecycle.ts";
 import {
   currentSeverity,
   decide,
@@ -571,20 +576,20 @@ const T0 = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 test("only a subsequent successful retry clears a failed question", async () => {
   const seal = await local(repo());
 
-  const first = {
+  const fields = {
     agent: scout.agent,
     call: "first",
     prompt: "question: same",
     startedAt: T0,
-    status: "completed",
   } as const;
 
-  const failed = {
-    ...first,
+  const first = new Completed(fields);
+
+  const failed = new Failed({
+    ...fields,
     call: "failed",
     prompt: "question: same\ncheck the guard",
-    status: "failed",
-  } as const;
+  });
 
   const reviewed = Seal.make({
     ...seal,
@@ -592,7 +597,7 @@ test("only a subsequent successful retry clears a failed question", async () => 
     regions: [],
   });
 
-  assert.deepEqual(childFailures(reviewed, { entries: [], notes: [] }), [
+  assert.deepEqual(failedDispatches(reviewed, { entries: [], notes: [] }), [
     failed,
   ]);
   assert.equal(
@@ -603,7 +608,10 @@ test("only a subsequent successful retry clears a failed question", async () => 
     assess(
       Seal.make({
         ...reviewed,
-        children: [...reviewed.children, { ...first, call: "retry" }],
+        children: [
+          ...reviewed.children,
+          new Completed({ ...fields, call: "retry" }),
+        ],
       }),
       { entries: [], notes: [] },
       {},
@@ -616,13 +624,12 @@ test("only a subsequent successful retry clears a failed question", async () => 
 test("the Liaison's answer settles a twice-failed Auditor question", async () => {
   const seal = await local(repo());
 
-  const failed = {
+  const failed = new Failed({
     agent: scout.agent,
     call: "failed",
     prompt: "seal: x\nquestion: same\ncheck the guard",
     startedAt: T0,
-    status: "failed",
-  } as const;
+  });
 
   const reviewed = Seal.make({ ...seal, children: [failed], regions: [] });
 
@@ -631,7 +638,7 @@ test("the Liaison's answer settles a twice-failed Auditor question", async () =>
     notes: [{ at: T0, by: lead, kind: "answered" as const, text }],
   });
 
-  assert.deepEqual(childFailures(reviewed, answered("other")), [failed]);
+  assert.deepEqual(failedDispatches(reviewed, answered("other")), [failed]);
 
   const a = assess(reviewed, answered("question: same"), {}, "normal");
   assert.equal(a.status, "complete");
@@ -655,26 +662,24 @@ test("re-check: carries an Auditor question the earlier review never answered", 
     call: "a1",
     prompt: "seal: x\nquestion: is div ever called with 0?",
     startedAt: T0,
-    status: "failed",
   } as const;
 
   const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
     children: [
-      run1,
-      { ...run1, call: "a2" },
-      {
+      new Failed(run1),
+      new Failed({ ...run1, call: "a2" }),
+      new Running({
         ...run1,
         call: "s1",
         prompt: "seal: x\nquestion: still running",
-        status: "running",
-      },
-      {
+      }),
+      new Failed({
         ...run1,
         agent: "directorate_compliance",
         call: "c1",
         prompt: "seal: x\nentries: [F9]",
-      },
+      }),
     ],
     reportedAt: T0,
   });
@@ -740,21 +745,24 @@ const entry = (id: string, o: Partial<Entry> = {}): Entry => ({
 test("a failed Compliance batch is answered once narrowed retries decide every entry on it", async () => {
   const seal = await local(repo());
 
-  const batch = (call: string, ids: string, status: "completed" | "failed") =>
-    ({
+  const batch = (
+    call: string,
+    ids: string,
+    ending: typeof Completed | typeof Failed
+  ) =>
+    new ending({
       agent: "directorate_compliance",
       call,
       prompt: `seal: ${seal.id}\nentries: [${ids}]`,
       startedAt: T0,
-      status,
-    }) as const;
+    });
 
   const reviewed = Seal.make({
     ...seal,
     children: [
-      batch("batch", "F1, F2", "failed"),
-      batch("first", "F1", "completed"),
-      batch("second", "F2", "completed"),
+      batch("batch", "F1, F2", Failed),
+      batch("first", "F1", Completed),
+      batch("second", "F2", Completed),
     ],
     regions: [],
   });
@@ -762,7 +770,7 @@ test("a failed Compliance batch is answered once narrowed retries decide every e
   const confirmed = { status: "confirmed" } as const;
 
   assert.deepEqual(
-    childFailures(reviewed, {
+    failedDispatches(reviewed, {
       entries: [entry("F1", confirmed), entry("F2")],
       notes: [],
     }),

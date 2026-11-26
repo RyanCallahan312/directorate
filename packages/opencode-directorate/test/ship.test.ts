@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { DateTime } from "effect";
 
 import { Seat } from "../src/feature/agents/agent.ts";
+import { Completed } from "../src/feature/dispatch/lifecycle.ts";
 import type { Entry } from "../src/feature/ledger/entry.ts";
 import { Seal } from "../src/seal/record.ts";
 import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
@@ -279,15 +280,14 @@ test("missing panel Seats require a new panel review even with drift or confirme
   const completed = Seal.make({
     ...panelSeal,
     children: [
-      {
+      new Completed({
         agent: Seat.id,
         call: "call",
         model,
         prompt: "Review",
         session: "ses_seat",
         startedAt: at,
-        status: "completed",
-      },
+      }),
     ],
     directive: seal.directive,
     regions: seal.regions.map((r) =>

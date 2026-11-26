@@ -46,6 +46,7 @@ import { Yaml, Zip } from "effect/encoding";
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
+import { Completed, statusOf } from "../src/feature/dispatch/lifecycle.ts";
 import { LENSES } from "../src/feature/ledger/entry.ts";
 import { Worktree } from "../src/platform/worktree.ts";
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/records/export.ts";
@@ -1677,7 +1678,6 @@ test("directorate_export archives every generation and available session trace f
     call: "call-1",
     prompt: "private prompt",
     startedAt: s.createdAt,
-    status: "completed",
   } as const;
 
   writeFileSync(
@@ -1686,9 +1686,9 @@ test("directorate_export archives every generation and available session trace f
       Seal.make({
         ...s,
         children: [
-          { ...run, session: child },
-          { ...run, call: "call-2", session: child },
-          { ...run, call: "call-3", session: absent },
+          new Completed({ ...run, session: child }),
+          new Completed({ ...run, call: "call-2", session: child }),
+          new Completed({ ...run, call: "call-3", session: absent }),
         ],
         reportedAt: s.createdAt,
       })
@@ -3776,7 +3776,7 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
 
   assert.deepEqual(
     [
-      present(sealJson(seal).children[0]).status,
+      statusOf(present(sealJson(seal).children[0])),
       present(sealJson(seal).children[0]).session,
     ],
     ["running", S("child1")],
@@ -5139,7 +5139,7 @@ test("child events: early completion is reconciled; failure overrides idle", asy
 
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin1();
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
 
   const fin2 = await launch(
     "c2",
@@ -5155,7 +5155,7 @@ test("child events: early completion is reconciled; failure overrides idle", asy
     type: "session.execution.failed",
   });
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
-  assert.equal(present(sealJson(seal).children[1]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "failed");
   const contentResult29 = await call("directorate_report", { seal });
   assert.match(
     contentResult29.content,
@@ -5369,7 +5369,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   );
 
   const runs = () =>
-    sealJson(seal).children.map((k) => [k.call, k.session, k.status]);
+    sealJson(seal).children.map((k) => [k.call, k.session, statusOf(k)]);
 
   await launch(
     "c1",
@@ -5541,12 +5541,12 @@ test("a queued terminal event from a background run cannot finish an undelivered
 
   await next.enqueue();
   await bus.emit({ ...oldEvent, type: "session.execution.succeeded" });
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
   await next.returned();
-  assert.equal(present(sealJson(seal).children[1]).status, "running");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "running");
   await next.deliver();
   await bus.emit({ data: { sessionID }, type: "session.execution.succeeded" });
-  assert.equal(present(sealJson(seal).children[1]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "completed");
 });
 
 test("directorate_wait: a budget that locks while it waits says to report, not to wait again", async () => {
@@ -5763,7 +5763,7 @@ test("child events: a failure reported by the subagent tool beats an earlier idl
 
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin();
-  assert.equal(present(sealJson(seal).children[0]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "failed");
 });
 
 test("parallel launches with the same description link even when the second launch creates and returns first", async () => {
@@ -5826,7 +5826,7 @@ test("parallel launches with the same description link even when the second laun
   await returned("c2", "b");
   await create("a", titleA);
   assert.deepEqual(
-    sealJson(seal).children.map((c) => [c.call, c.session, c.status]),
+    sealJson(seal).children.map((c) => [c.call, c.session, statusOf(c)]),
     [
       ["c1", S("a"), "running"],
       ["c2", S("b"), "running"],
@@ -5836,10 +5836,10 @@ test("parallel launches with the same description link even when the second laun
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await returned("c1", "a");
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
-  assert.deepEqual(
-    sealJson(seal).children.map((c) => c.status),
-    ["completed", "completed"]
-  );
+  assert.deepEqual(sealJson(seal).children.map(statusOf), [
+    "completed",
+    "completed",
+  ]);
 });
 
 test("after a plugin reload, a child's events reach its review through the parent session's record", async () => {
@@ -5859,7 +5859,7 @@ test("after a plugin reload, a child's events reach its review through the paren
     data: { error: { message: "execution failed" }, sessionID: h2.S("a") },
     type: "session.execution.failed",
   });
-  assert.equal(present(sealJson(seal).children[0]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "failed");
 });
 
 test("a child still reports completion after a Liaison takeover and plugin reload", async () => {
@@ -5888,7 +5888,7 @@ test("a child still reports completion after a Liaison takeover and plugin reloa
     "next"
   );
   assert.equal(entries.get(first.S("lead"))?.has("directorate-seal"), false);
-  assert.equal(present(sealJson(seal).children[0]).status, "running");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "running");
   await Effect.runPromise(Scope.close(first.scope, Exit.void));
 
   const reloaded = await harness(dir, "takeover");
@@ -5896,7 +5896,7 @@ test("a child still reports completion after a Liaison takeover and plugin reloa
     data: { sessionID: first.S("a") },
     type: "session.execution.succeeded",
   });
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
 });
 
 test("a launch the Directive was filed before it linked is stopped when its child appears", async () => {
@@ -6023,7 +6023,7 @@ test("a subagent launch rejected before it runs (a drain denial) leaves no faile
     sessionID: S("lead"),
     tool: "subagent",
   });
-  assert.equal(present(sealJson(seal).children[0]).status, "launching");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "launching");
   await present(hooks["tool.execute.after"])({
     error: { message: "Subagent denied: directorate_auditor" },
     id: "denied",
@@ -7003,9 +7003,13 @@ test(
       await start("working");
       await start("finishes-on-wait");
 
-      const status = (child: string) =>
-        sealJson(seal).children.find((run) => run.session === h.S(child))
-          ?.status;
+      const status = (child: string) => {
+        const found = sealJson(seal).children.find(
+          (run) => run.session === h.S(child)
+        );
+
+        return found && statusOf(found);
+      };
 
       assert.equal(status("finished"), "running");
 
@@ -7066,7 +7070,7 @@ test(
       const reloaded = await load(dir, "review-child-follow-up");
       await sweep();
       assert.notEqual(
-        run().status,
+        statusOf(run()),
         "completed",
         "the earlier success does not settle queued input"
       );
@@ -7077,7 +7081,7 @@ test(
       reloaded.projectOutcome("failed", "child");
       await sweep();
       assert.equal(run().followUp?.delivered, true);
-      assert.equal(run().status, "completed");
+      assert.equal(statusOf(run()), "completed");
     })
 );
 

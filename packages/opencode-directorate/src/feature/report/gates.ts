@@ -4,7 +4,7 @@ import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import type { Phase } from "../../workflow/review/window.ts";
 import {
-  childOutstanding,
+  outstandingDispatches,
   missingSeats,
   seatName,
 } from "../dispatch/lifecycle.ts";
@@ -53,7 +53,7 @@ export const seatsGate = (seal: Seal, phase: Phase) => {
 
 /** Active Personnel: no Auditor, Seat, or Compliance run is still going. */
 export const personnelGate = (seal: Seal) => {
-  const running = childOutstanding(seal);
+  const running = outstandingDispatches(seal);
 
   return hold(
     "children",

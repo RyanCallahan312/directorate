@@ -14,7 +14,7 @@ import {
   PANEL_BUDGET_FACTOR,
 } from "../../workflow/review/window.ts";
 import { DEFAULT_PANEL, seatRef } from "../dispatch/seat.ts";
-import type { Seat } from "../dispatch/seat.ts";
+import type { SeatSpec } from "../dispatch/seat.ts";
 import { LENSES } from "../ledger/entry.ts";
 import { normalizeSettings, sameSettings } from "./file.ts";
 import type { Settings, SettingsScope } from "./file.ts";
@@ -222,7 +222,7 @@ const addSeat = Effect.fnUntraced(function* addSeat(ctx: FlowContext) {
 
 const editSeatAt = Effect.fnUntraced(function* editSeatAt(
   ctx: FlowContext,
-  seats: readonly Seat[],
+  seats: readonly SeatSpec[],
   index: number
 ) {
   const seat = seats[index];

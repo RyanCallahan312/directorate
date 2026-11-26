@@ -26,8 +26,8 @@ import {
 import { Auditor, Compliance, Liaison, Seat } from "../agents/agent.ts";
 import {
   actorName,
-  childFailures,
-  childQuestion,
+  failedDispatches,
+  dispatchQuestion,
   questionText,
 } from "../dispatch/lifecycle.ts";
 import {
@@ -454,9 +454,9 @@ export const ledgerTools = (
 
               text = questionText(input.text);
 
-              const failed = childFailures(seal, ledger)
+              const failed = failedDispatches(seal, ledger)
                 .filter((x) => x.agent === Auditor.id)
-                .map(childQuestion);
+                .map(dispatchQuestion);
 
               if (!failed.includes(text)) {
                 return yield* new NoteRefused({

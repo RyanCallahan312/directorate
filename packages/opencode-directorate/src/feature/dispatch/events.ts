@@ -12,12 +12,16 @@ import { HostEvent, Sessions } from "../../seal/seal.ts";
 import { halted } from "../../workflow/review/custody.ts";
 import { childNamed } from "../agents/agent.ts";
 import {
-  childOutstanding,
   claimed,
+  Completed,
+  DispatchSchema,
   enqueued,
+  Failed,
   finished,
   followUpPrompt,
+  followUpRecovered,
   inboxSettled,
+  outstandingDispatches,
   perSession,
   update,
 } from "./lifecycle.ts";
@@ -32,7 +36,7 @@ export const recoverFollowUps = (
     if (
       child.session !== session ||
       !child.followUp ||
-      (child.status !== "running" && child.status !== "launching")
+      !DispatchSchema.isAnyOf(["Launching", "Running"])(child)
     ) {
       return child;
     }
@@ -62,18 +66,14 @@ export const recoverFollowUps = (
       return child;
     }
 
-    const result = {
-      ...child,
-      followUp: { delivered: true, inbox: delivered.id },
-    };
-
-    return turn
-      ? {
-          ...result,
-          endedAt: turn.time.created,
-          status: turn.outcome === "succeeded" ? "completed" : "failed",
-        }
-      : { ...result, status: "running" };
+    return followUpRecovered(
+      child,
+      delivered.id,
+      turn && {
+        endedAt: turn.time.created,
+        ending: turn.outcome === "succeeded" ? Completed : Failed,
+      }
+    );
   });
 
 /** Events missed across a reload leave a finished run recorded as running: settle it from the host's own record. */
@@ -81,7 +81,7 @@ export const settleChildren = Effect.fn("Directorate.settleChildren")(
   function* settleChildren(seal: Seal) {
     const host = yield* Host;
     const sessions = yield* Sessions;
-    const outstanding = childOutstanding(seal);
+    const outstanding = outstandingDispatches(seal);
 
     for (const { session } of perSession(outstanding)) {
       const info = session ? yield* sessions.info(session) : undefined;
@@ -122,7 +122,7 @@ export const settleChildren = Effect.fn("Directorate.settleChildren")(
             finished(
               followed ?? s,
               session,
-              completed ? "completed" : "failed",
+              completed ? Completed : Failed,
               endedAt,
               "initial"
             ) ?? followed,
@@ -300,7 +300,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
         const next = finished(
           s,
           sessionID,
-          /failed|interrupted/u.test(event.type) ? "failed" : "completed",
+          /failed|interrupted/u.test(event.type) ? Failed : Completed,
           at,
           event.type !== "session.idle"
         );

@@ -21,7 +21,7 @@ import {
   Liaison,
 } from "../feature/agents/agent.ts";
 import type { Actor } from "../feature/agents/agent.ts";
-import { childOutstanding } from "../feature/dispatch/lifecycle.ts";
+import { outstandingDispatches } from "../feature/dispatch/lifecycle.ts";
 import type { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
 import { Host, ToolCatalog } from "../platform/platform.ts";
@@ -507,7 +507,7 @@ const make = Effect.gen(function* make() {
     /** Ends every session's work on a reported seal: running children stop, and its bindings and record go. */
     close: Effect.fn("Sessions.close")(function* close(seal: Seal) {
       yield* Effect.forEach(
-        childOutstanding(seal).flatMap((ch) =>
+        outstandingDispatches(seal).flatMap((ch) =>
           ch.session ? [ch.session] : []
         ),
         interrupt,

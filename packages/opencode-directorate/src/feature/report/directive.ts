@@ -9,8 +9,8 @@ import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import type { Phase } from "../../workflow/review/window.ts";
 import {
-  childFailures,
-  childOutstanding,
+  failedDispatches,
+  outstandingDispatches,
   missingSeats,
 } from "../dispatch/lifecycle.ts";
 import { unresolved } from "../ledger/decide.ts";
@@ -150,8 +150,8 @@ export const assess = (
 
   if (
     ledger.notes.some((n) => n.kind === "unanswered") ||
-    childFailures(seal, ledger).length ||
-    childOutstanding(seal).length
+    failedDispatches(seal, ledger).length ||
+    outstandingDispatches(seal).length
   ) {
     partial("some questions went unanswered");
   }

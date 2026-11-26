@@ -6,18 +6,22 @@ import { ignore } from "../../platform/error.ts";
 import { adapter, Host } from "../../platform/platform.ts";
 import { Store } from "../../records/records.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
-import { childNamed, Liaison, Seat } from "../agents/agent.ts";
+import { childNamed, Liaison, Seat as SeatAgent } from "../agents/agent.ts";
 import {
+  Completed,
+  DispatchSchema,
+  Failed,
   followUpPrompt,
   launchTitle,
   launched,
+  Launching,
   openSeat,
   resumed,
   returned,
+  Running,
   seatName,
   withdrawn,
 } from "./lifecycle.ts";
-import type { Child } from "./lifecycle.ts";
 
 /** An Auditor, Seat, or Compliance launch, as the subagent tool's input; with a sessionID it continues an existing child. */
 const decodeAssignment = Schema.decodeUnknownOption(
@@ -37,6 +41,30 @@ const decodeChildMeta = Schema.decodeUnknownOption(
     status: Schema.optional(Schema.String),
   })
 );
+
+/** How the subagent tool says its child ended: an error, then a completion, then a failure; otherwise it still runs. */
+const subagentOutcome = (
+  errored: boolean,
+  reported: string | undefined,
+  text: string
+) => {
+  if (errored) {
+    return Failed;
+  }
+
+  if (reported === "completed" || /state=\\?"completed/u.test(text)) {
+    return Completed;
+  }
+
+  if (
+    /state=\\?"(?:failed|error|interrupted)/u.test(text) ||
+    reported === "failed"
+  ) {
+    return Failed;
+  }
+
+  return Running;
+};
 
 export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
   const host = yield* Host;
@@ -90,7 +118,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
       const startedAt = yield* DateTime.now;
       // Assign seats under the seal lock so parallel launches take different models.
-      let launch: Child | undefined;
+      let launch: Launching | undefined;
       yield* sessions
         .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           // A follow-up continues a child session: a new run of it, keeping the seat it was launched for.
@@ -99,7 +127,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             : undefined;
 
           if (assignment.sessionID) {
-            launch = {
+            launch = new Launching({
               agent: assignment.agent,
               call: ev.id,
               description: assignment.description ?? prior?.description,
@@ -108,8 +136,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
               prompt: assignment.prompt ?? "",
               session: assignment.sessionID,
               startedAt,
-              status: "launching",
-            };
+            });
 
             return Effect.succeed({
               out: undefined,
@@ -118,11 +145,11 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
           }
 
           const model =
-            assignment.agent === Seat.id && !assignment.model
+            assignment.agent === SeatAgent.id && !assignment.model
               ? openSeat(s)
               : undefined;
 
-          launch = {
+          launch = new Launching({
             agent: assignment.agent,
             call: ev.id,
             description: model
@@ -131,8 +158,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             model: model ?? assignment.model,
             prompt: assignment.prompt ?? "",
             startedAt,
-            status: "launching",
-          };
+          });
 
           return Effect.succeed({ out: undefined, seal: launched(s, launch) });
         })
@@ -176,7 +202,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
       const launch = reported?.reportedAt
         ? reported.children.find(
-            (x) => x.call === call && x.status === "launching"
+            (x) => x.call === call && DispatchSchema.isAnyOf(["Launching"])(x)
           )
         : undefined;
 
@@ -214,21 +240,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
       const text = JSON.stringify(result?.content ?? "");
 
-      let outcome: Child["status"] = "running";
-
-      if (ev.status === "error") {
-        outcome = "failed";
-      } else if (
-        meta.status === "completed" ||
-        /state=\\?"completed/u.test(text)
-      ) {
-        outcome = "completed";
-      } else if (
-        /state=\\?"(?:failed|error|interrupted)/u.test(text) ||
-        meta.status === "failed"
-      ) {
-        outcome = "failed";
-      }
+      const outcome = subagentOutcome(ev.status === "error", meta.status, text);
 
       const endedAt = yield* DateTime.now;
       let child: string | undefined;
@@ -243,7 +255,10 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
 
           // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
           // registered, so there is no child, and no failure to report.
-          if (ev.status === "error" && launch.status === "launching") {
+          if (
+            ev.status === "error" &&
+            DispatchSchema.isAnyOf(["Launching"])(launch)
+          ) {
             return Effect.succeed({
               out: undefined,
               seal: withdrawn(s, launch),

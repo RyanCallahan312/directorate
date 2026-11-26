@@ -277,7 +277,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
     ...StoredWindow.fields, // workflow/review
     ...Custody.fields, // workflow/review
     ...Protocol.fields, // feature/report
-    children: since(Schema.Array(StoredDispatch), []), // feature/dispatch
+    children: since(Schema.Array(DispatchFromStored), []), // feature/dispatch
     ship: Schema.optional(Schema.String), // workflow/ship
   }).check(windowCheck) // spreading .fields drops owner checks; the root re-applies them
 ) {
@@ -287,7 +287,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
   withWindow(window) {} // workflow/review
   withCustody(custody) {} // workflow/review
   withProtocol(protocol) {} // feature/report
-  withChildren(children) {} // feature/dispatch
+  withDispatches(children) {} // feature/dispatch
   withShip(ship) {} // stamped by workflow/review
 }
 ```
@@ -362,7 +362,7 @@ The mechanics are in [`src/AGENTS.md`](src/AGENTS.md). The architectural choices
 
 - **Value objects** are immutable, compared by value, and rebuilt on change: `Agent`, `Window`, `Target`, `Seat`, `Verdict`, `Note`. Use branded `Schema.Class`.
 - **Entities** have identity and a lifecycle: `Seal`, `Region`, `Dispatch`, `Entry`, ship state. Model lifecycles as branded `Schema.TaggedClass` unions where each state carries only its fields, with invalid transitions as tagged errors.
-- **Stored unions keep stored shapes.** `Dispatch` and ship state are stored with a `status` field, not `_tag`. Their unions decode from and encode to the stored shape with `Schema.decodeTo`.
+- **Stored unions keep stored shapes.** `Dispatch` and ship state are stored with a `status` field, not `_tag`. Their unions decode from and encode to the stored shape with `Schema.decodeTo` (`DispatchFromStored`: the `StoredDispatch` struct to the `Dispatch` union).
 - **Specifications** are named pure predicates on primitives: the protocol gates, decision authority, and access policy. Test them without services.
 - **Application services stay inside the aggregate.** Refresh reopens ledger entries, carries coverage marks, and clears drift in one transition under one lock. It does not publish events to do it.
 - **Events cross aggregates.** Ship reacts to the review's filed Directive; it never reaches into the seal's lock.

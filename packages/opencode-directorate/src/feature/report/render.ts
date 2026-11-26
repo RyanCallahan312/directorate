@@ -4,10 +4,11 @@ import type { Seal } from "../../seal/record.ts";
 import type { Region } from "../../seal/region.ts";
 import {
   actorName,
-  childFailures,
-  childName,
-  childOutstanding,
-  childQuestion,
+  failedDispatches,
+  dispatchName,
+  outstandingDispatches,
+  dispatchQuestion,
+  DispatchSchema,
   missingSeats,
   panelSeats,
   seatName,
@@ -137,10 +138,13 @@ const outsideContainment = (
   // A failed Seat is reported once, as its seat.
   const seatless = missingSeats(seal);
 
-  for (const c of [...childOutstanding(seal), ...childFailures(seal, ledger)]) {
+  for (const c of [
+    ...outstandingDispatches(seal),
+    ...failedDispatches(seal, ledger),
+  ]) {
     if (!(c.model && seatless.some((s) => s.model === c.model))) {
       nr.push(
-        `- ${childName(c)} did not ${c.status === "failed" ? "complete" : "finish"}: ${childQuestion(c)}`
+        `- ${dispatchName(c)} did not ${DispatchSchema.isAnyOf(["Failed"])(c) ? "complete" : "finish"}: ${dispatchQuestion(c)}`
       );
     }
   }

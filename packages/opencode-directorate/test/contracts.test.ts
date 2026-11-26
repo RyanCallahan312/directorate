@@ -46,7 +46,12 @@ const shipRoundTrip = (text: string) =>
 const contracts = [
   {
     current: ["seal.json"],
-    legacy: ["seal.oldest.json", "seal.legacy-gates.json"],
+    legacy: [
+      "seal.oldest.json",
+      "seal.legacy-gates.json",
+      "seal.dispatch-bare.json",
+      "seal.dispatch-full.json",
+    ],
     name: "seal.json",
     roundTrip: sealRoundTrip,
     stored: SealJson.to.ast,

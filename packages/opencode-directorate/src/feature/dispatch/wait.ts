@@ -9,8 +9,13 @@ import { Store } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, Sessions, ToolCall } from "../../seal/seal.ts";
 import { budget } from "../../workflow/review/window.ts";
-import { childName, childOutstanding, perSession } from "./lifecycle.ts";
-import type { Child } from "./lifecycle.ts";
+import {
+  dispatchName,
+  outstandingDispatches,
+  perSession,
+  statusOf,
+} from "./lifecycle.ts";
+import type { Dispatch } from "./lifecycle.ts";
 
 export const waitTool = (
   tool: DefineTool<Sessions | Store | FileSystem.FileSystem | Path.Path>
@@ -33,7 +38,7 @@ export const waitTool = (
       );
 
       const { phase } = yield* budget(start.window);
-      const waiting = childOutstanding(start);
+      const waiting = outstandingDispatches(start);
 
       if (!waiting.length) {
         return yield* done(
@@ -50,7 +55,7 @@ export const waitTool = (
       }
 
       const ended = (seal: Seal) => {
-        const still = new Set(childOutstanding(seal).map((x) => x.call));
+        const still = new Set(outstandingDispatches(seal).map((x) => x.call));
 
         return seal.children.filter(
           (x) => waiting.some((w) => w.call === x.call) && !still.has(x.call)
@@ -82,7 +87,7 @@ export const waitTool = (
       const ledger = yield* store.loadLedger(seal.id);
 
       /** What this run recorded: a follow-up reports its own round, not the session's earlier ones. */
-      const recorded = (x: Child) => {
+      const recorded = (x: Dispatch) => {
         const since = (at: DateTime.Utc) =>
           DateTime.toEpochMillis(at) >= DateTime.toEpochMillis(x.startedAt);
 
@@ -108,11 +113,11 @@ export const waitTool = (
         );
       };
 
-      const still = perSession(childOutstanding(seal));
+      const still = perSession(outstandingDispatches(seal));
 
       const lines = perSession(ended(seal)).map(
         (x) =>
-          `- ${childName(x)} ${x.status}${x.session ? ` (${x.session})` : ""}: ${recorded(x)}`
+          `- ${dispatchName(x)} ${statusOf(x)}${x.session ? ` (${x.session})` : ""}: ${recorded(x)}`
       );
 
       if (phaseNow === "locked") {
@@ -128,7 +133,7 @@ export const waitTool = (
 
         lines.push(
           still.length
-            ? `Still running (${still.length}): ${still.map((x) => `${childName(x)}${x.session ? ` (${x.session})` : ""}`).join(", ")}. Decide or route what finished, then call directorate_wait again; do not end your turn while any run.`
+            ? `Still running (${still.length}): ${still.map((x) => `${dispatchName(x)}${x.session ? ` (${x.session})` : ""}`).join(", ")}. Decide or route what finished, then call directorate_wait again; do not end your turn while any run.`
             : "Nothing else is running. Decide or route the new entries, then call directorate_report."
         );
       }

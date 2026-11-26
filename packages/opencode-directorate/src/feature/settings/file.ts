@@ -8,7 +8,7 @@ import {
   ReviewScopeSchema,
 } from "../../workflow/review/request.ts";
 import type { Mode } from "../../workflow/review/request.ts";
-import { DEFAULT_PANEL, SeatSchema, seatRef } from "../dispatch/seat.ts";
+import { DEFAULT_PANEL, SeatSpecSchema, seatRef } from "../dispatch/seat.ts";
 import { Lens } from "../ledger/entry.ts";
 
 /** Which directorate.json: global (in OpenCode's global config directory, ~/.config/opencode) or the project's (<repo>/.opencode). */
@@ -60,7 +60,7 @@ export const SettingsSchema = Schema.Struct({
         })
       ),
       models: Schema.optionalKey(
-        Schema.Array(SeatSchema)
+        Schema.Array(SeatSpecSchema)
           .check(Schema.isMinLength(1))
           .annotate({ description: "The panel's seats, in order." })
       ),

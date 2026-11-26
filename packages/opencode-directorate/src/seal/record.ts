@@ -4,8 +4,8 @@
 // module, which imports theirs).
 import { Schema } from "effect";
 
-import { ChildSchema } from "../feature/dispatch/lifecycle.ts";
-import type { Child } from "../feature/dispatch/lifecycle.ts";
+import { DispatchFromStored } from "../feature/dispatch/lifecycle.ts";
+import type { Dispatch } from "../feature/dispatch/lifecycle.ts";
 import { Protocol } from "../feature/report/directive.ts";
 import { Count, since, sortedFields } from "../platform/stored.ts";
 import { Custody } from "../workflow/review/custody.ts";
@@ -35,7 +35,7 @@ export const Containment = Schema.Struct({
   /** Lenses the settings turned off for this review. */
   lensesOff: opt(list(Schema.String)),
   mode: ModeSchema,
-  /** A panel review's Directorate Seats: one model per SeatSchema. */
+  /** A panel review's Directorate Seats: one model per seat. */
   panel: opt(list(Schema.String)),
   postImage: Schema.Literals(["worktree", "commit"]),
   question: opt(Schema.String),
@@ -61,7 +61,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
       ...StoredWindow.fields,
       ...Custody.fields,
       ...Protocol.fields,
-      children: since(list(ChildSchema), []),
+      children: since(list(DispatchFromStored), []),
       /** The ship whose loop this review belongs to. Only that ship continues it, even after the ship is stopped. */
       ship: opt(Schema.String),
     })
@@ -128,8 +128,8 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
     return new Seal({ ...this, ...protocol });
   }
 
-  /** The Dispatches group: feature/dispatch's transitions. */
-  withChildren(children: readonly Child[]) {
+  /** The Dispatches group (stored as children): feature/dispatch's transitions. */
+  withDispatches(children: readonly Dispatch[]) {
     return new Seal({ ...this, children });
   }
 
