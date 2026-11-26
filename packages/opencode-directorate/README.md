@@ -207,7 +207,7 @@ stateDiagram-v2
 
 ### Auditors, Seats, and Compliance
 
-Each subagent the Liaison dispatches has its own record in the seal (`children.ts`). A follow-up to a finished child (the subagent tool with its `sessionID`) is a new run of that session with its own record, and keeps the Seat it was launched for. Session events change only the latest run, so a failed follow-up never undoes an earlier completed one. A follow-up to a child that is still running joins that run.
+Each subagent the Liaison dispatches has its own record in the seal (`src/feature/dispatch/lifecycle.ts`). A follow-up to a finished child (the subagent tool with its `sessionID`) is a new run of that session with its own record, and keeps the Seat it was launched for. Session events change only the latest run, so a failed follow-up never undoes an earlier completed one. A follow-up to a child that is still running joins that run.
 
 ```mermaid
 stateDiagram-v2
@@ -235,7 +235,7 @@ stateDiagram-v2
 
 ### Panel reviews (Directorate Seats)
 
-Several frontier models each review the whole change; The Directorate merges their work into one verified Directive. Ask for it with `directorate_seal panel: true` (the default seats are listed in `DEFAULT_PANEL` in `model.ts`) or `panel_models: ["provider/model#variant", ...]`. A panel works with any mode, and its default budget is 1.5× the mode's.
+Several frontier models each review the whole change; The Directorate merges their work into one verified Directive. Ask for it with `directorate_seal panel: true` (the default seats are listed in `DEFAULT_PANEL` in `src/feature/dispatch/seat.ts`) or `panel_models: ["provider/model#variant", ...]`. A panel works with any mode, and its default budget is 1.5× the mode's.
 
 A Seat's review is complete only when a finished session for that Seat has read every region in the current seal. A normal handoff with unread regions is reported as partial.
 
@@ -269,7 +269,7 @@ flowchart LR
 
 ### Settings: `/directorate-configure`
 
-`/directorate-configure` works in the TUI and in OpenCode Desktop. Type it in the prompt or composer, or pick **Configure The Directorate** in the command palette. It opens dialogs, not an agent turn, and both apps run the same steps (`configure-flow.ts`):
+`/directorate-configure` works in the TUI and in OpenCode Desktop. Type it in the prompt or composer, or pick **Configure The Directorate** in the command palette. It opens dialogs, not an agent turn, and both apps run the same steps (`src/feature/settings/configure-flow.ts`):
 
 1. **Pick a file:** Global Charter or Local Jurisdiction (this project).
 2. **Change any of:**
@@ -307,7 +307,7 @@ Neither app part reads or writes files. The settings RPC (`rpc.ts`, exported as 
 
 **Desktop builds.** OpenCode Desktop loads a plugin's GUI part as one prebuilt CommonJS file. `gui.ts` is built to `dist/gui-experimental.cjs` (the package's `./gui-experimental` export) with OpenCode's Vite preset (`vite.config.ts`):
 
-- Run `bun run build` from the workspace root after changing `gui.ts`, `configure-flow.ts`, `rpc.ts` or `model.ts`. `dist/` is generated, not checked in.
+- Run `bun run build` from the workspace root after changing `gui.ts` or a module it imports (`src/feature/settings/configure-flow.ts`, `src/feature/settings/rpc.ts`, and the primitives they reach). `dist/` is generated, not checked in.
 - The workspace's `bun run test` builds the bundle first, then loads it the way the app does.
 - The bundle needs only `effect`, `@opencode/plugin/gui` and `@opencode/plugin/rpc`, which the app provides. An agent can also change settings with the `directorate_configure` tool, when you ask it to. Directorate review agents cannot call that tool.
 
@@ -339,7 +339,7 @@ Neither app part reads or writes files. The settings RPC (`rpc.ts`, exported as 
 
 ### Findings
 
-A finding is a dossier (ledger) entry (`ledger.json`, rules in `ledger.ts`). Only **confirmed** entries become findings in the Directive. Open entries, and duplicates of unconfirmed ones, are listed as _Unverified Leads_.
+A finding is a dossier (ledger) entry (`ledger.json`, rules in `src/feature/ledger/decide.ts`). Only **confirmed** entries become findings in the Directive. Open entries, and duplicates of unconfirmed ones, are listed as _Unverified Leads_.
 
 ```mermaid
 stateDiagram-v2
@@ -377,70 +377,69 @@ Who may decide an entry:
 
 ## How the code is laid out
 
-Each layer depends only on the layers below it. Services are Effect `Context.Service`s with a `layer`, built once when the plugin starts: `platform.ts` assembles `Git`, `Worktree`, `Store`, `SettingsStore`, and the Node platform, and `index.ts` adds `Host` (the OpenCode plugin context) and `Sessions`. The package also exports a TUI part (`tui.ts`), a desktop GUI part (`gui.ts`, built to `dist/`), and the RPC definition they share with the server (`rpc.ts`). Both app parts run the same Effect workflow (`configure-flow.ts`). The command adapter (`configure-client.ts`) bridges OpenCode’s Promise-based UI and RPC APIs. OpenCode Desktop ties each run to the plugin’s lifetime.
+The plugin is one Effect program organized as vertical slices: each directory under `src/` owns one part of a review, with its schemas, services, tools, hooks, and prompt text kept together. Services are Effect `Context.Service`s with a `Layer`, built once when the plugin starts. `src/index.ts` builds those layers, runs each slice's registration in order, and connects the slices to each other.
+
+- **Seams.** `platform/` wraps Git, the working tree, the OpenCode host, and the tool adapter. `records/` keeps review records (`Records`): the seal directory, its lock, retention, and export.
+- **The review.** `seal/` is what is under review: capture, the read tools, and `Sessions`, the one door every write to a review goes through.
+- **Features.** Five siblings that never import each other: `agents` (who may do what), `dispatch` (Auditor, Seat, and Compliance runs), `ledger` (the dossier), `report` (protocol gates and the Directive), and `settings` (`directorate.json` and its RPC).
+- **Workflows.** `workflow/review` runs a review from seal to Directive; `workflow/ship` runs the review, fix, and re-check loop on top of it.
+
+Each slice exposes one entry module (`<slice>/<slice>.ts`) and its primitive modules: schemas and rules that import only `effect`. A slice imports only the entries of slices below it, and primitives from anywhere. The TUI part (`src/tui.ts`), the desktop GUI part (`src/gui.ts`, built to `dist/`), and the RPC definition they share with the server (`src/rpc.ts`) import only settings primitives, so the GUI bundle needs nothing but `effect` and OpenCode's plugin packages. Both app parts run the same Effect workflow (`src/feature/settings/configure-flow.ts`); `src/feature/settings/configure-client.ts` bridges it to OpenCode's Promise-based UI and RPC APIs. [ARCHITECTURE.md](ARCHITECTURE.md) has the ownership rules: which slice may change which part of `seal.json`, how slices may depend on each other, and where new code goes.
 
 ```mermaid
 flowchart TB
-    tuiPart(["tui.ts · gui.ts: TUI and Desktop<br/>/directorate-configure dialogs"])
+    apps(["tui.ts · gui.ts: TUI and Desktop<br/>/directorate-configure dialogs"])
     host(["OpenCode host<br/>tools · hooks · events · sessions · RPC"])
+    index["index.ts<br/>layers · registration order · wiring"]
 
-    subgraph workflow["Workflow"]
-        index["index.ts<br/>seal · refresh · protocol gates<br/>budget hooks · watchdog · child events"]
-        ship["ship.ts · ship-step.ts<br/>turn outcome → fix, re-check, pause or finish"]
+    subgraph workflow["Workflows"]
+        ship["workflow/ship<br/>review → fix → re-check loop"]
+        review["workflow/review<br/>seal · refresh · budget · watchdog"]
     end
 
-    subgraph adapters["OpenCode adapters"]
-        tool["tool.ts<br/>permission check · services · errors"]
-        readTools["read-tools.ts<br/>diff · read · ls · grep · history · coverage"]
-        ledgerTools["ledger-tools.ts<br/>add · verdict · list · note"]
-        configure["configure.ts<br/>directorate_configure · settings RPC"]
-        exportTool["export.ts · archive.ts<br/>directorate_export · list · ZIP"]
+    subgraph feature["Features: siblings, no imports between them"]
+        agents["agents<br/>who may do what"]
+        dispatch["dispatch<br/>subagent runs · wait"]
+        ledger["ledger<br/>dossier"]
+        report["report<br/>protocol gates · Directive"]
+        settings["settings<br/>directorate.json · RPC"]
     end
 
-    subgraph domain["Review domain"]
-        seal["seal.ts<br/>capture · create · refresh"]
-        report["report.ts<br/>assess · render · finalize"]
-        inspect["inspect.ts<br/>paged views"]
-        content["content.ts<br/>sealed files · quotes · evidence"]
-        target["target.ts<br/>ends · fingerprints"]
-        diff["diff.ts<br/>raw diff · regions"]
+    seal["seal<br/>capture · read tools · the door"]
+
+    subgraph seams["Seams"]
+        records["records<br/>seal directory · lock · export"]
+        platform["platform<br/>Git · Worktree · Host · tool adapter"]
     end
 
-    subgraph services["Services"]
-        sessions["Sessions<br/>session ↔ seal"]
-        store["Store<br/>seal directory · lock"]
-        worktree["Worktree<br/>live files · signatures"]
-        git["Git<br/>git · gh"]
-        settings["SettingsStore<br/>directorate.json"]
-    end
-
-    subgraph rules["Pure rules: no services"]
-        pure["model · error · exclusions · request<br/>coverage · ledger · children · budget"]
-    end
-
+    prims[("Primitive modules<br/>schemas and rules: effect only")]
     node(["Node platform<br/>FileSystem · Path · Crypto · ChildProcessSpawner"])
 
-    tuiPart -- "rpc.ts" --> host
-    host --> workflow
-    workflow --> adapters
-    workflow & adapters --> domain
-    workflow & adapters --> services
-    domain --> services
-    services --> rules & node
+    apps -- "rpc.ts" --> host
+    host --> index
+    index --> workflow & feature
+    ship --> review
+    workflow --> feature
+    workflow & feature --> seal
+    seal --> records
+    records --> platform
+    platform --> node
+    apps -. "settings only" .-> prims
+    workflow & feature & seal & seams --> prims
 
     classDef hostC fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
     classDef flowC fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
-    classDef adaptC fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef featC fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
     classDef domainC fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a8a
     classDef pureC fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,stroke-dasharray:4 3,color:#0c4a6e
     classDef svcC fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
 
-    class tuiPart,host,node hostC
-    class index,ship flowC
-    class tool,readTools,ledgerTools,configure,exportTool adaptC
-    class seal,report,inspect,content,target,diff domainC
-    class pure pureC
-    class sessions,store,worktree,git,settings svcC
+    class apps,host,index,node hostC
+    class ship,review flowC
+    class agents,dispatch,ledger,report,settings featC
+    class seal domainC
+    class prims pureC
+    class records,platform svcC
 ```
 
 A few rules hold everywhere:
@@ -448,7 +447,7 @@ A few rules hold everywhere:
 - **Immutable state.** Seals and ledgers are read-only Schema types. Every change returns a new value, and only real changes are written.
 - **Schemas at boundaries.** Saved JSON, tool inputs (`RepoPath`, `RepoScope`, `LineRef`), GitHub responses, and git's raw diff (`RawDiff`) are decoded with Effect Schema.
 - **Withheld paths.** Secret-like files (`.env`, keys, credentials) and `.git` are redacted and never shown. Lockfiles and generated files are listed but not diffed.
-- **Installed dependencies.** `directorate_read` also reads gitignored files in dependency directories (such as `node_modules`), and `directorate_ls` lists such a directory one level deep from disk, with each link's resolved target, so agents find store paths (such as Bun's `node_modules/.bun/<name>@<version>+<hash>`) instead of guessing them. Both resolve symlinks first, so Bun and pnpm store links work, and then check the resolved path (`installed` in `content.ts`): it must stay inside the repository, be ignored, and not be secret-like.
+- **Installed dependencies.** `directorate_read` also reads gitignored files in dependency directories (such as `node_modules`), and `directorate_ls` lists such a directory one level deep from disk, with each link's resolved target, so agents find store paths (such as Bun's `node_modules/.bun/<name>@<version>+<hash>`) instead of guessing them. Both resolve symlinks first, so Bun and pnpm store links work, and then check the resolved path (`installed` in `src/seal/content.ts`): it must stay inside the repository, be ignored, and not be secret-like.
 - **Listings match reads.** For local and paths seals, `directorate_ls` lists the base tree plus the changes captured at sealing, the same files `directorate_read` serves, not the live tree. A read outside a scoped worktree seal is labeled as base content; the working-tree version was not captured.
 - **Bounded output.** The reading tools stay under OpenCode's 50 KiB / 2,000-line cut, and long regions continue on the next call.
 

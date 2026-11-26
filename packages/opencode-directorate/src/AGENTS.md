@@ -1,8 +1,6 @@
 # Directorate `src/`: Modeling & Architecture
 
-Rules for everything under `packages/opencode-directorate/src/`. Read the root `AGENTS.md` and the [`effect-ts` skill](../../../.agents/skills/effect-ts/SKILL.md) for general Effect 4 mechanics; this file sets Directorate's domain modeling, slice boundaries, and ownership map.
-
-Some `src/` code predates these rules. See [Migrating](#migrating).
+Rules for everything under `packages/opencode-directorate/src/`. Read the root `AGENTS.md` and the [`effect-ts` skill](../../../.agents/skills/effect-ts/SKILL.md) for general Effect 4 mechanics; this file sets Directorate's domain modeling and the Effect patterns its slices use. [`../ARCHITECTURE.md`](../ARCHITECTURE.md) is the ownership map.
 
 ## 1. Schema First
 
@@ -15,7 +13,7 @@ Every domain concept starts as an Effect Schema: values, identifiers, enums, sta
 - **Anonymous shapes & tool inputs**: `Schema.Struct({ ... })`.
 - **Numbers**: `Schema.Finite` (not `Schema.Number`, which accepts `NaN`/`Infinity`).
 
-Why branding and re-construction matter: nominal brands block plain objects from passing as validated domain instances, and updating via `new Seal({ ...seal, field })` instead of `{ ...seal, field }` guarantees invariants stay true after every change.
+Why branding and re-construction matter: nominal brands block plain objects from passing as validated domain instances, and rebuilding through the class instead of spreading into a plain object (`{ ...x, field }`) keeps invariants true after every change. Small classes rebuild with `new X({ ...x, field })` or a method that does it (`Region.shown`, `Gates.remembering`). Aggregates rebuild only through their class's own methods: a `Seal` changes only through its `with<Group>` methods, called from the owning slice's transitions (see [One aggregate, one door](../ARCHITECTURE.md#one-aggregate-one-door)).
 
 ### Branching & Membership
 
@@ -27,178 +25,222 @@ Why branding and re-construction matter: nominal brands block plain objects from
 A hand-written data type means a schema is missing.
 
 - **Classes** (`Schema.Class`, `Schema.TaggedClass`, `Schema.TaggedError`) are both the schema and the type — no `Schema` suffix and no separate `type` alias.
-- **Non-class schemas** (`Schema.Literals`, `Schema.Union`, `Schema.Struct`) use a `Schema` suffix with a derived alias (`export type Phase = typeof PhaseSchema.Type`), because lint enforces `no-redeclare`.
-- Annotate function parameters with the class or derived type (`Role`, `Window`, `Phase`); let locals, return types, and generators infer. Do not narrow locals with annotations (`const phase: Phase = ...`) or type assertions (`as T`, `!`, `any`). `as const` and `satisfies` are fine, though prefer `PhaseSchema.literals` over separate `as const` arrays.
-- Derive service interfaces from their constructor: `Context.Service<Store, Effect.Success<typeof make>>()`.
-- **Exempt** (non-data): `@opencode/*` host types, host seams with no `make` (`Host`), function types, generic helpers, and value-derived types (`ReturnType`, `Effect.Success`, `Layer.Success`).
+- **Non-class schemas** (`Schema.Literals`, `Schema.Union`, `Schema.Struct`) use a `Schema` suffix with a derived alias (`export type Phase = typeof PhaseSchema.Type`), because lint enforces `no-redeclare`. Omit the alias when nothing would use it.
+- **Stored field groups and stored codecs** are the exception: they are named for the stored shape and take no `Schema` suffix (`Containment`, `Custody`, `StoredWindow`, `Protocol`, `StoredDispatch`, `StoredShipState`).
+- Annotate function parameters with the class or derived type (`Agent`, `Window`, `Phase`); let locals, return types, and generators infer. Do not narrow locals with annotations (`const phase: Phase = ...`) or type assertions (`as T`, `!`, `any`). `as const` and `satisfies` are fine, though prefer `PhaseSchema.literals` over separate `as const` arrays.
+- Derive service interfaces from their constructor: `Context.Service<Records, Effect.Success<typeof make>>()`.
+- **Exempt** (non-data): `@opencode/*` host types, host seams with no `make` (`Host`), function types, function option bags and other anonymous parameter objects (`createSeal`'s `input`), generic helper types (the door's `Revision<A>`), host-dialog ports (`Dialogs`, `Backend` in `feature/settings/configure-flow.ts`), and value-derived types (`ReturnType`, `Effect.Success`, `Layer.Success`).
 
 ## 3. Primitives → Factories → Composition
 
 Build small primitives, instantiate concrete values with factories, and compose them into policies or state machines — instead of scattering name-keyed lookup tables.
 
-### Example A: Primitives, Factories & Time Policy (Budget)
+### Example A: Primitives, Factories & Time Policy (agents and the budget)
+
+Abridged from `workflow/review/window.ts` and `feature/agents/agent.ts`:
 
 ```ts
-// 1. Primitives: schemas owning their pure behavior
+// 1. Primitives: schemas owning their pure behavior (workflow/review/window.ts)
 export const PhaseSchema = Schema.Literals(["normal", "drain", "locked"]);
 
 export type Phase = typeof PhaseSchema.Type;
-
-export const RoleIdSchema = Schema.Literals([
-  "directorate_liaison",
-  "directorate_auditor",
-]);
-
-export type RoleId = typeof RoleIdSchema.Type;
-
-export class Role extends Schema.Class<Role, { readonly brand: unique symbol }>(
-  "directorate/Role"
-)({
-  id: RoleIdSchema,
-  orders: Schema.Record(PhaseSchema, Schema.String),
-}) {
-  orderFor(phase: Phase) {
-    return this.orders[phase];
-  }
-}
 
 export class Window extends Schema.Class<
   Window,
   { readonly brand: unique symbol }
 >("directorate/Window")(
   Schema.Struct({
-    closesAt: Schema.DateTimeUtc, // in-memory; persisted timestamps use DateTimeUtcFromString
-    drainsAt: Schema.DateTimeUtc,
-  }).check(
-    Schema.makeFilter(
-      (w) =>
-        DateTime.isLessThan(w.drainsAt, w.closesAt) ||
-        "drainsAt must precede closesAt"
-    )
-  )
+    budgetMinutes: Schema.Finite,
+    createdAt: Schema.DateTimeUtc, // in memory; StoredWindow stores it with Time
+    deadline: Schema.DateTimeUtc,
+  }).check(windowCheck) // the deadline never precedes createdAt
 ) {
+  /** Normal, then drain for the last 20% (6 minutes if longer, but never more than half), then locked at the deadline. */
   phaseAt(now: DateTime.Utc) {
-    if (DateTime.isGreaterThanOrEqualTo(now, this.closesAt)) {
+    const at = DateTime.toEpochMillis(now);
+    const end = DateTime.toEpochMillis(this.deadline);
+    const total = Math.max(1, end - DateTime.toEpochMillis(this.createdAt));
+    const drainMs = Math.max(0.2 * total, Math.min(6 * 60_000, 0.5 * total));
+
+    if (at >= end) {
       return "locked";
     }
 
-    return DateTime.isGreaterThanOrEqualTo(now, this.drainsAt)
-      ? "drain"
-      : "normal";
+    return at >= end - drainMs ? "drain" : "normal";
+  }
+}
+
+// (feature/agents/agent.ts)
+export const AgentIdSchema = Schema.Literals([
+  "directorate_liaison",
+  "directorate_auditor",
+  "directorate_seat",
+  "directorate_compliance",
+]);
+
+type AgentId = typeof AgentIdSchema.Type;
+
+export class Agent extends Schema.Class<
+  Agent,
+  { readonly brand: unique symbol }
+>("directorate/Agent")({
+  dispatches: Schema.Array(AgentIdSchema),
+  id: AgentIdSchema,
+  launchableIn: Schema.Array(PhaseSchema),
+  orders: Schema.Record(PhaseSchema, Schema.String),
+  title: Schema.String,
+}) {
+  mayLaunch(child: Agent, phase: Phase) {
+    return (
+      this.dispatches.includes(child.id) && child.launchableIn.includes(phase)
+    );
+  }
+
+  orderFor(phase: Phase) {
+    return this.orders[phase];
   }
 }
 
 // 2. Factories: each instance owns its data (including prompt text)
-export const Liaison = Role.make({
-  id: "directorate_liaison",
-  orders: {
-    drain: "DRAIN: route open entries to Compliance",
-    locked: "LOCKED: call directorate_report now",
-    normal: "observe and investigate",
-  },
-});
-
-export const Auditor = Role.make({
+export const Auditor = Agent.make({
+  dispatches: [],
   id: "directorate_auditor",
+  launchableIn: ["normal"],
   orders: {
     drain: "DRAIN: file surviving candidates now and hand off",
     locked: "LOCKED: file final candidates or notes and stop",
     normal: "investigate",
   },
+  title: "Auditor",
 });
 
-// Single boundary registry: the only name-keyed table
-const Roles = Schema.Record(RoleIdSchema, Role).make({
+// … Liaison, Seat, and Compliance alike.
+
+// The single registry: the only name-keyed table
+const Agents = Schema.Record(AgentIdSchema, Agent).make({
   directorate_auditor: Auditor,
+  directorate_compliance: Compliance,
   directorate_liaison: Liaison,
+  directorate_seat: Seat,
 });
 
-export const roleOf = (id: RoleId) => Roles[id];
+export const agentOf = (id: AgentId) => Agents[id];
 
-// 3. Composition: pure policy below, single effectful operation at the edge
-export const brief = Effect.fn("Budget.brief")(function* brief(
-  role: Role,
+// 3. Composition: pure policy below, one effectful operation at the edge
+export const budgetLine = Effect.fnUntraced(function* budgetLine(
+  agent: Agent,
   window: Window
 ) {
-  const now = yield* DateTime.now;
+  const b = yield* budget(window); // the phase and minutes left now
 
-  return role.orderFor(window.phaseAt(now));
+  return phaseLine(
+    agent,
+    b.phase,
+    `${b.minutesLeft} min left of ${window.budgetMinutes} · phase ${b.phase}`
+  );
 });
 ```
 
-### Example B: Stateful Transitions (Ship Loop)
+### Example B: Stateful Transitions (dispatches and the ship loop)
 
-Derive values when time is the source of truth (`Window.phaseAt`). For genuinely stateful workflows (`ship-step.ts`), model states and events as branded `Schema.TaggedClass` unions where each state carries only its valid fields, make invalid transitions an explicit `Schema.TaggedError`, and keep I/O in the surrounding service loop:
+Derive values when time is the source of truth (`Window.phaseAt`). For genuinely stateful records, model the states as branded `Schema.TaggedClass` members of one tagged union, and keep I/O in the surrounding service. `Dispatch` (`feature/dispatch/lifecycle.ts`) and ship state (`workflow/ship/state.ts`) follow the same pattern:
+
+- **States share the stored field set.** A stored record keeps whatever any version wrote, and a round trip must be lossless, so every state carries every field. What a state actually sets is up to the transitions into it.
+- **The union decodes from the stored shape.** The record stores its state as a `status` field, not a `_tag`; `Schema.decodeTo` maps the stored struct to the union and back.
+- **Changes are named transitions** that build the next state through its class, branching with exhaustive `match`.
+- **A transition that does not apply returns no change.** Dispatch transitions return `undefined`, so callers write only real changes; ship transitions rebuild the same state. Neither raises an invalid-transition error.
+
+Abridged from `feature/dispatch/lifecycle.ts`:
 
 ```ts
-export class Active extends Schema.TaggedClass<
-  Active,
+/** What every run carries in every state. */
+const dispatchFields = {
+  agent: Schema.String, // as stored: older records may hold any name
+  call: Schema.String,
+  endedAt: opt(Schema.DateTimeUtc),
+  prompt: Schema.String,
+  session: opt(Schema.String),
+  startedAt: Schema.DateTimeUtc,
+  // …
+};
+
+export class Running extends Schema.TaggedClass<
+  Running,
   { readonly brand: unique symbol }
->()("Active", { round: Schema.Int }) {}
+>()("Running", dispatchFields) {}
 
-export class Paused extends Schema.TaggedClass<
-  Paused,
+export class Completed extends Schema.TaggedClass<
+  Completed,
   { readonly brand: unique symbol }
->()("Paused", { reason: Schema.String, round: Schema.Int }) {}
+>()("Completed", dispatchFields) {}
 
-export class Complete extends Schema.TaggedClass<
-  Complete,
-  { readonly brand: unique symbol }
->()("Complete", { rounds: Schema.Int }) {}
+// … Launching and Failed alike.
 
-export const ShipStateSchema = Schema.Union([Active, Paused, Complete]).pipe(
-  Schema.toTaggedUnion("_tag")
-);
-
-export type ShipState = typeof ShipStateSchema.Type;
-
-export class ReviewPassed extends Schema.TaggedClass<
-  ReviewPassed,
-  { readonly brand: unique symbol }
->()("ReviewPassed", {}) {}
-
-export class PauseRequested extends Schema.TaggedClass<
-  PauseRequested,
-  { readonly brand: unique symbol }
->()("PauseRequested", { reason: Schema.String }) {}
-
-export const ShipEventSchema = Schema.Union([
-  ReviewPassed,
-  PauseRequested,
+export const DispatchSchema = Schema.Union([
+  Launching,
+  Running,
+  Completed,
+  Failed,
 ]).pipe(Schema.toTaggedUnion("_tag"));
 
-export type ShipEvent = typeof ShipEventSchema.Type;
+export type Dispatch = typeof DispatchSchema.Type;
 
-export class InvalidShipTransition extends Schema.TaggedError<
-  InvalidShipTransition,
-  { readonly brand: unique symbol }
->()("InvalidShipTransition", {
-  event: ShipEventSchema,
-  state: ShipStateSchema,
-}) {}
-
-export const transition = (state: ShipState, event: ShipEvent) =>
-  ShipStateSchema.match(state, {
-    Active: (active) =>
-      ShipEventSchema.match(event, {
-        PauseRequested: ({ reason }) =>
-          Effect.succeed(new Paused({ reason, round: active.round })),
-        ReviewPassed: () =>
-          Effect.succeed(new Complete({ rounds: active.round })),
-      }),
-    Complete: () => Effect.fail(new InvalidShipTransition({ event, state })),
-    Paused: () => Effect.fail(new InvalidShipTransition({ event, state })),
+export const statusOf = (d: Dispatch) =>
+  DispatchSchema.match(d, {
+    Completed: () => "completed" as const,
+    Failed: () => "failed" as const,
+    Launching: () => "launching" as const,
+    Running: () => "running" as const,
   });
+
+/** A dispatch in seal.json's children: its state is a `status` field, not a tag. */
+const StoredDispatch = Schema.Struct({
+  // … the same fields, with endedAt and startedAt as Time …
+  status: DispatchStatusSchema,
+});
+
+export const DispatchFromStored = StoredDispatch.pipe(
+  Schema.decodeTo(Schema.toType(DispatchSchema), {
+    decode: SchemaGetter.transform(
+      (stored) =>
+        new (stateFor(stored.status))(DispatchFieldsSchema.make(stored))
+    ),
+    encode: SchemaGetter.transform((d) => ({
+      ...fieldsOf(d),
+      status: statusOf(d),
+    })),
+  })
+);
+
+/** The new seal, or undefined when no run changed. */
+export const update = (seal: Seal, step: (c: Dispatch) => Dispatch) => {
+  const children = seal.children.map(step);
+
+  return children.some((c, i) => c !== seal.children[i])
+    ? seal.withDispatches(children)
+    : undefined;
+};
+
+/** A completed run doing more work without a new launch is running again. */
+export const resumed = (seal: Seal, session: string) => {
+  const run = latest(seal, session);
+
+  return update(seal, (c) =>
+    c === run && isCompleted(c)
+      ? new Running({ ...fieldsOf(c), endedAt: undefined })
+      : c
+  );
+};
 ```
 
-- **Resolve names once**: decode agent names at the host boundary, resolve via `roleOf`, and pass `Role` inward. Reject unknown names wherever authority or permissions are checked; allow a display fallback (e.g., Liaison copy) only at the presentation boundary.
+- **Resolve names once**: decode agent names at the host boundary into an `Actor` (platform's `actor`), resolve them with `agentNamed` or `dispatchableNamed` (both through `agentOf`) or `Actor.role`, and pass `Agent` inward. Reject unknown names wherever authority or permissions are checked; allow a display fallback (e.g., Liaison copy) only at the presentation boundary.
 
 ## 4. Deep Modules, Vertical Slices & Ownership
 
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) is the ownership map: which slices exist, what each owns, which field group of `seal.json` each may change, and how slices may depend on each other. Read it before adding or moving a module. In short:
 
 - **Vertical slices**: each slice is a directory that owns its schema classes, pure logic, `Context.Service` + `Layer`, tool handlers, prompt text, and errors. Features live under `src/feature/`, workflows under `src/workflow/`; `seal/`, `records/`, and `platform/` sit beside them.
-- **Two public surfaces**: a slice's _primitive modules_ (schemas, tagged errors, pure functions, copy, defaults; they import only `effect` and other primitive modules) may be imported by anyone. Its _entry_ (`<slice>/<slice>.ts`: service, Layer, `register()`, workflows) is imported only by higher bands and `index.ts`. Every other module is internal to its slice.
+- **Two public surfaces**: a slice's _primitive modules_ (schemas, tagged errors, functions over them, copy, defaults; they import only `effect` and other primitive modules, and need no `Layer`) may be imported by anyone. Its _entry_ (`<slice>/<slice>.ts`: named re-exports of its service, Layer, registrations, and workflows) is imported only by higher bands and `index.ts`. Every other module is internal to its slice.
   ```text
   src/workflow/review/
   ├── review.ts    # entry: selective named exports; no export * / namespace
@@ -207,25 +249,21 @@ export const transition = (state: ShipState, event: ShipEvent) =>
   ```
 - **Deep interfaces**: hide multi-step orchestration behind a small set of cohesive exports, while keeping distinct contracts separate (e.g., ticking tool footer vs. cache-stable prompt notice).
 - **Colocate by change, not kind**: never create `types.ts`, `constants.ts`, `utils.ts`, or a shared `model.ts`.
-- **One-way dependencies**: imports point down the bands (workflow → feature → seal → records/platform → primitives). Features never import each other's entries; only workflows compose features. When a lower slice needs a higher one, it declares a `Context.Service` port. No module cycles.
-- **One aggregate, one door**: every write to a review goes through `Sessions.mutate`, and each `seal.json` field group is rebuilt only by its owner's transitions.
-- **Composition root**: `src/index.ts` builds Layers and calls each slice's `register()`; it holds no tool bodies, hooks, or policy. Package entry points (`index.ts`, `tui.ts`, `gui.ts`, `rpc.ts`) stay at `src/` root.
-- **Services as capability seams**: use `Context.Service` only for I/O or state (filesystem, sessions, store) with dependencies captured in the `Layer` (`R = never` on methods). Keep pure logic on schema classes or exported functions.
+- **One-way dependencies**: imports point down the bands (workflow/ship → workflow/review → feature → seal → records → platform; primitives from anywhere). Features never import each other's entries; only workflows compose features. When a lower slice needs a higher one, or a feature needs a sibling, it declares a port: a `Context.Service` provided in a `Layer` (`ActiveSeal`), or a registration parameter that `index.ts` wires. No value-import cycles.
+- **One aggregate, one door**: every write to a review goes through `Sessions.mutate` (a new review through `openReview`), and each `seal.json` field group is rebuilt only through its owner's transitions and `Seal`'s `with<Group>` methods. Another owner's transition may compose it, never rebuild the group itself.
+- **Composition root**: `src/index.ts` builds the Layers, runs each slice's registration in order, and wires slices to each other; it holds no tool bodies, hooks, or policy. Package entry points (`index.ts`, `tui.ts`, `gui.ts`, `rpc.ts`) stay at `src/` root.
+- **Services as capability seams**: use `Context.Service` only for I/O or state (filesystem, sessions, records) with dependencies captured in the `Layer` (`R = never` on methods). Keep pure logic on schema classes or exported functions.
+- **Placement**: new concepts belong in their owning slice ([Where new code goes](../ARCHITECTURE.md#where-new-code-goes)). Move code between modules in its own change; do not mix structural moves with behavior changes.
 
 ## Gotchas
 
-- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` (`since` in `platform/stored.ts`) or `Schema.decodeTo` (`orLegacyTrue`) plus a legacy-fixture test.
+- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, ship state, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` (`since` in `platform/stored.ts`) or `Schema.decodeTo` (`orLegacyTrue`) plus a legacy fixture.
+- **Fixtures guard the contracts**: a stored-contract or host-surface change needs fixtures under `test/stored/`. `test/contracts.test.ts` round-trips them byte for byte, `test/surface.test.ts` compares the registered surface with `test/stored/surface.json`, and `test/architecture.test.ts` checks imports and the Layout block in `ARCHITECTURE.md`.
 - **Tool input vs. domain vs. storage**: share field schemas, not whole codecs. Tool inputs passed to `DefineTool` are decoded by the host (do not re-decode) and must use `Schema.optionalKey` — `Schema.optional` emits `anyOf: [..., null]` in JSON Schema.
 - **Decoding functions**: use `Schema.decodeUnknownEffect` for `unknown`, `Schema.decodeUnknownOption` for best-effort hook metadata, and `Schema.decodeEffect` when input already matches `Encoded` (e.g., JSON strings into `Schema.fromJsonString`).
 - **`schema.make` vs. `Schema.make`**: call `MyClass.make(...)` / `new MyClass(...)` or `.makeEffect(...)` (which fails with `SchemaIssue.Issue` — map it to a domain error). Module-level `Schema.make` builds a schema from an AST, not a value. `.make` drops unknown keys by default.
-- **`mapFields` drops struct checks**: `Struct.mapFields(Struct.pick([...]))` preserves field checks but drops outer `.check(...)` refinements unless reapplied.
-- **Tests stay in `test/*.test.ts`**: the test script runs `node --test test/*.test.ts`, so tests inside `src/<slice>/` will not run. Test slices through public exports or the plugin, build fixtures with `.make` / `new`, and use `TestClock` for time.
-
-## Migrating
-
-- New concepts belong in their owning slice.
-- Move code between modules in its own change — do not mix structural moves with behavior changes.
-- Bring code you touch closer to these rules without pulling unrelated files into scope.
+- **`mapFields` drops struct checks**: `Struct.mapFields(Struct.pick([...]))` preserves field checks but drops outer `.check(...)` refinements unless reapplied. Spreading a struct's `.fields` drops them too, which is why `Seal` re-applies `windowCheck`.
+- **Tests stay in `test/*.test.ts`**: the test script runs `node --test test/*.test.ts`, so tests inside `src/<slice>/` will not run. Tests sit outside the bands and may import a slice's internal modules directly. Build fixtures with `.make` / `new`, and use `TestClock` for time.
 
 ## Verification
 
