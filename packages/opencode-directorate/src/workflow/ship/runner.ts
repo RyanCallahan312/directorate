@@ -19,10 +19,10 @@ import {
   Semaphore,
 } from "effect";
 import { SecureRandom } from "effect/crypto";
+import type { Digest } from "effect/crypto";
 
-import { REVIEWER, ROLE_SET } from "./feature/agents/agent.ts";
-import type { Platform } from "./index.ts";
-import { failure, recover } from "./platform/error.ts";
+import { REVIEWER, ROLE_SET } from "../../feature/agents/agent.ts";
+import { failure, recover } from "../../platform/error.ts";
 import {
   activity,
   createdAt,
@@ -32,66 +32,20 @@ import {
   locationKey,
   ProcessIdentity,
   turns,
-} from "./platform/platform.ts";
-import type { Activity } from "./platform/platform.ts";
-import { Store } from "./records/records.ts";
-import type { Seal } from "./seal/record.ts";
-import { currentFingerprint } from "./seal/seal.ts";
-import { decideShip, shipKickoff } from "./ship-step.ts";
-import { parseRequest, reviewRequest } from "./workflow/review/request.ts";
-import type { ReviewScope } from "./workflow/review/request.ts";
-import { interruptedReview } from "./workflow/review/review.ts";
-
-const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+} from "../../platform/platform.ts";
+import type { Activity, Worktree } from "../../platform/platform.ts";
+import { Store } from "../../records/records.ts";
+import type { Seal } from "../../seal/record.ts";
+import { currentFingerprint } from "../../seal/seal.ts";
+import { parseRequest, reviewRequest } from "../review/request.ts";
+import type { ReviewScope } from "../review/request.ts";
+import { interruptedReview } from "../review/review.ts";
+import { ShipStateSchema } from "./state.ts";
+import type { Plan, ShipState } from "./state.ts";
+import { decideShip, shipKickoff } from "./step.ts";
 
 /** How long a finished subagent's completion notice may stay undelivered before recovery stops waiting for it. */
 const NOTICE_GRACE_MS = 30_000;
-
-const Plan = Schema.Struct({
-  checkpoint: Schema.optionalKey(Schema.String),
-  id: Schema.String,
-  origin: Schema.String,
-  rendered: Schema.Boolean,
-  text: Schema.String,
-});
-
-export const ShipStateSchema = Schema.Struct({
-  /** An automatic continuation whose admission was not confirmed. */
-  admitting: Schema.optionalKey(Schema.Boolean),
-  /** Background subagents the settled turn left running, and when each was seen: their notices come before the next step. */
-  awaiting: Schema.optionalKey(Schema.Record(Schema.String, Schema.Finite)),
-  boot: Schema.String,
-  chain: Schema.Array(Schema.String),
-  id: Schema.String,
-  inbox: Schema.optionalKey(
-    Schema.Struct({
-      continuation: Schema.optionalKey(Schema.Boolean),
-      deliveredAt: Schema.optionalKey(Schema.Finite),
-      id: Schema.String,
-    })
-  ),
-  lastHostFailure: Schema.optionalKey(Schema.String),
-  location: Schema.optionalKey(Schema.String),
-  needsAttachments: Schema.optionalKey(Schema.Boolean),
-  /** Queued completion notices by inbox ID, and the subagent each is from. */
-  notices: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
-  origin: Schema.optionalKey(Schema.String),
-  /** The server process driving the loop: while it lives, no other process recovers this ship. */
-  pid: Schema.optionalKey(Schema.Finite),
-  plan: Schema.optionalKey(Plan),
-  reason: Schema.String,
-  recovery: Schema.optionalKey(Schema.String),
-  request: Schema.String,
-  reviewsAtResume: Count,
-  rounds: Count,
-  startedAt: Schema.Finite,
-  status: Schema.Literals(["waiting", "active", "paused", "complete"]),
-  step: Schema.optional(Schema.String),
-  /** When an awaited subagent's notice was delivered: the turn it woke settles next. */
-  wokeAt: Schema.optionalKey(Schema.Finite),
-});
-
-type ShipState = typeof ShipStateSchema.Type;
 
 type SessionID = Session.ID;
 
@@ -412,7 +366,7 @@ export const registerShip = Effect.fn("Ship.register")(
     const host = yield* Host;
     const git = yield* Git;
     const store = yield* Store;
-    const services = yield* Effect.context<Platform>();
+    const services = yield* Effect.context<Git | Worktree | Digest.Digest>();
     const random = yield* SecureRandom.SecureRandom;
     const uuid = random.uuidV4();
     const boot = yield* Effect.cached(uuid);

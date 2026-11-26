@@ -6,7 +6,7 @@ import { DateTime } from "effect";
 import { PANELIST } from "../src/feature/agents/agent.ts";
 import type { Entry } from "../src/feature/ledger/entry.ts";
 import type { Seal } from "../src/seal/record.ts";
-import { decideShip, shipKickoff } from "../src/ship-step.ts";
+import { decideShip, shipKickoff } from "../src/workflow/ship/step.ts";
 
 const state = {
   id: "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",

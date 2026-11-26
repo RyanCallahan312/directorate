@@ -38,13 +38,13 @@ src/
 │   ├── sessions.ts         session ↔ seal bindings + the door
 │   └── capture.ts · ends.ts · diff.ts · content.ts · views.ts · tools.ts · repo-path.ts
 ├── feature/
-│   ├── agents/             agents.ts · agent.ts* · access.ts · registration.ts
+│   ├── agents/             agents.ts · agent.ts* · registration.ts
 │   ├── dispatch/           dispatch.ts · lifecycle.ts* · seat.ts* · events.ts
 │   ├── ledger/             ledger.ts · entry.ts* · decide.ts* · tools.ts
-│   ├── report/             report.ts · directive.ts* · gates.ts* · render.ts*
-│   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts*
+│   ├── report/             report.ts · directive.ts* · render.ts*
+│   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts* · store.ts · configure.ts
 └── workflow/
-    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts · watchdog.ts
+    ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · lifecycle.ts · interrupted.ts
     └── ship/               ship.ts · state.ts* · step.ts* · runner.ts
 ```
 

@@ -81,8 +81,8 @@ test("the scanner finds the imports src/ has today", () => {
     [
       ["@opencode/plugin/gui", false],
       ["@opencode/plugin/gui", true],
-      ["configure-client.ts", false],
-      ["configure-flow.ts", true],
+      ["feature/settings/configure-client.ts", false],
+      ["feature/settings/configure-flow.ts", true],
       ["rpc.ts", false],
     ]
   );

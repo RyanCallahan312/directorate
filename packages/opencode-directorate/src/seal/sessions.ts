@@ -14,13 +14,13 @@ import {
   Schema,
 } from "effect";
 
-import { childOutstanding } from "../children.ts";
 import {
   budgetLine,
   CHILD_ROLE_SET,
   LOCKED_TOOLS,
   REVIEWER,
 } from "../feature/agents/agent.ts";
+import { childOutstanding } from "../feature/dispatch/lifecycle.ts";
 import { failure, ignore } from "../platform/error.ts";
 import { Host } from "../platform/platform.ts";
 import type { Body } from "../platform/platform.ts";

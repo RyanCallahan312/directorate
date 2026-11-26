@@ -1,6 +1,5 @@
-// Directorate settings: defaults for new reviews, from directorate.json. The project's file (<repo>/.opencode/directorate.json) overrides the
-// global one (directorate.json in OpenCode's global config directory, ~/.config/opencode) key by key; a directorate_seal input overrides
-// both.
+// Directorate settings: defaults for new reviews, from directorate.json. The store reads both files and replaces one
+// scope's file; file.ts says how they merge.
 import {
   Config,
   Context,
@@ -12,87 +11,20 @@ import {
   Schema,
 } from "effect";
 
-import { DEFAULT_PANEL, seatRef } from "./feature/dispatch/seat.ts";
+import { failure } from "../../platform/error.ts";
+import { Git } from "../../platform/platform.ts";
 import {
   isUnset,
+  merge,
   normalizeSettings,
   sameSettings,
-  SettingsSchema,
-} from "./feature/settings/file.ts";
-import type {
-  Settings,
-  SettingsScope as Scope,
-} from "./feature/settings/file.ts";
-import { failure } from "./platform/error.ts";
-import { Git } from "./platform/platform.ts";
-import type { Mode } from "./workflow/review/request.ts";
-
-export const SettingsJson = Schema.fromJsonString(SettingsSchema, { space: 2 });
+  SettingsJson,
+} from "./file.ts";
+import type { Settings, SettingsScope as Scope } from "./file.ts";
 
 /** A typo in a settings file is an error, not a silently ignored key. */
 const decodeSettings = Schema.decodeEffect(SettingsJson);
 const STRICT = { onExcessProperty: "error" } as const;
-
-/** The project's settings over the global ones, key by key within each section. */
-export const merge = (global: Settings, project: Settings): Settings => ({
-  ...global,
-  ...project,
-  ...((global.budget_minutes || project.budget_minutes) && {
-    budget_minutes: { ...global.budget_minutes, ...project.budget_minutes },
-  }),
-  ...((global.lenses || project.lenses) && {
-    lenses: { ...global.lenses, ...project.lenses },
-  }),
-  ...((global.panel || project.panel) && {
-    panel: { ...global.panel, ...project.panel },
-  }),
-});
-
-/** What a new review gets from settings: its mode, whether it is a panel and with which seats, its budget, and lenses off. */
-export const resolve = (
-  s: Settings,
-  input: {
-    mode?: Mode | undefined;
-    panel?: boolean | undefined;
-    panelModels?: readonly string[] | undefined;
-    budgetMinutes?: number | undefined;
-  }
-) => {
-  const mode = input.mode ?? s.mode ?? "default";
-
-  const defaultPanel =
-    (input.panel ?? s.panel?.enabled)
-      ? (s.panel?.models?.map(seatRef) ?? DEFAULT_PANEL)
-      : undefined;
-
-  const panel = input.panelModels?.length ? input.panelModels : defaultPanel;
-
-  return {
-    budgetMinutes: input.budgetMinutes ?? s.budget_minutes?.[mode],
-    lensesOff: s.lenses?.disabled?.length ? s.lenses.disabled : undefined,
-    mode,
-    panel,
-  };
-};
-
-/** One line for a model: the effective settings, or nothing when no file sets anything. */
-export const describe = (settings: Settings): string | undefined => {
-  const s = normalizeSettings(settings);
-
-  const parts = [
-    s.mode && `mode ${s.mode}`,
-    s.default_scope && `scope ${s.default_scope}`,
-    s.panel?.enabled !== undefined && `panel ${s.panel.enabled ? "on" : "off"}`,
-    s.panel?.models && `panel models ${s.panel.models.map(seatRef).join(", ")}`,
-    s.budget_minutes &&
-      `budgets ${Object.entries(s.budget_minutes)
-        .map(([m, n]) => `${m} ${n} min`)
-        .join(", ")}`,
-    s.lenses?.disabled?.length && `lenses off ${s.lenses.disabled.join(", ")}`,
-  ].filter(Boolean);
-
-  return parts.length ? parts.join(" · ") : undefined;
-};
 
 const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;

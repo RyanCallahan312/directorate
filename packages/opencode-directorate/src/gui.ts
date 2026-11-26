@@ -4,8 +4,12 @@
 import { Command, Plugin } from "@opencode/plugin/gui";
 import type { Context } from "@opencode/plugin/gui";
 
-import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
-import type { Dialogs } from "./configure-flow.ts";
+import {
+  configureFromHost,
+  fromHost,
+  showToast,
+} from "./feature/settings/configure-client.ts";
+import type { Dialogs } from "./feature/settings/configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
 /** The app's dialogs and toasts as the walk asks for them. Its select has no disabled options: those are left out. */

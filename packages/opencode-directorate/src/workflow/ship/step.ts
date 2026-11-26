@@ -1,12 +1,16 @@
 // Pure next-step policy and prompts for the bounded /directorate-ship loop.
 import { Result } from "effect";
 
-import { panelSeats } from "./children.ts";
-import { scopeOf } from "./exclusions.ts";
-import type { Entry, Ledger } from "./feature/ledger/entry.ts";
-import { currentSeverity, RANK, unresolved } from "./ledger.ts";
-import type { Seal } from "./seal/record.ts";
-import { parseRequest, requestText } from "./workflow/review/request.ts";
+import { scopeOf } from "../../exclusions.ts";
+import { panelSeats } from "../../feature/dispatch/lifecycle.ts";
+import {
+  currentSeverity,
+  RANK,
+  unresolved,
+} from "../../feature/ledger/decide.ts";
+import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
+import type { Seal } from "../../seal/record.ts";
+import { parseRequest, requestText } from "../review/request.ts";
 
 interface ShipState {
   readonly id: string;

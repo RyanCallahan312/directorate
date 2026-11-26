@@ -1,30 +1,8 @@
+// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
 import { DateTime, Effect, Function, Schema } from "effect";
 import type { FileSystem, Path } from "effect";
 
-import {
-  actorName,
-  childFailures,
-  childQuestion,
-  questionText,
-} from "./children.ts";
-import { PANELIST, REVIEWER, SCOUT } from "./feature/agents/agent.ts";
-import {
-  EntryStatus,
-  KindSchema,
-  Lens,
-  NoteKind,
-  SeveritySchema,
-  VerdictKind,
-} from "./feature/ledger/entry.ts";
-import type { Entry } from "./feature/ledger/entry.ts";
-import {
-  currentSeverity,
-  decide,
-  nearby,
-  unresolved,
-  verdictError,
-} from "./ledger.ts";
-import { failure, ReviewError } from "./platform/error.ts";
+import { failure, ReviewError } from "../../platform/error.ts";
 import {
   actor,
   Git,
@@ -33,12 +11,11 @@ import {
   positiveInt,
   str,
   strArr,
-} from "./platform/platform.ts";
-import type { DefineTool } from "./platform/platform.ts";
-import { Store } from "./records/records.ts";
-import { coverageSummary } from "./seal/coverage.ts";
-// Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
-import { SideSchema } from "./seal/region.ts";
+} from "../../platform/platform.ts";
+import type { DefineTool } from "../../platform/platform.ts";
+import { Store } from "../../records/records.ts";
+import { coverageSummary } from "../../seal/coverage.ts";
+import { SideSchema } from "../../seal/region.ts";
 import {
   RepoPath,
   Sessions,
@@ -46,7 +23,30 @@ import {
   checkQuote,
   done,
   mutate,
-} from "./seal/seal.ts";
+} from "../../seal/seal.ts";
+import { PANELIST, REVIEWER, SCOUT } from "../agents/agent.ts";
+import {
+  actorName,
+  childFailures,
+  childQuestion,
+  questionText,
+} from "../dispatch/lifecycle.ts";
+import {
+  currentSeverity,
+  decide,
+  nearby,
+  unresolved,
+  verdictError,
+} from "./decide.ts";
+import {
+  EntryStatus,
+  KindSchema,
+  Lens,
+  NoteKind,
+  SeveritySchema,
+  VerdictKind,
+} from "./entry.ts";
+import type { Entry } from "./entry.ts";
 
 export const ledgerTools = (
   tool: DefineTool<

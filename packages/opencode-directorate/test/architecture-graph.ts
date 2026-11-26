@@ -64,19 +64,7 @@ export const ROOT_MODULES: readonly string[] = [
 ];
 
 /** Flat src/*.ts files still awaiting their move. Remove each one as it moves; when empty, the checker is fully strict. */
-export const LEGACY_ROOT_MODULES: readonly string[] = [
-  "bundled.ts",
-  "children.ts",
-  "configure-client.ts",
-  "configure-flow.ts",
-  "configure.ts",
-  "ledger-tools.ts",
-  "ledger.ts",
-  "report.ts",
-  "settings.ts",
-  "ship-step.ts",
-  "ship.ts",
-];
+export const LEGACY_ROOT_MODULES: readonly string[] = [];
 
 /** Dependency bands, lowest first. Features share one band: they are siblings. */
 export const SLICE_BANDS: ReadonlyMap<string, number> = new Map([

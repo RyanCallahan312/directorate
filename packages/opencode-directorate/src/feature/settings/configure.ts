@@ -4,21 +4,22 @@
 // key is rejected when read; tool input drops unknown keys, so the tool's result shows exactly what was stored.
 import { Effect, Schema } from "effect";
 
-import { ROLE_SET } from "./feature/agents/agent.ts";
-import { DEFAULT_PANEL } from "./feature/dispatch/seat.ts";
-import { LENSES } from "./feature/ledger/entry.ts";
+import { failure, ignore } from "../../platform/error.ts";
+import { Host, optional, str } from "../../platform/platform.ts";
+import type { DefineTool } from "../../platform/platform.ts";
+import { Sessions } from "../../seal/seal.ts";
+import { ROLE_SET } from "../agents/agent.ts";
+import { DEFAULT_PANEL } from "../dispatch/seat.ts";
+import { LENSES } from "../ledger/entry.ts";
 import {
+  describe,
   isUnset,
   SettingsSchema,
   SettingsScopeSchema,
-} from "./feature/settings/file.ts";
-import type { Settings, SettingsScope } from "./feature/settings/file.ts";
-import { failure, ignore } from "./platform/error.ts";
-import { Host, optional, str } from "./platform/platform.ts";
-import type { DefineTool } from "./platform/platform.ts";
+} from "./file.ts";
+import type { Settings, SettingsScope } from "./file.ts";
 import { DirectorateRpc } from "./rpc.ts";
-import { Sessions } from "./seal/seal.ts";
-import { describe, SettingsStore } from "./settings.ts";
+import { SettingsStore } from "./store.ts";
 
 const show = (label: string, file: string, s: Settings) =>
   `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;

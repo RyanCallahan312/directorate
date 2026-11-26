@@ -1,7 +1,7 @@
 // The Directorate: the review workflow, as its state chart. A Liaison session seals a target (directorate_seal), works
 // through the budget's phases (normal → drain → locked), and leaves through directorate_report's protocol gates, or
 // the deadline watchdog reports for it. Auditors, Seats, and Compliance run beside it: launching → running → completed | failed.
-// Tools used inside a state are in seal/tools.ts and ledger-tools.ts; the state itself is the seal (records/repository.ts).
+// Tools used inside a state are in seal/tools.ts and feature/ledger/tools.ts; the state itself is the seal (records/repository.ts).
 import { Plugin } from "@opencode/plugin/effect";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
@@ -19,7 +19,18 @@ import {
   Stream,
 } from "effect";
 
-import { registerBundled } from "./bundled.ts";
+import {
+  budgetNotice,
+  CHILD_ROLE_SET,
+  CHILD_ROLES,
+  LOCKED_TOOLS,
+  PANELIST,
+  REFUTER,
+  REVIEWER,
+  ROLE_SET,
+} from "./feature/agents/agent.ts";
+import { registerBundled } from "./feature/agents/agents.ts";
+import { recoverFollowUps } from "./feature/dispatch/dispatch.ts";
 import {
   childName,
   childOutstanding,
@@ -32,26 +43,21 @@ import {
   launched,
   openSeat,
   missingSeats,
-  recoverFollowUps,
   resumed,
   returned,
   seatName,
-} from "./children.ts";
-import { configureRpc, configureTool } from "./configure.ts";
-import {
-  budgetNotice,
-  CHILD_ROLE_SET,
-  CHILD_ROLES,
-  LOCKED_TOOLS,
-  PANELIST,
-  REFUTER,
-  REVIEWER,
-  ROLE_SET,
-} from "./feature/agents/agent.ts";
+} from "./feature/dispatch/lifecycle.ts";
 import type { Child } from "./feature/dispatch/lifecycle.ts";
 import { ModelRef } from "./feature/dispatch/seat.ts";
-import { ledgerTools } from "./ledger-tools.ts";
-import { currentSeverity, unresolved } from "./ledger.ts";
+import { currentSeverity, unresolved } from "./feature/ledger/decide.ts";
+import { ledgerTools } from "./feature/ledger/ledger.ts";
+import { finalize } from "./feature/report/report.ts";
+import { describe, resolve } from "./feature/settings/file.ts";
+import {
+  configureRpc,
+  configureTool,
+  SettingsStore,
+} from "./feature/settings/settings.ts";
 import { failure, ignore, recover } from "./platform/error.ts";
 import {
   activity,
@@ -74,7 +80,6 @@ import {
   Store,
 } from "./records/records.ts";
 import type { ActiveSeal } from "./records/records.ts";
-import { finalize } from "./report.ts";
 import { coverageSummary } from "./seal/coverage.ts";
 import type { Seal } from "./seal/record.ts";
 import {
@@ -89,8 +94,6 @@ import {
   writable,
 } from "./seal/seal.ts";
 import { TargetKindSchema } from "./seal/target.ts";
-import { describe, resolve, SettingsStore } from "./settings.ts";
-import { registerShip } from "./ship.ts";
 import {
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
@@ -106,6 +109,7 @@ import {
   refreshSeal,
 } from "./workflow/review/review.ts";
 import { budget } from "./workflow/review/window.ts";
+import { registerShip } from "./workflow/ship/ship.ts";
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 const GRACE_MS = 120_000;

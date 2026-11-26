@@ -10,10 +10,12 @@ import { Schema, SchemaAST } from "effect";
 // ---------- Stored codecs under test ----------
 // Later refactor phases update only these import paths; nothing below depends on where the schemas live.
 import { LedgerJson } from "../src/feature/ledger/entry.ts";
-import { normalizeSettings } from "../src/feature/settings/file.ts";
+import {
+  normalizeSettings,
+  SettingsJson,
+} from "../src/feature/settings/file.ts";
 import { SealJson } from "../src/seal/record.ts";
-import { SettingsJson } from "../src/settings.ts";
-import { ShipStateSchema } from "../src/ship.ts";
+import { ShipStateSchema } from "../src/workflow/ship/state.ts";
 // ---------- end stored codecs ----------
 
 /** The host's plugin storage holds ship state as a JSON value under `ship:<sessionID>`; it is stored as this text. */

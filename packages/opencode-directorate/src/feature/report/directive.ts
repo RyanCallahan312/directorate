@@ -1,7 +1,19 @@
-// The protocol gates' memory and the filed Directive: the Protocol & Directive field group of seal.json.
+// The protocol gates' memory and the filed Directive: the Protocol & Directive field group of seal.json, and the
+// Directive's status and reasons.
 import { Schema } from "effect";
 
+import { isSecret } from "../../exclusions.ts";
 import { orLegacyTrue, since, Time } from "../../platform/stored.ts";
+import { coverageSummary } from "../../seal/coverage.ts";
+import type { Seal } from "../../seal/record.ts";
+import type { Phase } from "../../workflow/review/window.ts";
+import {
+  childFailures,
+  childOutstanding,
+  missingSeats,
+} from "../dispatch/lifecycle.ts";
+import { unresolved } from "../ledger/decide.ts";
+import type { Ledger } from "../ledger/entry.ts";
 
 const list = Schema.Array;
 const opt = Schema.optional;
@@ -42,3 +54,102 @@ export const Protocol = Schema.Struct({
   reportedAt: opt(Time),
   staleFiles: opt(list(Schema.String)),
 });
+
+export interface Freshness {
+  stale?: readonly string[] | undefined;
+  unverified?: string | undefined;
+}
+
+/** Status and reasons from everything except gates. */
+interface Assessment {
+  status: DirectiveStatus;
+  reasons: string[];
+}
+
+export const assess = (
+  seal: Seal,
+  ledger: Ledger,
+  fresh: Freshness,
+  phase: Phase
+): Assessment => {
+  const reasons: string[] = [];
+  let status: DirectiveStatus = "complete";
+
+  const partial = (why: string) => {
+    if (status === "complete") {
+      status = "partial";
+    }
+
+    reasons.push(why);
+  };
+
+  const cov = coverageSummary(seal);
+
+  if (cov.unread.length) {
+    partial(`${cov.unread.length} regions unread`);
+  }
+
+  if (cov.skipped.length) {
+    partial(`${cov.skipped.length} regions skipped`);
+  }
+
+  if (cov.skimmed.length) {
+    partial(`${cov.skimmed.length} regions only skimmed`);
+  }
+
+  const secrets = seal.files.filter(
+    (f) =>
+      f.status !== "unchanged" &&
+      f.excluded &&
+      (isSecret(f.path) || (f.oldPath !== undefined && isSecret(f.oldPath)))
+  );
+
+  if (secrets.length) {
+    partial(
+      `${secrets.length} changed secret-like file${secrets.length === 1 ? " was" : "s were"} withheld and not reviewed`
+    );
+  }
+
+  const leads = unresolved(ledger).length;
+
+  if (leads) {
+    partial(`${leads} leads unverified`);
+  }
+
+  if (
+    ledger.notes.some((n) => n.kind === "unanswered") ||
+    childFailures(seal, ledger).length ||
+    childOutstanding(seal).length
+  ) {
+    partial("some questions went unanswered");
+  }
+
+  const seatless = missingSeats(seal);
+
+  if (seatless.length) {
+    partial(
+      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`
+    );
+  }
+
+  if (fresh.unverified) {
+    partial("freshness could not be verified");
+  }
+
+  if (fresh.stale) {
+    status = "stale";
+    reasons.push(
+      `code changed after the seal (${fresh.stale.length} ${fresh.stale.length === 1 ? "change" : "changes"})`
+    );
+  }
+
+  if (phase === "locked") {
+    reasons.push("time budget ran out");
+  }
+
+  if (seal.abandoned) {
+    partial("abandoned for a new review");
+  }
+
+  return { reasons, status };
+};

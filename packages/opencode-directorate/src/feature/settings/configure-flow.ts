@@ -3,22 +3,22 @@
 // models and thinking levels and writes the file. The flow only orchestrates dialogs and the settings RPC.
 import { Data, Effect, Result } from "effect";
 
-import { DEFAULT_PANEL, seatRef } from "./feature/dispatch/seat.ts";
-import type { Seat } from "./feature/dispatch/seat.ts";
-import { LENSES } from "./feature/ledger/entry.ts";
-import { normalizeSettings, sameSettings } from "./feature/settings/file.ts";
-import type { Settings, SettingsScope } from "./feature/settings/file.ts";
-import type { SettingsView, WriteResult } from "./rpc.ts";
 import {
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
   ReviewScopeSchema,
-} from "./workflow/review/request.ts";
-import type { Mode, ReviewScope } from "./workflow/review/request.ts";
+} from "../../workflow/review/request.ts";
+import type { Mode, ReviewScope } from "../../workflow/review/request.ts";
 import {
   DEFAULT_BUDGET,
   PANEL_BUDGET_FACTOR,
-} from "./workflow/review/window.ts";
+} from "../../workflow/review/window.ts";
+import { DEFAULT_PANEL, seatRef } from "../dispatch/seat.ts";
+import type { Seat } from "../dispatch/seat.ts";
+import { LENSES } from "../ledger/entry.ts";
+import { normalizeSettings, sameSettings } from "./file.ts";
+import type { Settings, SettingsScope } from "./file.ts";
+import type { SettingsView, WriteResult } from "./rpc.ts";
 
 /** One choice in a select. A host without disabled options leaves disabled ones out. */
 export interface Option<V> {

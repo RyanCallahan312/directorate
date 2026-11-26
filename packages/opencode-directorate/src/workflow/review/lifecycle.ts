@@ -4,12 +4,12 @@ import { DateTime, Effect, Option } from "effect";
 import { SecureRandom } from "effect/crypto";
 import { Hex } from "effect/encoding";
 
-import { unansweredQuestions } from "../../children.ts";
 import { scopeOf } from "../../exclusions.ts";
 import { REVIEWER } from "../../feature/agents/agent.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
+import { unansweredQuestions } from "../../feature/dispatch/lifecycle.ts";
+import { reopen, unresolved } from "../../feature/ledger/decide.ts";
 import type { Entry, Ledger } from "../../feature/ledger/entry.ts";
-import { reopen, unresolved } from "../../ledger.ts";
 import { failure, ReviewError } from "../../platform/error.ts";
 import { Git, Host, ProcessIdentity } from "../../platform/platform.ts";
 import { emptyLedger, Store } from "../../records/records.ts";

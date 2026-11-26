@@ -24,24 +24,27 @@ import { ChildProcess } from "effect/process";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
-import { childFailures } from "../src/children.ts";
 import { isSecret } from "../src/exclusions.ts";
 import { budgetLine } from "../src/feature/agents/agent.ts";
 import type { Actor } from "../src/feature/agents/agent.ts";
-import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
-import { platformLayer } from "../src/index.ts";
-import type { Platform } from "../src/index.ts";
+import { childFailures } from "../src/feature/dispatch/lifecycle.ts";
 import {
   currentSeverity,
   decide,
   reopen,
   unresolved,
   verdictError,
-} from "../src/ledger.ts";
+} from "../src/feature/ledger/decide.ts";
+import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
+import { assess } from "../src/feature/report/directive.ts";
+import { renderReport } from "../src/feature/report/render.ts";
+import { finalize } from "../src/feature/report/report.ts";
+import { SettingsStore } from "../src/feature/settings/settings.ts";
+import { platformLayer } from "../src/index.ts";
+import type { Platform } from "../src/index.ts";
 import { command } from "../src/platform/command.ts";
 import { Git } from "../src/platform/git.ts";
 import { StateRoot, Store } from "../src/records/records.ts";
-import { assess, finalize, renderReport } from "../src/report.ts";
 import {
   checkEvidence,
   checkQuote,
@@ -69,7 +72,6 @@ import {
   readLines,
   renderRegions,
 } from "../src/seal/views.ts";
-import { SettingsStore } from "../src/settings.ts";
 import type { Mode } from "../src/workflow/review/request.ts";
 import {
   createSeal,

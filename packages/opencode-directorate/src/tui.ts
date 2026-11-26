@@ -2,8 +2,12 @@
 // walk (configure-flow.ts) on the TUI's dialogs and the settings RPC (rpc.ts) at the TUI's location.
 import type { Plugin } from "@opencode/plugin/tui";
 
-import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
-import type { Dialogs } from "./configure-flow.ts";
+import {
+  configureFromHost,
+  fromHost,
+  showToast,
+} from "./feature/settings/configure-client.ts";
+import type { Dialogs } from "./feature/settings/configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
 /** The TUI's dialogs and toasts as the walk asks for them. */

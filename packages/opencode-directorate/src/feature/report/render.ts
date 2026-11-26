@@ -1,6 +1,7 @@
-// Directorate report (Directive): the review's status and the markdown rendered from verified dossier entries only.
-import { DateTime, Effect, Result } from "effect";
-
+import { coverageSummary } from "../../seal/coverage.ts";
+// The Directive as markdown: rendered from verified dossier entries only.
+import type { Seal } from "../../seal/record.ts";
+import type { Region } from "../../seal/region.ts";
 import {
   actorName,
   childFailures,
@@ -10,29 +11,21 @@ import {
   missingSeats,
   panelSeats,
   seatName,
-} from "./children.ts";
-import { isSecret } from "./exclusions.ts";
-import type { Entry, Ledger, Severity } from "./feature/ledger/entry.ts";
-import type { DirectiveStatus } from "./feature/report/directive.ts";
-import { currentSeverity, RANK, resolvedTarget, unresolved } from "./ledger.ts";
-import { failure } from "./platform/error.ts";
-import type { ReviewError } from "./platform/error.ts";
-import { Store } from "./records/records.ts";
-import { coverageSummary } from "./seal/coverage.ts";
-import type { Seal } from "./seal/record.ts";
-import type { Region } from "./seal/region.ts";
-import { changedSinceSeal, currentFingerprint } from "./seal/seal.ts";
-import type { Current } from "./seal/seal.ts";
-import { budget } from "./workflow/review/window.ts";
-import type { Phase } from "./workflow/review/window.ts";
+} from "../dispatch/lifecycle.ts";
+import {
+  currentSeverity,
+  RANK,
+  resolvedTarget,
+  unresolved,
+} from "../ledger/decide.ts";
+import type { Entry, Ledger, Severity } from "../ledger/entry.ts";
+import type { DirectiveStatus } from "./directive.ts";
 
 const SEV_LABEL: Record<Severity, string> = {
   blocking: "Blocking",
   important: "Important",
   minor: "Minor",
 };
-
-export type Status = DirectiveStatus;
 
 /** For each confirmed entry, the panel seats that raised it or a duplicate of it. */
 const seatsRaising = (seal: Seal, ledger: Ledger) => {
@@ -63,7 +56,7 @@ const verdicts: Record<Severity, string> = {
 
 const directiveVerdict = (
   top: Severity | undefined,
-  status: Status,
+  status: DirectiveStatus,
   resolved: number
 ) => {
   if (top) {
@@ -371,7 +364,7 @@ const withSynthesis = (lines: string[], synthesis: string | undefined) => {
 export const renderReport = (input: {
   seal: Seal;
   ledger: Ledger;
-  status: Status;
+  status: DirectiveStatus;
   approach?: string | undefined;
   synthesis?: string | undefined;
   reasons: readonly string[];
@@ -452,181 +445,3 @@ export const renderReport = (input: {
     `Export this review: \`/directorate-export ${seal.id}\` (unredacted).`,
   ].join("\n");
 };
-
-interface Freshness {
-  stale?: readonly string[] | undefined;
-  unverified?: string | undefined;
-}
-
-/** Status and reasons from everything except gates. */
-interface Assessment {
-  status: Status;
-  reasons: string[];
-}
-
-export const assess = (
-  seal: Seal,
-  ledger: Ledger,
-  fresh: Freshness,
-  phase: Phase
-): Assessment => {
-  const reasons: string[] = [];
-  let status: Status = "complete";
-
-  const partial = (why: string) => {
-    if (status === "complete") {
-      status = "partial";
-    }
-
-    reasons.push(why);
-  };
-
-  const cov = coverageSummary(seal);
-
-  if (cov.unread.length) {
-    partial(`${cov.unread.length} regions unread`);
-  }
-
-  if (cov.skipped.length) {
-    partial(`${cov.skipped.length} regions skipped`);
-  }
-
-  if (cov.skimmed.length) {
-    partial(`${cov.skimmed.length} regions only skimmed`);
-  }
-
-  const secrets = seal.files.filter(
-    (f) =>
-      f.status !== "unchanged" &&
-      f.excluded &&
-      (isSecret(f.path) || (f.oldPath !== undefined && isSecret(f.oldPath)))
-  );
-
-  if (secrets.length) {
-    partial(
-      `${secrets.length} changed secret-like file${secrets.length === 1 ? " was" : "s were"} withheld and not reviewed`
-    );
-  }
-
-  const leads = unresolved(ledger).length;
-
-  if (leads) {
-    partial(`${leads} leads unverified`);
-  }
-
-  if (
-    ledger.notes.some((n) => n.kind === "unanswered") ||
-    childFailures(seal, ledger).length ||
-    childOutstanding(seal).length
-  ) {
-    partial("some questions went unanswered");
-  }
-
-  const seatless = missingSeats(seal);
-
-  if (seatless.length) {
-    partial(
-      `${seatless.length} of ${seal.panel?.length} Directorate Seats did not review ${seatless.some((s) => s.status === "partial") ? "every region" : "the target"}`
-    );
-  }
-
-  if (fresh.unverified) {
-    partial("freshness could not be verified");
-  }
-
-  if (fresh.stale) {
-    status = "stale";
-    reasons.push(
-      `code changed after the seal (${fresh.stale.length} ${fresh.stale.length === 1 ? "change" : "changes"})`
-    );
-  }
-
-  if (phase === "locked") {
-    reasons.push("time budget ran out");
-  }
-
-  if (seal.abandoned) {
-    partial("abandoned for a new review");
-  }
-
-  return { reasons, status };
-};
-
-/** What changed since the seal; failures to check are reported as unverified, never raised. */
-const freshness = (seal: Seal, cur: Result.Result<Current, ReviewError>) =>
-  Result.match(cur, {
-    onFailure: (e) => Effect.succeed<Freshness>({ unverified: e.message }),
-    onSuccess: (c) =>
-      c.fingerprint === seal.fingerprint
-        ? Effect.succeed<Freshness>({})
-        : changedSinceSeal(seal, c).pipe(
-            Effect.timeoutOrElse({
-              duration: 20_000,
-              orElse: () =>
-                failure("listing changed files timed out after 20s"),
-            }),
-            Effect.match({
-              onFailure: (e): Freshness => ({
-                stale: ["(changes not enumerated)"],
-                unverified: e.message,
-              }),
-              onSuccess: (changed): Freshness => ({
-                stale: changed.length ? changed : ["(fingerprint changed)"],
-              }),
-            })
-          ),
-  });
-
-/**
- * Renders and saves the report; the seal is reported from then on. Caller holds the seal's lock. `cur` is the freshness
- * check the caller already ran, if any.
- */
-export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
-  seal: Seal,
-  ledger: Ledger,
-  opts: {
-    approach?: string | undefined;
-    synthesis?: string | undefined;
-    extraReasons?: readonly string[];
-    auto?: boolean;
-    cur?: Result.Result<Current, ReviewError>;
-  }
-) {
-  const { stale, unverified } = yield* freshness(
-    seal,
-    opts.cur ?? (yield* Effect.result(currentFingerprint(seal)))
-  );
-
-  const assessed = {
-    ...seal,
-    freshnessUnverified: unverified,
-    staleFiles: stale,
-  };
-
-  const { phase } = yield* budget(seal);
-
-  const a = assess(assessed, ledger, { stale, unverified }, phase);
-
-  const status = opts.auto && a.status === "complete" ? "partial" : a.status;
-  const reasons = [...a.reasons, ...(opts.extraReasons ?? [])];
-
-  const md = renderReport({
-    approach: opts.approach,
-    ledger,
-    reasons,
-    seal: assessed,
-    status,
-    synthesis: opts.synthesis,
-  });
-
-  const reported: Seal = {
-    ...assessed,
-    autoReported: opts.auto || undefined,
-    directive: { reasons, status },
-    reportedAt: yield* DateTime.now,
-  };
-
-  yield* (yield* Store).publish(reported, md);
-
-  return { md, seal: reported };
-});
