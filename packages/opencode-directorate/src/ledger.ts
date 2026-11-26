@@ -1,15 +1,15 @@
 import { Match } from "effect";
 
 // Directorate ledger rules: who may decide an entry, how severities and duplicates resolve, and how entries reopen.
-import { REFUTER, REVIEWER } from "./model.ts";
+import { REFUTER, REVIEWER } from "./feature/agents/agent.ts";
+import type { Actor } from "./feature/agents/agent.ts";
 import type {
-  Actor,
-  Anchor,
   Entry,
   Ledger,
   Severity,
   Verdict,
-} from "./model.ts";
+} from "./feature/ledger/entry.ts";
+import type { Anchor } from "./seal/region.ts";
 
 export const RANK: Record<Severity, number> = {
   blocking: 0,

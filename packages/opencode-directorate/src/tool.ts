@@ -4,12 +4,19 @@ import type { Plugin } from "@opencode/plugin/effect";
 import { Tool } from "@opencode/schema/tool";
 import { Effect, Predicate, Schema } from "effect";
 
-import { budget, budgetLine } from "./budget.ts";
 import { failure, recover } from "./error.ts";
-import { PANELIST, REFUTER, REVIEWER, SCOUT } from "./model.ts";
-import type { Actor, Seal } from "./model.ts";
+import {
+  budgetLine,
+  PANELIST,
+  REFUTER,
+  REVIEWER,
+  SCOUT,
+} from "./feature/agents/agent.ts";
+import type { Actor } from "./feature/agents/agent.ts";
 import type { Platform } from "./platform.ts";
+import type { Seal } from "./seal/record.ts";
 import { Host, Sessions } from "./session.ts";
+import { budget } from "./workflow/review/window.ts";
 
 type Services = Platform | Host | Sessions;
 

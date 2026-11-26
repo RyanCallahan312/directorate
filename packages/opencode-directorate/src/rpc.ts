@@ -4,7 +4,10 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { Schema } from "effect";
 
-import { SettingsSchema, SettingsScopeSchema } from "./model.ts";
+import {
+  SettingsSchema,
+  SettingsScopeSchema,
+} from "./feature/settings/file.ts";
 
 const std = Schema.toStandardSchemaV1;
 

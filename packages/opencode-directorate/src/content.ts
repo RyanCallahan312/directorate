@@ -3,14 +3,17 @@ import { Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { failure, ReviewError } from "./error.ts";
 import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "./exclusions.ts";
+import type { Entry } from "./feature/ledger/entry.ts";
 import { Git } from "./git.ts";
-import { isUrl } from "./model.ts";
-import type { Anchor, Entry, Seal, Side } from "./model.ts";
 import { LineRef } from "./repo-path.ts";
+import type { Seal } from "./seal/record.ts";
+import type { Anchor, Side } from "./seal/region.ts";
 import { Store } from "./store.ts";
 import { decodeUtf8 } from "./utf8.ts";
 
 const IO_CONCURRENCY = 16;
+
+const isUrl = (ref: string) => /^https?:\/\//u.test(ref.trim());
 
 export const outsideWorktreeScope = (seal: Seal, path: string) =>
   seal.postImage === "worktree" && !inScope(path, scopeOf(seal.target.paths));

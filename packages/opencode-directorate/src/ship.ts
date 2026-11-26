@@ -21,10 +21,9 @@ import {
 import { SecureRandom } from "effect/crypto";
 
 import { failure, recover } from "./error.ts";
+import { REVIEWER, ROLE_SET } from "./feature/agents/agent.ts";
 import { Git } from "./git.ts";
 import { Host } from "./host.ts";
-import { REVIEWER, ROLE_SET } from "./model.ts";
-import type { ReviewScope, Seal } from "./model.ts";
 import type { Platform } from "./platform.ts";
 import { ProcessIdentity } from "./process-identity.ts";
 import {
@@ -36,10 +35,12 @@ import {
   turns,
 } from "./recovery.ts";
 import type { Activity } from "./recovery.ts";
-import { parseRequest, reviewRequest } from "./request.ts";
+import type { Seal } from "./seal/record.ts";
 import { decideShip, shipKickoff } from "./ship-step.ts";
 import { Store } from "./store.ts";
 import { currentFingerprint } from "./target.ts";
+import { parseRequest, reviewRequest } from "./workflow/review/request.ts";
+import type { ReviewScope } from "./workflow/review/request.ts";
 
 const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 

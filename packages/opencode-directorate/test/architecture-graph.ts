@@ -63,7 +63,6 @@ export const ROOT_MODULES: readonly string[] = [
 /** Flat src/*.ts files still awaiting their move. Remove each one as it moves; when empty, the checker is fully strict. */
 export const LEGACY_ROOT_MODULES: readonly string[] = [
   "archive.ts",
-  "budget.ts",
   "bundled.ts",
   "children.ts",
   "command.ts",
@@ -82,14 +81,12 @@ export const LEGACY_ROOT_MODULES: readonly string[] = [
   "ledger-tools.ts",
   "ledger.ts",
   "lock-busy.ts",
-  "model.ts",
   "platform.ts",
   "process-identity.ts",
   "read-tools.ts",
   "recovery.ts",
   "repo-path.ts",
   "report.ts",
-  "request.ts",
   "seal.ts",
   "session.ts",
   "settings.ts",

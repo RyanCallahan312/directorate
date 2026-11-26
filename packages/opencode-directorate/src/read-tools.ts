@@ -15,8 +15,8 @@ import {
   readLines,
   renderRegions,
 } from "./inspect.ts";
-import { DispositionSchema, SideSchema } from "./model.ts";
 import { RepoPath, RepoScope } from "./repo-path.ts";
+import { DispositionSchema, SideSchema } from "./seal/region.ts";
 import { Sessions } from "./session.ts";
 import { Store } from "./store.ts";
 import {

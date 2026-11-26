@@ -13,16 +13,19 @@ import {
 } from "effect";
 
 import { failure } from "./error.ts";
-import { Git } from "./git.ts";
+import { DEFAULT_PANEL, seatRef } from "./feature/dispatch/seat.ts";
 import {
-  DEFAULT_PANEL,
   isUnset,
   normalizeSettings,
   sameSettings,
-  seatRef,
   SettingsSchema,
-} from "./model.ts";
-import type { Mode, Settings, SettingsScope as Scope } from "./model.ts";
+} from "./feature/settings/file.ts";
+import type {
+  Settings,
+  SettingsScope as Scope,
+} from "./feature/settings/file.ts";
+import { Git } from "./git.ts";
+import type { Mode } from "./workflow/review/request.ts";
 
 export const SettingsJson = Schema.fromJsonString(SettingsSchema, { space: 2 });
 

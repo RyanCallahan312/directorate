@@ -24,7 +24,6 @@ import { ChildProcess } from "effect/process";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
-import { budget, budgetLine } from "../src/budget.ts";
 import { childFailures } from "../src/children.ts";
 import { command } from "../src/command.ts";
 import {
@@ -42,6 +41,9 @@ import {
 } from "../src/coverage.ts";
 import { assemble, buildRegions, RawDiff } from "../src/diff.ts";
 import { isSecret } from "../src/exclusions.ts";
+import { budgetLine } from "../src/feature/agents/agent.ts";
+import type { Actor } from "../src/feature/agents/agent.ts";
+import type { Entry, Ledger, Verdict } from "../src/feature/ledger/entry.ts";
 import { Git } from "../src/git.ts";
 import {
   grepSealed,
@@ -59,14 +61,6 @@ import {
   unresolved,
   verdictError,
 } from "../src/ledger.ts";
-import type {
-  Actor,
-  Entry,
-  Ledger,
-  Mode,
-  Seal,
-  Verdict,
-} from "../src/model.ts";
 import { platformLayer } from "../src/platform.ts";
 import type { Platform } from "../src/platform.ts";
 import { RepoPath, RepoScope } from "../src/repo-path.ts";
@@ -77,9 +71,12 @@ import {
   recheckSeal,
   refreshSeal,
 } from "../src/seal.ts";
+import type { Seal } from "../src/seal/record.ts";
 import { SettingsStore } from "../src/settings.ts";
 import { StateRoot, Store } from "../src/store.ts";
 import { currentFingerprint } from "../src/target.ts";
+import type { Mode } from "../src/workflow/review/request.ts";
+import { budget } from "../src/workflow/review/window.ts";
 import { commandFixture } from "./fixtures.ts";
 
 const present = <T>(value: T | null | undefined): T => {

@@ -5,15 +5,15 @@
 import { Effect, Schema } from "effect";
 
 import { failure, ignore } from "./error.ts";
+import { ROLE_SET } from "./feature/agents/agent.ts";
+import { DEFAULT_PANEL } from "./feature/dispatch/seat.ts";
+import { LENSES } from "./feature/ledger/entry.ts";
 import {
-  DEFAULT_PANEL,
   isUnset,
-  LENSES,
-  ROLE_SET,
   SettingsSchema,
   SettingsScopeSchema,
-} from "./model.ts";
-import type { Settings, SettingsScope } from "./model.ts";
+} from "./feature/settings/file.ts";
+import type { Settings, SettingsScope } from "./feature/settings/file.ts";
 import { DirectorateRpc } from "./rpc.ts";
 import { Host, Sessions } from "./session.ts";
 import { describe, SettingsStore } from "./settings.ts";

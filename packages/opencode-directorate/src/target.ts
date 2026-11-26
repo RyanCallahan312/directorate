@@ -6,7 +6,8 @@ import { failure, ReviewError } from "./error.ts";
 import { scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
-import type { Seal, Target, TargetKind } from "./model.ts";
+import type { Seal } from "./seal/record.ts";
+import type { Target, TargetKind } from "./seal/target.ts";
 import { Worktree } from "./worktree.ts";
 
 export interface Ends {

@@ -21,26 +21,26 @@ import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
 import type { Piece } from "./diff.ts";
 import { failure, ReviewError } from "./error.ts";
 import { exclusionReason, isSecret, scopeOf } from "./exclusions.ts";
+import { REVIEWER } from "./feature/agents/agent.ts";
+import type { Actor } from "./feature/agents/agent.ts";
+import type { Entry, Ledger } from "./feature/ledger/entry.ts";
 import { Git } from "./git.ts";
 import { sha256 } from "./hash.ts";
 import { Host } from "./host.ts";
 import { reopen, unresolved } from "./ledger.ts";
-import { DEFAULT_BUDGET, PANEL_BUDGET_FACTOR, REVIEWER } from "./model.ts";
-import type {
-  Actor,
-  Entry,
-  FileEntry,
-  Ledger,
-  Mode,
-  Region,
-  Seal,
-  Target,
-} from "./model.ts";
 import { ProcessIdentity } from "./process-identity.ts";
+import type { Seal } from "./seal/record.ts";
+import type { FileEntry, Region } from "./seal/region.ts";
+import type { Target } from "./seal/target.ts";
 import { emptyLedger, Store } from "./store.ts";
 import { currentFingerprint, endsFingerprint, resolveEnds } from "./target.ts";
 import type { Current } from "./target.ts";
 import { decodeUtf8 } from "./utf8.ts";
+import type { Mode } from "./workflow/review/request.ts";
+import {
+  DEFAULT_BUDGET,
+  PANEL_BUDGET_FACTOR,
+} from "./workflow/review/window.ts";
 import { Worktree } from "./worktree.ts";
 
 const FILE_REGION_LINES = 300;

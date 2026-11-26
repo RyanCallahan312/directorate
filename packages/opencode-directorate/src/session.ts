@@ -14,9 +14,9 @@ import {
 
 import { childOutstanding } from "./children.ts";
 import { ignore } from "./error.ts";
+import { CHILD_ROLE_SET } from "./feature/agents/agent.ts";
 import { Host } from "./host.ts";
-import { CHILD_ROLE_SET } from "./model.ts";
-import type { Seal } from "./model.ts";
+import type { Seal } from "./seal/record.ts";
 import { Store } from "./store.ts";
 
 export { Host } from "./host.ts";

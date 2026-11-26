@@ -1,8 +1,6 @@
 // Directorate report (Directive): the review's status and the markdown rendered from verified dossier entries only.
 import { DateTime, Effect, Result } from "effect";
 
-import { budget } from "./budget.ts";
-import type { Phase } from "./budget.ts";
 import {
   actorName,
   childFailures,
@@ -17,19 +15,17 @@ import { coverageSummary } from "./coverage.ts";
 import { failure } from "./error.ts";
 import type { ReviewError } from "./error.ts";
 import { isSecret } from "./exclusions.ts";
+import type { Entry, Ledger, Severity } from "./feature/ledger/entry.ts";
+import type { DirectiveStatus } from "./feature/report/directive.ts";
 import { currentSeverity, RANK, resolvedTarget, unresolved } from "./ledger.ts";
-import type {
-  DirectiveStatus,
-  Entry,
-  Ledger,
-  Region,
-  Seal,
-  Severity,
-} from "./model.ts";
 import { changedSinceSeal } from "./seal.ts";
+import type { Seal } from "./seal/record.ts";
+import type { Region } from "./seal/region.ts";
 import { Store } from "./store.ts";
 import { currentFingerprint } from "./target.ts";
 import type { Current } from "./target.ts";
+import { budget } from "./workflow/review/window.ts";
+import type { Phase } from "./workflow/review/window.ts";
 
 const SEV_LABEL: Record<Severity, string> = {
   blocking: "Blocking",

@@ -2,9 +2,28 @@
 // from the user's words and a leading --scope flag.
 import { Effect, Result, Schema } from "effect";
 
-import { failure } from "./error.ts";
-import { ReviewScopeSchema } from "./model.ts";
-import type { ReviewScope } from "./model.ts";
+import { failure } from "../../error.ts";
+import type { TargetKind } from "../../seal/target.ts";
+
+export const ModeSchema = Schema.Literals(["default", "code-quality", "full"]);
+
+export type Mode = typeof ModeSchema.Type;
+
+export const ReviewScopeSchema = Schema.Literals([
+  "branch",
+  "local",
+  "repository",
+]);
+
+export type ReviewScope = typeof ReviewScopeSchema.Type;
+
+export const DEFAULT_REVIEW_SCOPE: ReviewScope = "branch";
+
+export const REVIEW_SCOPE_TARGET = {
+  branch: "auto",
+  local: "local",
+  repository: "paths",
+} as const satisfies Record<ReviewScope, TargetKind>;
 
 const SCOPE_FLAG = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u;
 

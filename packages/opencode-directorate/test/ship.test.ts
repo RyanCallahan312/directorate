@@ -3,8 +3,9 @@ import { test } from "node:test";
 
 import { DateTime } from "effect";
 
-import { PANELIST } from "../src/model.ts";
-import type { Entry, Seal } from "../src/model.ts";
+import { PANELIST } from "../src/feature/agents/agent.ts";
+import type { Entry } from "../src/feature/ledger/entry.ts";
+import type { Seal } from "../src/seal/record.ts";
 import { decideShip, shipKickoff } from "../src/ship-step.ts";
 
 const state = {

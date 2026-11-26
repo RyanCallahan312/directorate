@@ -47,13 +47,13 @@ import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
+import { LENSES } from "../src/feature/ledger/entry.ts";
+import type { SettingsView, WriteResult } from "../src/rpc.ts";
+import { SealJson } from "../src/seal/record.ts";
 import {
   DEFAULT_BUDGET,
-  LENSES,
   PANEL_BUDGET_FACTOR,
-  SealJson,
-} from "../src/model.ts";
-import type { SettingsView, WriteResult } from "../src/rpc.ts";
+} from "../src/workflow/review/window.ts";
 import { Worktree } from "../src/worktree.ts";
 import { commandFixture } from "./fixtures.ts";
 

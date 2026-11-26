@@ -9,6 +9,16 @@ import {
 import { checkEvidence, checkQuote } from "./content.ts";
 import { coverageSummary } from "./coverage.ts";
 import { failure, ReviewError } from "./error.ts";
+import { PANELIST, REVIEWER, SCOUT } from "./feature/agents/agent.ts";
+import {
+  EntryStatus,
+  KindSchema,
+  Lens,
+  NoteKind,
+  SeveritySchema,
+  VerdictKind,
+} from "./feature/ledger/entry.ts";
+import type { Entry } from "./feature/ledger/entry.ts";
 import { Git } from "./git.ts";
 import {
   currentSeverity,
@@ -17,21 +27,9 @@ import {
   unresolved,
   verdictError,
 } from "./ledger.ts";
-import {
-  EntryStatus,
-  KindSchema,
-  Lens,
-  NoteKind,
-  PANELIST,
-  REVIEWER,
-  SCOUT,
-  SeveritySchema,
-  SideSchema,
-  VerdictKind,
-} from "./model.ts";
-import type { Entry } from "./model.ts";
 // Directorate dossier (ledger) tools: candidate findings filed as they are found, verdicts from a different session, and notes.
 import { RepoPath } from "./repo-path.ts";
+import { SideSchema } from "./seal/region.ts";
 import { Host, Sessions } from "./session.ts";
 import { Store } from "./store.ts";
 import {

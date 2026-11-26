@@ -14,7 +14,8 @@ import type { Shown } from "./coverage.ts";
 import { failure } from "./error.ts";
 import { inScope, isSecret, scopeOf } from "./exclusions.ts";
 import { Git } from "./git.ts";
-import type { Region, Seal, Side } from "./model.ts";
+import type { Seal } from "./seal/record.ts";
+import type { Region, Side } from "./seal/region.ts";
 import { Store } from "./store.ts";
 import { encodeUtf8 } from "./utf8.ts";
 

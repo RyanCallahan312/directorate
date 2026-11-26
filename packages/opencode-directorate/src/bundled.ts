@@ -2,7 +2,7 @@ import { Agent, Skill } from "@opencode/plugin/effect";
 import { Data, Effect, FileSystem, Path, Schema } from "effect";
 import { Yaml } from "effect/encoding";
 
-import { ROLES } from "./model.ts";
+import { ROLES } from "./feature/agents/agent.ts";
 import { Host } from "./session.ts";
 
 const AgentFrontmatter = Schema.Struct({

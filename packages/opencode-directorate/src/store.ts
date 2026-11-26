@@ -17,10 +17,12 @@ import {
 } from "effect";
 
 import { failure, ReviewError } from "./error.ts";
+import { LedgerJson } from "./feature/ledger/entry.ts";
+import type { Ledger } from "./feature/ledger/entry.ts";
 import { LockBusy } from "./lock-busy.ts";
-import { LedgerJson, SealJson } from "./model.ts";
-import type { Ledger, Seal } from "./model.ts";
 import { ProcessIdentity } from "./process-identity.ts";
+import { SealJson } from "./seal/record.ts";
+import type { Seal } from "./seal/record.ts";
 import { StateRoot } from "./state-root.ts";
 
 export { StateRoot } from "./state-root.ts";

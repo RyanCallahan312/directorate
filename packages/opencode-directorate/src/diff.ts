@@ -4,8 +4,8 @@ import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
 
 import { exclusionReason } from "./exclusions.ts";
 import { sha256 } from "./hash.ts";
-import { invalid } from "./model.ts";
-import type { FileEntry, Region } from "./model.ts";
+import { invalid } from "./platform/stored.ts";
+import type { FileEntry, Region } from "./seal/region.ts";
 
 const REGION_MAX_PATCH_LINES = 400;
 

@@ -19,7 +19,6 @@ import {
   Stream,
 } from "effect";
 
-import { budget, budgetNotice } from "./budget.ts";
 import { registerBundled } from "./bundled.ts";
 import {
   childName,
@@ -42,24 +41,20 @@ import { configureRpc, configureTool } from "./configure.ts";
 import { coverageSummary } from "./coverage.ts";
 import { failure, ignore, recover } from "./error.ts";
 import { exportReview, listExportReviews } from "./export.ts";
+import {
+  budgetNotice,
+  CHILD_ROLE_SET,
+  CHILD_ROLES,
+  PANELIST,
+  REFUTER,
+  REVIEWER,
+  ROLE_SET,
+} from "./feature/agents/agent.ts";
+import type { Child } from "./feature/dispatch/lifecycle.ts";
+import { ModelRef } from "./feature/dispatch/seat.ts";
 import { Git } from "./git.ts";
 import { ledgerTools } from "./ledger-tools.ts";
 import { currentSeverity, unresolved } from "./ledger.ts";
-import {
-  CHILD_ROLE_SET,
-  CHILD_ROLES,
-  DEFAULT_REVIEW_SCOPE,
-  ModeSchema,
-  ModelRef,
-  PANELIST,
-  REFUTER,
-  REVIEW_SCOPE_TARGET,
-  REVIEWER,
-  ReviewScopeSchema,
-  ROLE_SET,
-  TargetKindSchema,
-} from "./model.ts";
-import type { Child, Seal } from "./model.ts";
 import { platformLayer } from "./platform.ts";
 import { ProcessIdentity } from "./process-identity.ts";
 import { readTools } from "./read-tools.ts";
@@ -71,8 +66,9 @@ import {
 } from "./recovery.ts";
 import { RepoScope } from "./repo-path.ts";
 import { finalize } from "./report.ts";
-import { reviewRequest } from "./request.ts";
 import { createSeal, recheckable, recheckSeal, refreshSeal } from "./seal.ts";
+import type { Seal } from "./seal/record.ts";
+import { TargetKindSchema } from "./seal/target.ts";
 import { Host, Sessions } from "./session.ts";
 import { describe, resolve, SettingsStore } from "./settings.ts";
 import { registerShip } from "./ship.ts";
@@ -89,6 +85,14 @@ import {
   str,
   writable,
 } from "./tool.ts";
+import {
+  DEFAULT_REVIEW_SCOPE,
+  ModeSchema,
+  REVIEW_SCOPE_TARGET,
+  ReviewScopeSchema,
+  reviewRequest,
+} from "./workflow/review/request.ts";
+import { budget } from "./workflow/review/window.ts";
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 const GRACE_MS = 120_000;
