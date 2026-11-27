@@ -1,6 +1,6 @@
 {
   "name": "@rc312/opencode-directorate",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Evidence-gated code review for OpenCode",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,8 @@
     "dist/gui-experimental.cjs",
     "agents",
     "skills",
-    "directorate.example.json"
+    "directorate.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
