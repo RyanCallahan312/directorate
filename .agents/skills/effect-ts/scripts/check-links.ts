@@ -13,8 +13,7 @@ import {
 
 const defaultSkillRoot = resolve(import.meta.dir, "..");
 const skillRoot = resolve(Bun.env.EFFECT_SKILL_ROOT ?? defaultSkillRoot);
-const repoRoot = resolve(defaultSkillRoot, "../../..");
-const allowedRoot = Bun.env.EFFECT_SKILL_ROOT ? skillRoot : repoRoot;
+const allowedRoot = skillRoot;
 const linkPattern = /(?<!!)\[[^\]]+\]\(([^)]+)\)/g;
 const headingPattern = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/;
 const fencePattern = /^\s{0,3}(`{3,}|~{3,})/;

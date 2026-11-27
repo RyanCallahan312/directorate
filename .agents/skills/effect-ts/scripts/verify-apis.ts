@@ -1,13 +1,35 @@
 #!/usr/bin/env bun
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join, relative, resolve, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import * as ts from "typescript/unstable/ast";
+
+const findNodeModules = (starts: ReadonlyArray<string>, requiredPath: string) => {
+  for (const start of starts) {
+    let dir = resolve(start);
+    while (true) {
+      const candidate = join(dir, "node_modules");
+      if (existsSync(join(candidate, requiredPath))) {
+        return candidate;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) {
+        break;
+      }
+      dir = parent;
+    }
+  }
+  throw new Error(
+    `verify-apis: could not locate node_modules/${requiredPath} from ${starts.join(", ")}`
+  );
+};
 
 const defaultSkillRoot = resolve(import.meta.dir, "..");
 const skillRoot = resolve(Bun.env.EFFECT_SKILL_ROOT ?? defaultSkillRoot);
-const repoRoot = resolve(defaultSkillRoot, "../../..");
-const sourceRoot = join(repoRoot, "node_modules/effect/src");
+const sourceRoot = join(
+  findNodeModules([defaultSkillRoot, process.cwd()], "effect/src"),
+  "effect/src"
+);
 const banned = [
   [/\bEffect\.catchAll\b/g, "Effect.catch"],
   [/\bEffect\.either\b/g, "Effect.result"],
@@ -35,8 +57,11 @@ const banned = [
 ] as const;
 
 const apiSources = {
+  Bytes: "Bytes.ts",
   Cache: "Cache.ts",
   Cause: "Cause.ts",
+  ChildProcess: "process/ChildProcess.ts",
+  ChildProcessSpawner: "process/ChildProcessSpawner.ts",
   Chunk: "Chunk.ts",
   Clock: "Clock.ts",
   Config: "Config.ts",
@@ -52,11 +77,16 @@ const apiSources = {
   Effect: "Effect.ts",
   Exit: "Exit.ts",
   Fiber: "Fiber.ts",
+  FileSystem: "FileSystem.ts",
+  Hex: "encoding/Hex.ts",
   Layer: "Layer.ts",
   Latch: "Latch.ts",
   ManagedRuntime: "ManagedRuntime.ts",
   Match: "Match.ts",
   Option: "Option.ts",
+  Path: "Path.ts",
+  PlatformError: "PlatformError.ts",
+  Predicate: "Predicate.ts",
   PubSub: "PubSub.ts",
   Queue: "Queue.ts",
   Random: "Random.ts",
@@ -65,9 +95,13 @@ const apiSources = {
   Result: "Result.ts",
   Schedule: "Schedule.ts",
   Schema: "Schema.ts",
+  SchemaGetter: "SchemaGetter.ts",
+  SchemaIssue: "SchemaIssue.ts",
   SchemaTransformation: "SchemaTransformation.ts",
   Scope: "Scope.ts",
+  Semaphore: "Semaphore.ts",
   Stream: "Stream.ts",
+  Struct: "Struct.ts",
   TestClock: "testing/TestClock.ts",
   Activity: "workflow/Activity.ts",
   Entity: "cluster/Entity.ts",
@@ -80,6 +114,8 @@ const apiSources = {
   TestRunner: "cluster/TestRunner.ts",
   Workflow: "workflow/Workflow.ts",
   WorkflowEngine: "workflow/WorkflowEngine.ts",
+  Yaml: "encoding/Yaml.ts",
+  Zip: "encoding/Zip.ts",
 } as const;
 const markdownFencePattern = /^\s*(`{3,}|~{3,})(\w+)?/;
 const inlineCodePattern = /(?<!`)`([^`\n]+)`(?!`)/g;
@@ -288,9 +324,9 @@ for (const file of contentFiles(skillRoot)) {
       const token = sourceTokens[index];
       const dot = sourceTokens[index + 1];
       const member = sourceTokens[index + 2];
-       if (!token || dot?.text !== "." || !member) {
-         continue;
-       }
+      if (!token || dot?.text !== "." || !member) {
+        continue;
+      }
       const namespace = imports.get(token.text);
       const symbols = namespace ? exportedSymbols.get(namespace) : undefined;
       if (namespace && symbols && !symbols.has(member.text)) {

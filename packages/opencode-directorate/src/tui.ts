@@ -2,8 +2,14 @@
 // walk (configure-flow.ts) on the TUI's dialogs and the settings RPC (rpc.ts) at the TUI's location.
 import type { Plugin } from "@opencode/plugin/tui";
 
-import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
-import type { Dialogs } from "./configure-flow.ts";
+import {
+  CONFIGURE_DESCRIPTION,
+  configureFromHost,
+  fromHost,
+  rpcBackend,
+  showToast,
+} from "./feature/settings/configure-client.ts";
+import type { Dialogs } from "./feature/settings/configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
 /** The TUI's dialogs and toasts as the walk asks for them. */
@@ -49,8 +55,7 @@ const plugin: Plugin.Definition = {
       // command would never complete. The host's own slash commands are global too.
       commands: [
         {
-          description:
-            "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+          description: CONFIGURE_DESCRIPTION,
           group: "The Directorate",
           id: "directorate.configure",
           palette: true,
@@ -58,15 +63,10 @@ const plugin: Plugin.Definition = {
             const location =
               context.location ?? context.data.location.default();
 
-            const directorate = context.client.rpc(DirectorateRpc);
-
-            return configureFromHost(tuiDialogs(context), {
-              settings: fromHost(() =>
-                directorate.settings(undefined, { location })
-              ),
-              write: (input) =>
-                fromHost(() => directorate.write(input, { location })),
-            });
+            return configureFromHost(
+              tuiDialogs(context),
+              rpcBackend(context.client.rpc(DirectorateRpc), { location })
+            );
           },
           slash: { name: "directorate-configure" },
           title: "Configure The Directorate",

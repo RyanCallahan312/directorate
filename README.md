@@ -2,6 +2,8 @@
 
 The Directorate is an evidence-gated code review plugin for OpenCode. See the [`@rc312/opencode-directorate` package](packages/opencode-directorate/README.md) for installation and usage.
 
+See the [changelog](packages/opencode-directorate/CHANGELOG.md) for release notes.
+
 ## Workspace development
 
 Install Git and run `mise install` to install the pinned Bun and Node.js versions. The same commands run on macOS, Linux, and Windows.
@@ -24,7 +26,9 @@ Install patches TypeScript for Effect diagnostics. The root Oxlint config enable
 
 ## Publish to npm
 
-From the workspace root, install dependencies and pack the plugin. The plugin's `prepack` script builds the Desktop bundle automatically:
+For changes that should appear in the next release, run `bun run changeset` and commit the Markdown file it creates. When preparing a release, run `bun run changeset version` from the workspace root to bump the package version and update the changelog. Match the plugin's workspace version in `bun.lock` to its new version in `package.json` and review the changes before packing.
+
+The plugin's `prepack` script builds the Desktop bundle automatically.
 
 ```sh
 bun install --frozen-lockfile
@@ -34,7 +38,7 @@ npm pack --workspace @rc312/opencode-directorate
 Install the resulting `.tgz` in a scratch environment and verify it loads in OpenCode. With an npm account authorized to publish the package, publish that same artifact:
 
 ```sh
-npm publish ./rc312-opencode-directorate-0.1.1.tgz --access public
+npm publish ./rc312-opencode-directorate-0.1.2.tgz --access public
 ```
 
-Bump the plugin's version in `packages/opencode-directorate/package.json` before each subsequent release and use the matching tarball name.
+Use the tarball name that matches the version you packed.

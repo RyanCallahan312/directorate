@@ -4,8 +4,15 @@
 import { Command, Plugin } from "@opencode/plugin/gui";
 import type { Context } from "@opencode/plugin/gui";
 
-import { configureFromHost, fromHost, showToast } from "./configure-client.ts";
-import type { Dialogs } from "./configure-flow.ts";
+import {
+  CONFIGURE_DESCRIPTION,
+  configureFromHost,
+  fromHost,
+  isWarning,
+  rpcBackend,
+  showToast,
+} from "./feature/settings/configure-client.ts";
+import type { Dialogs } from "./feature/settings/configure-flow.ts";
 import { DirectorateRpc } from "./rpc.ts";
 
 /** The app's dialogs and toasts as the walk asks for them. Its select has no disabled options: those are left out. */
@@ -28,7 +35,7 @@ export const guiDialogs = (ctx: Context): Dialogs => ({
       ctx.toast.show({
         description: o.description,
         title: o.title ?? "The Directorate",
-        variant: o.variant === "warning" ? "default" : o.variant,
+        variant: isWarning(o.variant) ? "default" : o.variant,
       });
     }),
 });
@@ -41,14 +48,9 @@ export const configureInGui = (ctx: Context): Promise<void> => {
     DirectorateRpc
   );
 
-  const location = session?.location;
-
   return configureFromHost(
     guiDialogs(ctx),
-    {
-      settings: fromHost(() => directorate.settings(undefined, { location })),
-      write: (input) => fromHost(() => directorate.write(input, { location })),
-    },
+    rpcBackend(directorate, { location: session?.location }),
     ctx.signal
   );
 };
@@ -56,8 +58,7 @@ export const configureInGui = (ctx: Context): Promise<void> => {
 export default Plugin.define({
   setup(ctx) {
     ctx.add(Command, () => ({
-      description:
-        "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+      description: CONFIGURE_DESCRIPTION,
       group: "The Directorate",
       id: "configure",
       keywords: "directorate review panel seats lenses budget settings",

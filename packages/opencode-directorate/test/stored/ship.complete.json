@@ -1,0 +1,16 @@
+{
+  "boot": "boot-1",
+  "chain": [
+    "directorate-20260101000000-aaaaaa",
+    "directorate-20260102000000-bbbbbb"
+  ],
+  "id": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
+  "location": "/repo",
+  "pid": 4242,
+  "reason": "Seal `directorate-20260102000000-bbbbbb`: the Directive is complete and current, with no confirmed findings or unresolved leads.",
+  "request": "ship the feature",
+  "reviewsAtResume": 1,
+  "rounds": 2,
+  "startedAt": 1767261600000,
+  "status": "complete"
+}

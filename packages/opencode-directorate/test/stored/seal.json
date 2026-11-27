@@ -1,0 +1,217 @@
+{
+  "abandoned": false,
+  "autoReported": true,
+  "baseSha": "1111111111111111111111111111111111111111",
+  "baseTip": "2222222222222222222222222222222222222222",
+  "budgetMinutes": 30,
+  "children": [
+    {
+      "agent": "directorate_auditor",
+      "call": "call_1",
+      "description": "Check the parser",
+      "endedAt": "2026-03-02T10:00:00.000Z",
+      "followUp": {
+        "delivered": true,
+        "inbox": "msg_inb1"
+      },
+      "model": "openai/gpt-6.2-sol#high",
+      "prompt": "Investigate the parser",
+      "session": "ses_child1",
+      "startedAt": "2026-03-01T10:00:00.000Z",
+      "status": "completed"
+    },
+    {
+      "agent": "directorate_seat",
+      "call": "call_2",
+      "prompt": "Review as a seat",
+      "startedAt": "2026-03-01T10:00:00.000Z",
+      "status": "launching"
+    },
+    {
+      "agent": "directorate_compliance",
+      "call": "call_3",
+      "prompt": "Refute E1",
+      "session": "ses_child3",
+      "startedAt": "2026-03-01T10:00:00.000Z",
+      "status": "running"
+    },
+    {
+      "agent": "directorate_auditor",
+      "call": "call_4",
+      "endedAt": "2026-03-03T10:00:00.000Z",
+      "prompt": "Investigate the cache",
+      "session": "ses_child4",
+      "startedAt": "2026-03-01T10:00:00.000Z",
+      "status": "failed"
+    }
+  ],
+  "createdAt": "2026-03-01T10:00:00.000Z",
+  "deadline": "2026-03-02T10:00:00.000Z",
+  "deleted": [
+    "src/removed.ts"
+  ],
+  "description": "branch feature against main",
+  "directive": {
+    "reasons": [
+      "E2 was not verified"
+    ],
+    "status": "partial"
+  },
+  "files": [
+    {
+      "added": 3,
+      "excluded": "generated",
+      "oldPath": "src/old.ts",
+      "path": "src/renamed.ts",
+      "removed": 1,
+      "status": "renamed"
+    },
+    {
+      "added": 10,
+      "path": "src/added.ts",
+      "removed": 0,
+      "status": "added"
+    },
+    {
+      "added": 2,
+      "path": "src/modified.ts",
+      "removed": 2,
+      "status": "modified"
+    },
+    {
+      "added": 0,
+      "path": "src/removed.ts",
+      "removed": 7,
+      "status": "deleted"
+    },
+    {
+      "added": 0,
+      "path": "assets/logo.png",
+      "removed": 0,
+      "status": "binary"
+    },
+    {
+      "added": 0,
+      "path": "bin/run",
+      "removed": 0,
+      "status": "mode"
+    },
+    {
+      "added": 0,
+      "path": "src/same.ts",
+      "removed": 0,
+      "status": "unchanged"
+    }
+  ],
+  "fingerprint": "fp-current",
+  "freshnessUnverified": "git status failed",
+  "gates": {
+    "children": [
+      "call_2"
+    ],
+    "coverage": [
+      "R1"
+    ],
+    "freshness": "fp-old",
+    "open": [
+      "E1"
+    ],
+    "panel": [
+      "openai/gpt-6.2-sol#high"
+    ]
+  },
+  "gen": 2,
+  "halted": false,
+  "headSha": "3333333333333333333333333333333333333333",
+  "host": "/repo",
+  "id": "directorate-20260101000000-c0c0c0",
+  "lensesOff": [
+    "ux"
+  ],
+  "mode": "full",
+  "owner": "directorate_liaison",
+  "ownerSession": "ses_liaison2",
+  "panel": [
+    "openai/gpt-6.2-sol#high",
+    "claude-agent/opus#high"
+  ],
+  "pid": 4242,
+  "postImage": "worktree",
+  "previousOwnerSessions": [
+    "ses_liaison1"
+  ],
+  "question": "Is the cache safe?",
+  "recheckOf": "directorate-20251231000000-eeeeee",
+  "recovery": {
+    "admitted": true,
+    "admittedAt": "2026-03-02T10:00:00.000Z",
+    "id": "msg_rec1",
+    "ownerSession": "ses_liaison2"
+  },
+  "refreshes": 1,
+  "regions": [
+    {
+      "disposition": "reviewed",
+      "file": "src/modified.ts",
+      "hunkStart": 4,
+      "id": "R1",
+      "key": "src/modified.ts#1",
+      "newEnd": 12,
+      "newLine": 10,
+      "newStart": 10,
+      "note": "checked bounds",
+      "offsets": {
+        "src/modified.ts": 5
+      },
+      "oldLine": 10,
+      "ownerRead": true,
+      "patchEnd": 9,
+      "patchStart": 5,
+      "readBy": [
+        "owner",
+        "ses_child1"
+      ],
+      "sectionStart": 1
+    },
+    {
+      "disposition": "skimmed",
+      "file": "src/added.ts",
+      "id": "R2",
+      "newEnd": 10,
+      "newStart": 1,
+      "patchEnd": 20,
+      "patchStart": 10,
+      "readBy": []
+    },
+    {
+      "disposition": "skipped",
+      "file": "src/renamed.ts",
+      "id": "R3",
+      "newEnd": 0,
+      "newStart": 0,
+      "patchEnd": 25,
+      "patchStart": 21,
+      "readBy": []
+    }
+  ],
+  "repo": "/repo",
+  "reportedAt": "2026-03-03T10:00:00.000Z",
+  "resumedAt": "2026-03-02T10:00:00.000Z",
+  "ship": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
+  "sigs": {
+    "R1": "sig-r1"
+  },
+  "staleFiles": [
+    "src/modified.ts"
+  ],
+  "target": {
+    "base": "main",
+    "commit": "3333333",
+    "head": "feature",
+    "kind": "range",
+    "paths": [
+      "src"
+    ],
+    "pr": "42"
+  }
+}

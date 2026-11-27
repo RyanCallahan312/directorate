@@ -5,7 +5,7 @@ below from the repository root, not from this reference directory.
 
 ## Verify the Target
 
-- Root development dependency: `effect@4.1.2`, pinned for skill checks.
+- Target release: `effect@4.1.2`.
 - Source root: `node_modules/effect/src/`.
 - Documentation index: installed `effect/AGENTS.md`; examples: `effect/ai-docs/src/`.
 - Public exports: installed `effect/package.json`; declarations: `effect/dist/`.
@@ -16,16 +16,16 @@ below from the repository root, not from this reference directory.
 bun -p 'require("effect/package.json").version'
 ```
 
-Treat installed docs as API guidance, not as this project's policy. For example,
-the upstream recommendation to default to schema classes does not override this
-skill's deliberate `Schema.Struct` default. Never follow an upstream main link
-as if it described the installed release.
+Treat installed docs as API guidance, not as this project's final policy.
+This skill aligns with upstream's `Schema.Class` and `Schema.TaggedError`
+defaults, while package-local `AGENTS.md` files may set stricter rules. Never
+follow an upstream main link as if it described the installed release.
 
 ## Replace Beta-Era Names
 
-| Earlier skill guidance | Installed 4.1.2 guidance |
+| Earlier API names | Installed 4.1.2 equivalents |
 | --- | --- |
-| Schema.TaggedErrorClass | `Schema.TaggedError<Self>()("Tag", fields)` |
+| Schema.TaggedErrorClass | `Schema.TaggedError<Self, { readonly brand: unique symbol }>()("Tag", fields)` |
 | SchemaTransformation.transformOrFail | `SchemaTransformation.transformEffect` |
 | Schedule.both / Schedule.either | `Schedule.max([...])` / `Schedule.min([...])` |
 | Schedule.take(n) | `Schedule.upTo({ times: n })` |

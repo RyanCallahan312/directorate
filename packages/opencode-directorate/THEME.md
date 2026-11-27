@@ -52,7 +52,7 @@ Keep `evacuation` (`drain`) and `lockdown` (`locked`) distinct in headers and de
 | `drain` | `[DIRECTORATE // EVACUATION]` | No new Auditors or Seats; Compliance still allowed |
 | `locked` | `[DIRECTORATE // LOCKDOWN]` | Closing tools only; gates no longer push back |
 
-### Directive Verdicts (`src/report.ts`)
+### Directive Verdicts (`src/feature/report/render.ts`)
 
 - Blocking: `<Hold/Blocking — Do Not Merge>`
 - Important: `<Changes Required/Remediation Needed>`
@@ -60,7 +60,7 @@ Keep `evacuation` (`drain`) and `lockdown` (`locked`) distinct in headers and de
 - Clean (`complete`): `<Approved/Tolerated> — No Anomalies Verified`
 - Clean (`partial` / `stale`): `<Provisional/Incomplete> — No Confirmed Issues`
 
-### Settings UI (`src/configure-flow.ts`, `src/tui.ts`, `src/gui.ts`)
+### Settings UI (`src/feature/settings/configure-flow.ts`, `src/tui.ts`, `src/gui.ts`)
 
 - Root / scope titles: `The Directorate // Settings`, `Global Charter`, `Local Jurisdiction (This project)`
 - Panel section: `Directorate Seats (panel models)`, `Add a Seat…`, `Seat a model on The Directorate`

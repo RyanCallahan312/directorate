@@ -1,9 +1,10 @@
+// Validate skill: check-links.ts, verify-apis.ts, typecheck-examples.ts, and `bun test` on this file.
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const repoRoot = join(import.meta.dir, "../../../../");
+const runCwd = process.cwd();
 const temporaryDirectories: string[] = [];
 
 const makeSkill = (files: Record<string, string>) => {
@@ -19,7 +20,7 @@ const makeSkill = (files: Record<string, string>) => {
 
 const runScript = (name: string, skillRoot: string) => {
   const process = Bun.spawnSync(["bun", join(import.meta.dir, name)], {
-    cwd: repoRoot,
+    cwd: runCwd,
     env: { ...Bun.env, EFFECT_SKILL_ROOT: skillRoot },
     stderr: "pipe",
     stdout: "pipe",
@@ -232,5 +233,36 @@ describe("effect skill validators", () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.output).toContain("redacted");
+  });
+
+  it("rejects links escaping the skill directory", () => {
+    const skillRoot = makeSkill({
+      "SKILL.md": "[outside](../package.json)\n",
+    });
+
+    const result = runScript("check-links.ts", skillRoot);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.output).toContain("../package.json");
+  });
+
+  it("checks platform and schema-issue API namespaces", () => {
+    const skillRoot = makeSkill({
+      "SKILL.md": [
+        "```ts",
+        'import { FileSystem, SchemaIssue } from "effect"',
+        'import { ChildProcess } from "effect/process"',
+        "declare const issue: SchemaIssue.Issue",
+        "ChildProcess.make",
+        "FileSystem.FileSystem",
+        "ChildProcess.doesNotExist()",
+        "```",
+      ].join("\n"),
+    });
+
+    const result = runScript("verify-apis.ts", skillRoot);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.output).toContain("ChildProcess.doesNotExist");
   });
 });

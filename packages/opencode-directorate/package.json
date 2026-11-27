@@ -1,6 +1,6 @@
 {
   "name": "@rc312/opencode-directorate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Evidence-gated code review for OpenCode",
   "license": "MIT",
   "repository": {
@@ -10,10 +10,12 @@
   },
   "files": [
     "src",
+    "!src/AGENTS.md",
     "dist/gui-experimental.cjs",
     "agents",
     "skills",
-    "directorate.example.json"
+    "directorate.example.json",
+    "CHANGELOG.md"
   ],
   "type": "module",
   "exports": {
@@ -30,7 +32,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@effect/platform-node-shared": "4.1.0",
+    "@effect/platform-node": "4.1.0",
     "@opencode/schema": "2.4.1"
   },
   "devDependencies": {

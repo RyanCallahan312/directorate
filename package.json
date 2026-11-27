@@ -13,10 +13,12 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check": "turbo run lint typecheck test --continue=dependencies-successful",
+    "check:effect-skill": "bun .agents/skills/effect-ts/scripts/check-links.ts && bun .agents/skills/effect-ts/scripts/verify-apis.ts && bun .agents/skills/effect-ts/scripts/typecheck-examples.ts && bun test ./.agents/skills/effect-ts/scripts/scripts.test.ts",
     "fix": "ultracite fix",
     "prepare": "effect-tsgo patch --typescript"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@effect/tsgo": "0.67.5",
     "@oxlint/plugins": "1.88.0",
     "@types/node": "^26.6.5",

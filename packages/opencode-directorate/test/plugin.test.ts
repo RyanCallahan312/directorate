@@ -46,16 +46,21 @@ import { Yaml, Zip } from "effect/encoding";
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
-import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/export.ts";
+import { Completed, statusOf } from "../src/feature/dispatch/lifecycle.ts";
+import { LensSchema } from "../src/feature/ledger/entry.ts";
+import { CallIdSchema, SessionIdSchema } from "../src/platform/host-id.ts";
+import { Worktree } from "../src/platform/worktree.ts";
+import { PAGE_SIZE as EXPORT_PAGE_SIZE } from "../src/records/export.ts";
+import type { SettingsView, WriteResult } from "../src/rpc.ts";
+import { Seal, SealJson } from "../src/seal/record.ts";
+import { SealIdSchema } from "../src/seal/seal-id.ts";
+import { Recovery } from "../src/workflow/review/custody.ts";
 import {
   DEFAULT_BUDGET,
-  LENSES,
   PANEL_BUDGET_FACTOR,
-  SealJson,
-} from "../src/model.ts";
-import type { SettingsView, WriteResult } from "../src/rpc.ts";
-import { Worktree } from "../src/worktree.ts";
+} from "../src/workflow/review/request.ts";
 import { commandFixture } from "./fixtures.ts";
+import { runPromise, runPromiseExit, verifyLogs } from "./logs.ts";
 
 const present = <T>(value: T | null | undefined): T => {
   assert.ok(value !== undefined && value !== null, "expected a value");
@@ -67,7 +72,7 @@ const runEach = <T>(
   items: readonly T[],
   fn: (item: T) => Promise<void>
 ): Promise<void> =>
-  Effect.runPromise(
+  runPromise(
     Effect.forEach(items, (item) => Effect.promise(() => fn(item)), {
       discard: true,
     })
@@ -110,7 +115,7 @@ const scopes: Scope.Closeable[] = [];
 
 // Each test closes its plugins, so no earlier watchdog or event consumer runs into a later test's seals.
 afterEach(() =>
-  Effect.runPromise(
+  runPromise(
     Effect.forEach(scopes.splice(0), (scope) => Scope.close(scope, Exit.void), {
       discard: true,
     })
@@ -119,6 +124,9 @@ afterEach(() =>
 
 // Global settings apply to every repository: no test leaves them for the next.
 afterEach(() => rmSync(home, { force: true, recursive: true }));
+
+// After the plugins close, so their last logs count toward the test that ran them.
+afterEach(verifyLogs);
 
 after(() => {
   for (const d of dirs) {
@@ -178,7 +186,7 @@ const eventBus = (now: () => number) => {
   return {
     /** Resolves once the plugin has handled the event. */
     emit: (event: BusEvent) =>
-      Effect.runPromise(
+      runPromise(
         Effect.gen(function* emit() {
           const handled = yield* Deferred.make<true>();
           yield* Queue.offer(queue, {
@@ -194,7 +202,7 @@ const eventBus = (now: () => number) => {
       gate = { entered, release };
 
       return {
-        entered: Effect.runPromise(Deferred.await(entered)),
+        entered: runPromise(Deferred.await(entered)),
         release: () => Effect.runSync(Deferred.succeed(release, true)),
       };
     },
@@ -430,7 +438,7 @@ const permissionEvent = (
 const harness = async (
   dir: string,
   ids?: string,
-  run = Effect.runPromise,
+  run = runPromise,
   deny: (request: { action: string; resources: string[] }) => boolean = () =>
     false,
   existing?: { agent: Types.DeepMutable<Agent.Info>; skill: Skill.Info },
@@ -439,7 +447,7 @@ const harness = async (
     | Layer.Layer<never> = Layer.empty
 ) => {
   const tag = ids ?? `h${(uid += 1)}`;
-  const S = (name: string) => `ses_${name}-${tag}`;
+  const S = (name: string) => SessionIdSchema.make(`ses_${name}-${tag}`);
   const tools = new Map<string, RegisteredTool>();
   const hooks: Hooks = {};
   const asserted: string[] = [];
@@ -979,7 +987,7 @@ const harness = async (
             const handlers = present(rpcs.get(def.id));
             const handler = present(handlers[name]);
 
-            const exit = await Effect.runPromiseExit(
+            const exit = await runPromiseExit(
               handler(validated.value, {
                 error: (type, message) => ({
                   message,
@@ -1372,18 +1380,63 @@ const fileShipFinding = async (h: Awaited<ReturnType<typeof harness>>) => {
   return { review, seal, shipID, verdict };
 };
 
-const shiftClock = (id: string, minutesAgo: number, minutes = 10) => {
-  const file = path.join(state, id, "seal.json");
-  const s = JSON.parse(readFileSync(file, "utf-8"));
-  const start = Date.now() - minutesAgo * 60_000;
+/**
+ * Virtual time from now for budget tests: `load` starts a plugin instance on it, `adjust` moves it on, `now` reads it,
+ * and `sleptIn` tells whether anything slept in a span of that name.
+ */
+const onVirtualTime = (
+  body: (clock: {
+    adjust: (duration: Duration.Input) => Promise<void>;
+    load: (dir: string, ids?: string) => Promise<Harness>;
+    now: () => Promise<number>;
+    sleptIn: (span: string) => boolean;
+  }) => Promise<void>
+) =>
+  runPromise(
+    Effect.gen(function* virtualTime() {
+      yield* TestClock.setTime(Date.now());
+      const clock = yield* Clock.Clock;
+      const context = yield* Effect.context<never>();
+      const spans = new Set<string>();
+
+      // The plugin captures its clock when it loads, so the watch goes on every instance's runner.
+      const watched: Clock.Clock = {
+        currentTimeMillis: clock.currentTimeMillis,
+        currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+        currentTimeNanos: clock.currentTimeNanos,
+        currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+        monotonicTimeNanos: clock.monotonicTimeNanos,
+        monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+        sleep: (duration) =>
+          Effect.currentSpan.pipe(
+            Effect.tap((span) => Effect.sync(() => spans.add(span.name))),
+            Effect.ignore,
+            Effect.andThen(clock.sleep(duration))
+          ),
+      };
+
+      const run = <A, E>(effect: Effect.Effect<A, E>) =>
+        Effect.runPromiseWith(context)(
+          Effect.provideService(effect, Clock.Clock, watched)
+        );
+
+      yield* Effect.promise(() =>
+        body({
+          adjust: (duration) =>
+            Effect.runPromiseWith(context)(TestClock.adjust(duration)),
+          load: (dir, ids) => harness(dir, ids, run),
+          now: () => run(Clock.currentTimeMillis),
+          sleptIn: (span) => spans.has(span),
+        })
+      );
+    }).pipe(Effect.provide(TestClock.layer()))
+  );
+
+/** Rewrites a stored seal through its codec and class. */
+const reviseSeal = (id: string, revise: (s: Seal) => Seal) => {
   writeFileSync(
-    file,
-    JSON.stringify({
-      ...s,
-      budgetMinutes: minutes,
-      createdAt: new Date(start).toISOString(),
-      deadline: new Date(start + minutes * 60_000).toISOString(),
-    })
+    path.join(state, id, "seal.json"),
+    Schema.encodeSync(SealJson)(revise(sealJson(id)))
   );
 };
 
@@ -1433,7 +1486,7 @@ test("registers review, export, and settings tools, four hooks, and the settings
 
   assert.match(out, /local changes .* 2 files · 2 regions/su);
   assert.doesNotMatch(out, /\n{3,}/u);
-  assert.ok(sealOf(out));
+  sealOf(out);
   assert.deepEqual(asserted, ["directorate_liaison:directorate_seal"]);
 });
 
@@ -1555,7 +1608,10 @@ test("the plugin registers bundled review agents and skill without discovery fil
     .filter((f) => f.endsWith(".md"))
     .toSorted();
 
-  const expectedRefs = [...LENSES, "triage"].map((n) => `${n}.md`).toSorted();
+  const expectedRefs = [...LensSchema.literals, "triage"]
+    .map((n) => `${n}.md`)
+    .toSorted();
+
   assert.deepEqual(refFiles, expectedRefs, "references match LENSES + triage");
 
   for (const file of refFiles) {
@@ -1628,7 +1684,7 @@ const exportHarness = (dir: string) =>
   harness(dir, undefined, undefined, undefined, undefined, openCodeFixture);
 
 const readArchive = (archive: string) =>
-  Effect.runPromise(
+  runPromise(
     Stream.make(readFileSync(archive)).pipe(
       Stream.pipeThroughChannel(Zip.decode()),
       Stream.filter((entry) => entry.header.type === "File"),
@@ -1674,23 +1730,32 @@ test("directorate_export archives every generation and available session trace f
 
   const run = {
     agent: "directorate_seat",
-    call: "call-1",
+    call: CallIdSchema.make("call-1"),
     prompt: "private prompt",
     startedAt: s.createdAt,
-    status: "completed",
   } as const;
 
   writeFileSync(
     path.join(reviewDir, "seal.json"),
-    Schema.encodeSync(SealJson)({
-      ...s,
-      children: [
-        { ...run, session: child },
-        { ...run, call: "call-2", session: child },
-        { ...run, call: "call-3", session: absent },
-      ],
-      reportedAt: s.createdAt,
-    })
+    Schema.encodeSync(SealJson)(
+      Seal.make({
+        ...s,
+        children: [
+          new Completed({ ...run, session: child }),
+          new Completed({
+            ...run,
+            call: CallIdSchema.make("call-2"),
+            session: child,
+          }),
+          new Completed({
+            ...run,
+            call: CallIdSchema.make("call-3"),
+            session: absent,
+          }),
+        ],
+        reportedAt: s.createdAt,
+      })
+    )
   );
   writeFileSync(path.join(reviewDir, "report.md"), "# Saved Directive\n");
   writeFileSync(
@@ -1764,7 +1829,7 @@ test("/directorate-export forwards the request and the agent can list review dat
   const template = sealJson(first);
 
   const seed = (suffix: string, location: string, daysAgo: number) => {
-    const id = `directorate-20261025000000-${suffix}`;
+    const id = SealIdSchema.make(`directorate-20261025000000-${suffix}`);
     const directory = path.join(state, id);
 
     const createdAt = DateTime.subtract(DateTime.nowUnsafe(), {
@@ -1774,17 +1839,19 @@ test("/directorate-export forwards the request and the agent can list review dat
     mkdirSync(directory);
     writeFileSync(
       path.join(directory, "seal.json"),
-      Schema.encodeSync(SealJson)({
-        ...template,
-        createdAt,
-        id,
-        ownerSession: "",
-        repo: execFileSync(
-          "git",
-          ["-C", location, "rev-parse", "--show-toplevel"],
-          { encoding: "utf-8" }
-        ).trim(),
-      })
+      Schema.encodeSync(SealJson)(
+        Seal.make({
+          ...template,
+          createdAt,
+          id,
+          ownerSession: undefined,
+          repo: execFileSync(
+            "git",
+            ["-C", location, "rev-parse", "--show-toplevel"],
+            { encoding: "utf-8" }
+          ).trim(),
+        })
+      )
     );
     writeFileSync(path.join(directory, "diff.patch"), `patch for ${id}`);
 
@@ -1797,13 +1864,15 @@ test("/directorate-export forwards the request and the agent can list review dat
   const unrelated = seed("000004", repo(), 5);
   writeFileSync(
     path.join(state, first, "seal.json"),
-    Schema.encodeSync(SealJson)({ ...template, ownerSession: "" })
+    Schema.encodeSync(SealJson)(
+      Seal.make({ ...template, ownerSession: undefined })
+    )
   );
 
   const exportCommand = present(commands.get("directorate-export"));
 
   const invoke = (text: string) =>
-    Effect.runPromise(
+    runPromise(
       exportCommand.execute({
         delivery: "queue",
         prompt: { text },
@@ -1901,11 +1970,16 @@ test("directorate_export_list pages by nextBefore through every review once, new
   const template = sealJson(first);
 
   const seeded = Array.from({ length: EXPORT_PAGE_SIZE + 2 }, (_, n) => {
-    const id = `directorate-20261026000000-e${n.toString(16).padStart(5, "0")}`;
+    const id = SealIdSchema.make(
+      `directorate-20261026000000-e${n.toString(16).padStart(5, "0")}`
+    );
+
     mkdirSync(path.join(state, id));
     writeFileSync(
       path.join(state, id, "seal.json"),
-      Schema.encodeSync(SealJson)({ ...template, id, ownerSession: "" })
+      Schema.encodeSync(SealJson)(
+        Seal.make({ ...template, id, ownerSession: undefined })
+      )
     );
 
     return id;
@@ -1945,7 +2019,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
     "Review PR #123 with one model.\nFocus on migrations; skip generated files.\n\n ";
 
   const files = [{ uri: "file:///tmp/context.md" }];
-  await Effect.runPromise(
+  await runPromise(
     review.execute({
       delivery: "queue",
       prompt: { files, text },
@@ -1978,7 +2052,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   );
 
   await runEach(["", " \n\t"], async (blank) => {
-    await Effect.runPromise(
+    await runPromise(
       review.execute({ delivery: "queue", prompt: { text: blank }, sessionID })
     );
     assert.match(
@@ -1992,7 +2066,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
     );
   });
 
-  await Effect.runPromise(
+  await runPromise(
     review.execute({
       delivery: "queue",
       prompt: { text: "--scope local focus on tests" },
@@ -2007,7 +2081,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   );
   assert.match(scopedWithFocus, /pass scope: "local"/u);
 
-  await Effect.runPromise(
+  await runPromise(
     review.execute({
       delivery: "queue",
       prompt: { text: "--scope local" },
@@ -2022,7 +2096,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
 
   const count = prompts.length;
   await assert.rejects(
-    Effect.runPromise(
+    runPromise(
       review.execute({
         delivery: "queue",
         prompt: { text: "--scope nonsense" },
@@ -2033,7 +2107,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   );
   assert.equal(prompts.length, count);
 
-  await Effect.runPromise(
+  await runPromise(
     review.execute({
       delivery: "queue",
       prompt: {
@@ -2050,7 +2124,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
   );
   assert.match(recheck, /send that session a follow-up/u);
   assert.match(recheck, /pass recheck: "directorate-20260101000000-abcdef"/u);
-  await Effect.runPromise(
+  await runPromise(
     review.execute({
       delivery: "queue",
       prompt: { text: "--recheck" },
@@ -2066,7 +2140,7 @@ test("/directorate-review forwards free-form requests and only offers setup ques
     /latest reported seal with directorate_ledger_list/u
   );
   await assert.rejects(
-    Effect.runPromise(
+    runPromise(
       review.execute({
         delivery: "queue",
         prompt: { text: "--recheck=oops" },
@@ -2130,106 +2204,107 @@ test("/directorate-ship starts with defaults, forwards scoped requests and attac
   assert.equal(shipState(h.S("scoped")).status, "waiting");
 });
 
-test("/directorate-ship ignores old and unrelated reviews and waits only for its own background Liaison", async () => {
-  const dir = repo();
-  const h = await harness(dir);
-  const liaison = "directorate_liaison";
-  const lead = h.S("lead");
-  await h.createSession("lead", "build");
-  await h.createSession("earlier", liaison, "lead");
-  await h.createSession("foreign", liaison, "lead");
-  await h.createSession("manual", liaison, "lead");
-  await h.createSession("grandchild", liaison, "foreign");
-  await h.createSession("other-lead", "build");
-  await h.createSession("other-reviewer", liaison, "other-lead");
+test("/directorate-ship ignores old and unrelated reviews and waits only for its own background Liaison", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const dir = repo();
+    const h = await load(dir);
+    const liaison = "directorate_liaison";
+    const lead = h.S("lead");
+    await h.createSession("lead", "build");
+    await h.createSession("earlier", liaison, "lead");
+    await h.createSession("foreign", liaison, "lead");
+    await h.createSession("manual", liaison, "lead");
+    await h.createSession("grandchild", liaison, "foreign");
+    await h.createSession("other-lead", "build");
+    await h.createSession("other-reviewer", liaison, "other-lead");
 
-  const cleanReview = async (session: string, directory = dir) => {
-    const { content } = await h.call(
-      "directorate_seal",
-      { repo: directory, scope: "local" },
-      liaison,
-      session
-    );
+    const cleanReview = async (session: string, directory = dir) => {
+      const { content } = await h.call(
+        "directorate_seal",
+        { repo: directory, scope: "local" },
+        liaison,
+        session
+      );
 
-    const seal = sealOf(content);
-    await h.call("directorate_diff", { seal }, liaison, session);
+      const seal = sealOf(content);
+      await h.call("directorate_diff", { seal }, liaison, session);
 
-    const directive = await h.call(
-      "directorate_report",
-      { seal },
-      liaison,
-      session
-    );
+      const directive = await h.call(
+        "directorate_report",
+        { seal },
+        liaison,
+        session
+      );
 
-    assert.match(directive.content, /status: \*\*complete\*\*/u);
+      assert.match(directive.content, /status: \*\*complete\*\*/u);
 
-    return seal;
-  };
+      return seal;
+    };
 
-  const earlier = await cleanReview("earlier");
-  shiftClock(earlier, 1);
-  await h.ship("--scope local");
-  await h.deliver();
-  await cleanReview("foreign", repo());
-  await cleanReview("manual");
-  await cleanReview("grandchild");
-  await cleanReview("other-reviewer");
-  await h.finish("other-lead");
-  assert.equal(storage.has(shipKey(h.S("other-lead"))), false);
-  assert.equal(h.synthetics.length, 0);
+    await cleanReview("earlier");
+    await adjust("1 minute");
+    await h.ship("--scope local");
+    await h.deliver();
+    await cleanReview("foreign", repo());
+    await cleanReview("manual");
+    await cleanReview("grandchild");
+    await cleanReview("other-reviewer");
+    await h.finish("other-lead");
+    assert.equal(storage.has(shipKey(h.S("other-lead"))), false);
+    assert.equal(h.synthetics.length, 0);
 
-  await h.createSession("reviewer", liaison, "lead");
-  await h.finish("lead", [
-    {
-      agent: liaison,
-      childSessionID: Session.ID.make(h.S("reviewer")),
-      description: "Directory review",
-      kind: "subagent",
-      sessionID: Session.ID.make(lead),
-    },
-  ]);
-  assert.equal(h.synthetics.length, 0);
-  assert.equal(shipState(lead).status, "active");
-  assert.equal(shipState(lead).rounds, 0);
-  assert.deepEqual(shipState(lead).chain, []);
-
-  const inboxID = SessionMessage.ID.create();
-  await h.bus.emit({
-    data: {
-      inboxID,
-      item: {
-        delivery: "queue",
-        payload: {
-          metadata: { childID: h.S("reviewer"), source: "subagent" },
-          text: "The Liaison finished without creating a seal.",
-        },
-        type: "synthetic",
+    await h.createSession("reviewer", liaison, "lead");
+    await h.finish("lead", [
+      {
+        agent: liaison,
+        childSessionID: Session.ID.make(h.S("reviewer")),
+        description: "Directory review",
+        kind: "subagent",
+        sessionID: Session.ID.make(lead),
       },
-      sessionID: lead,
-    },
-    type: "session.inbox.enqueued",
-  });
-  await h.bus.emit({
-    data: { inboxID, sessionID: lead },
-    type: "session.inbox.delivered",
-  });
+    ]);
+    assert.equal(h.synthetics.length, 0);
+    assert.equal(shipState(lead).status, "active");
+    assert.equal(shipState(lead).rounds, 0);
+    assert.deepEqual(shipState(lead).chain, []);
 
-  await h.finish("lead", [
-    {
-      agent: liaison,
-      childSessionID: Session.ID.make(h.S("grandchild")),
-      description: "Unrelated review",
-      kind: "subagent",
-      sessionID: Session.ID.make(h.S("foreign")),
-    },
-  ]);
-  const paused = shipState(lead);
-  assert.equal(paused.status, "paused");
-  assert.deepEqual(paused.chain, []);
-  assert.match(String(paused.reason), /no review seal was created/u);
-  assert.equal(h.synthetics.length, 0);
-  assert.equal(h.prompts.length, 1);
-});
+    const inboxID = SessionMessage.ID.create();
+    await h.bus.emit({
+      data: {
+        inboxID,
+        item: {
+          delivery: "queue",
+          payload: {
+            metadata: { childID: h.S("reviewer"), source: "subagent" },
+            text: "The Liaison finished without creating a seal.",
+          },
+          type: "synthetic",
+        },
+        sessionID: lead,
+      },
+      type: "session.inbox.enqueued",
+    });
+    await h.bus.emit({
+      data: { inboxID, sessionID: lead },
+      type: "session.inbox.delivered",
+    });
+
+    await h.finish("lead", [
+      {
+        agent: liaison,
+        childSessionID: Session.ID.make(h.S("grandchild")),
+        description: "Unrelated review",
+        kind: "subagent",
+        sessionID: Session.ID.make(h.S("foreign")),
+      },
+    ]);
+    const paused = shipState(lead);
+    assert.equal(paused.status, "paused");
+    assert.deepEqual(paused.chain, []);
+    assert.match(String(paused.reason), /no review seal was created/u);
+    assert.equal(h.synthetics.length, 0);
+    assert.equal(h.prompts.length, 1);
+  }));
 
 test("/directorate-ship fixes, pauses on no progress, and re-checks the exact seal to completion", async () => {
   const dir = repo();
@@ -2544,7 +2619,7 @@ test("/directorate-ship does not dispatch a fix if user input is projected durin
 
   const success = h.execution("succeeded");
   await Promise.race([
-    Effect.runPromise(Deferred.await(entered), { signal: t.signal }),
+    runPromise(Deferred.await(entered), { signal: t.signal }),
     success.then(() => assert.fail("Execution finished before fingerprinting")),
   ]);
 
@@ -2552,7 +2627,7 @@ test("/directorate-ship does not dispatch a fix if user input is projected durin
     "Stop editing; I will take it from here."
   );
 
-  await Effect.runPromise(Deferred.succeed(release, true));
+  await runPromise(Deferred.succeed(release, true));
   await Promise.all([success, delivered]);
 
   assert.equal(h.synthetics.length, 0);
@@ -2749,7 +2824,7 @@ test("/directorate-ship ignores successor idle after failure and requires cancel
   await assert.rejects(h.ship("pause"), cancelRequired);
   await assert.rejects(h.ship("stop"), cancelRequired);
 
-  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+  await runPromise(Scope.close(h.scope, Exit.void));
   const reloaded = await harness(dir, "ship-failed-fix");
   await assert.rejects(reloaded.ship("stop"), cancelRequired);
   await reloaded.bus.emit({
@@ -2780,7 +2855,7 @@ const virtual = (
     sweep: () => Promise<void>;
   }) => Promise<void>
 ) =>
-  Effect.runPromise(
+  runPromise(
     Effect.gen(function* virtualTime() {
       yield* TestClock.setTime(Date.now());
       const clock = yield* Clock.Clock;
@@ -2898,17 +2973,6 @@ const shipWithOpenReview = async (h: Harness) => {
 
 const patchShip = (sessionID: string, patch: Record<string, Schema.Json>) => {
   storage.set(shipKey(sessionID), { ...shipState(sessionID), ...patch });
-};
-
-const patchSeal = (
-  id: string,
-  patch: Record<string, Schema.Json | undefined>
-) => {
-  const file = path.join(state, id, "seal.json");
-  writeFileSync(
-    file,
-    JSON.stringify({ ...JSON.parse(readFileSync(file, "utf-8")), ...patch })
-  );
 };
 
 test(
@@ -3126,7 +3190,7 @@ test(
 );
 
 test(
-  "/directorate-ship alone continues its own unreported review after an upgrade",
+  "/directorate-ship alone continues its own unreported review after a reload",
   { timeout: 20_000 },
   () =>
     virtual(async ({ load, sweep }) => {
@@ -3135,8 +3199,6 @@ test(
       const lead = h.S("lead");
       const { seal, shipID } = await shipWithOpenReview(h);
       assert.equal(sealJson(seal).ship, shipID);
-      // Older seals had only the Ship's chain to record ownership.
-      patchSeal(seal, { ship: undefined });
       h.projectOutcome("started", "reviewer");
       h.projectOutcome("succeeded", "reviewer");
 
@@ -3315,8 +3377,13 @@ test(
       const h = await load(dir, "ship-allowance");
       const lead = h.S("lead");
       const { seal } = await shipWithDeliveredFix(h);
+
       // Five earlier reviews in this run: the next would be the seventh.
-      patchShip(lead, { chain: ["a", "b", "c", "d", "e", seal] });
+      const earlier = ["a", "b", "c", "d", "e"].map(
+        (n) => `directorate-20250101000000-00000${n}`
+      );
+
+      patchShip(lead, { chain: [...earlier, seal] });
       writeFileSync(path.join(dir, "src/a.ts"), FIXED_SOURCE);
 
       const reloaded = await load(dir, "ship-allowance");
@@ -3501,7 +3568,7 @@ test("/directorate-ship can forget only the exact pending ID after a missed canc
   const id = present(h.prompts.at(-1)?.id);
   await assert.rejects(h.ship("stop"), /cancel.*queued ship input/iu);
   await assert.rejects(h.ship("forget msg_wrong"), new RegExp(id, "u"));
-  await Effect.runPromise(Scope.close(h.scope, Exit.void));
+  await runPromise(Scope.close(h.scope, Exit.void));
 
   // OpenCode cancelled the input while the plugin was unavailable, so no cancellation event is seen here.
   const restarted = await harness(dir, "ship-forget");
@@ -3743,6 +3810,39 @@ test("ownership: only the sealing session may cover, refresh, or report", async 
     }),
     /needs directorate_compliance/u
   );
+
+  // A well-formed id with no entry and a malformed one read the same.
+  const noEntry = (id: string) =>
+    assert.rejects(
+      call("directorate_ledger_verdict", {
+        evidence: ["src/a.ts:1"],
+        id,
+        rationale: "r",
+        seal,
+        verdict: "refuted",
+      }),
+      { message: `No entry ${id}.` }
+    );
+
+  await noEntry("F9");
+  await noEntry("E1");
+
+  await assert.rejects(
+    call(
+      "directorate_ledger_verdict",
+      {
+        evidence: ["src/a.ts:1"],
+        id: "F1",
+        of: "lead",
+        rationale: "r",
+        seal,
+        verdict: "duplicate",
+      },
+      "directorate_compliance",
+      "checker"
+    ),
+    { message: `duplicate needs "of": an existing entry id.` }
+  );
 });
 
 test("full flow: children registered at launch, gates, compliance confirms, report stops running children", async () => {
@@ -3770,7 +3870,7 @@ test("full flow: children registered at launch, gates, compliance confirms, repo
 
   assert.deepEqual(
     [
-      present(sealJson(seal).children[0]).status,
+      statusOf(present(sealJson(seal).children[0])),
       present(sealJson(seal).children[0]).session,
     ],
     ["running", S("child1")],
@@ -5133,7 +5233,7 @@ test("child events: early completion is reconciled; failure overrides idle", asy
 
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin1();
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
 
   const fin2 = await launch(
     "c2",
@@ -5149,7 +5249,7 @@ test("child events: early completion is reconciled; failure overrides idle", asy
     type: "session.execution.failed",
   });
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
-  assert.equal(present(sealJson(seal).children[1]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "failed");
   const contentResult29 = await call("directorate_report", { seal });
   assert.match(
     contentResult29.content,
@@ -5209,7 +5309,40 @@ test("directorate_note answered: only the Liaison settles a failed Auditor's exa
   assert.doesNotMatch(md, /did not complete|unanswered/iu);
 });
 
-test("directorate_wait: the Liaison waits in its turn until a run finishes, and hears what it recorded", async () => {
+test("directorate_note answered: a failed run that is not an Auditor's has no question to settle", async () => {
+  const { S, call, launch, bus } = await harness(repo());
+
+  const contentResult = await call("directorate_seal", {
+    mode: "default",
+    target: { kind: "local" },
+  });
+
+  const seal = sealOf(contentResult.content);
+
+  await call("directorate_diff", { seal });
+
+  const fin = await launch(
+    "c1",
+    "directorate_compliance",
+    "seal: x\nquestion: q4",
+    "r",
+    "running"
+  );
+
+  await fin();
+  await bus.emit({
+    data: { error: { message: "execution failed" }, sessionID: S("r") },
+    type: "session.execution.failed",
+  });
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "failed");
+
+  await assert.rejects(
+    call("directorate_note", { kind: "answered", seal, text: "q4" }),
+    /No failed Auditor question is unanswered/u
+  );
+});
+
+test("directorate_wait: the Liaison waits in its turn until a run finishes, and hears what it recorded", async (t) => {
   const { S, call, launch, bus } = await harness(repo());
 
   const contentResult30 = await call("directorate_seal", {
@@ -5243,17 +5376,50 @@ test("directorate_wait: the Liaison waits in its turn until a run finishes, and 
     /Only the session that sealed/u
   );
   let returned = false;
+  const polling = Deferred.makeUnsafe<true>();
+  const release = Deferred.makeUnsafe<true>();
+  const clock = Effect.runSync(Clock.Clock);
 
-  const waiting = call("directorate_wait", { seal }).then((result) => {
+  const waiting = call(
+    "directorate_wait",
+    { seal },
+    undefined,
+    undefined,
+    (effect) =>
+      runPromise(
+        Effect.provideService(effect, Clock.Clock, {
+          ...clock,
+          currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+          monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+          sleep: (duration) =>
+            Effect.gen(function* sleep() {
+              const span = yield* Effect.orDie(Effect.currentSpan);
+
+              // The poll sleeps in the tool span, not the nested lock retry span.
+              yield* span.name === "directorate_wait" &&
+              (yield* Deferred.succeed(polling, true))
+                ? Deferred.await(release)
+                : clock.sleep(duration);
+            }),
+        }),
+        { signal: t.signal }
+      )
+  ).then((result) => {
     returned = true;
 
     return result.content;
   });
 
-  await delay(1200);
+  // The first poll saw nothing finished and is sleeping before the next one.
+  await Promise.race([
+    runPromise(Deferred.await(polling), { signal: t.signal }),
+    waiting.then((content) => assert.fail(content)),
+  ]);
   assert.equal(returned, false, "nothing finished: still waiting");
   await call("directorate_ledger_add", add(seal), "directorate_auditor", "a");
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
+  await runPromise(Deferred.succeed(release, true));
   const out = await waiting;
   assert.match(
     out,
@@ -5282,7 +5448,6 @@ test("a Seat that returns normally after reading only one region cannot make a c
 
   const seal = sealOf(contentResult33.content);
 
-  assert.ok(seal);
   await call("directorate_diff", { seal });
 
   const returned = await launch(
@@ -5363,7 +5528,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
   );
 
   const runs = () =>
-    sealJson(seal).children.map((k) => [k.call, k.session, k.status]);
+    sealJson(seal).children.map((k) => [k.call, k.session, statusOf(k)]);
 
   await launch(
     "c1",
@@ -5419,7 +5584,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     undefined,
     undefined,
     (effect) =>
-      Effect.runPromise(
+      runPromise(
         Effect.provideService(effect, Clock.Clock, {
           ...clock,
           currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
@@ -5442,7 +5607,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
 
   // Let wait capture the running follow-up before sending its completion.
   await Promise.race([
-    Effect.runPromise(Deferred.await(polling), { signal: t.signal }),
+    runPromise(Deferred.await(polling), { signal: t.signal }),
     waiting.then(({ content }) => assert.fail(content)),
   ]);
   await call(
@@ -5461,7 +5626,7 @@ test("follow-ups to a subagent are new runs of its session: earlier runs keep th
     data: { sessionID: S("b") },
     type: "session.execution.succeeded",
   });
-  await Effect.runPromise(Deferred.succeed(release, true));
+  await runPromise(Deferred.succeed(release, true));
   const contentResult36 = await waiting;
   const out = contentResult36.content;
   assert.equal(out.match(/^- /gmu)?.length, 1, out);
@@ -5519,7 +5684,6 @@ test("a queued terminal event from a background run cannot finish an undelivered
 
   const seal = sealOf(contentResult37.content);
 
-  assert.ok(seal);
   const agent = "directorate_auditor";
   const sessionID = S("a");
   const first = await launch("first", agent, "question: first", "a", "running");
@@ -5535,38 +5699,63 @@ test("a queued terminal event from a background run cannot finish an undelivered
 
   await next.enqueue();
   await bus.emit({ ...oldEvent, type: "session.execution.succeeded" });
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
   await next.returned();
-  assert.equal(present(sealJson(seal).children[1]).status, "running");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "running");
   await next.deliver();
   await bus.emit({ data: { sessionID }, type: "session.execution.succeeded" });
-  assert.equal(present(sealJson(seal).children[1]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[1])), "completed");
 });
 
-test("directorate_wait: a budget that locks while it waits says to report, not to wait again", async () => {
-  const { call, launch } = await harness(repo());
+test("directorate_wait: a budget that locks while it waits says to report, not to wait again", () =>
+  onVirtualTime(async ({ adjust, load, sleptIn }) => {
+    const { call, launch } = await load(repo());
 
-  const contentResult38 = await call("directorate_seal", {
-    budget_minutes: 10,
-    mode: "default",
-    target: { kind: "local" },
-  });
+    const contentResult38 = await call("directorate_seal", {
+      budget_minutes: 10,
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(contentResult38.content);
+    const seal = sealOf(contentResult38.content);
 
-  await launch(
-    "c1",
-    "directorate_auditor",
-    "seal: x\nquestion: q1",
-    "a",
-    "running"
-  );
-  shiftClock(seal, 10 - 1.5 / 60);
-  const contentResult39 = await call("directorate_wait", { seal });
-  const out = contentResult39.content;
-  assert.match(out, /^The budget is locked: call directorate_report now/mu);
-  assert.doesNotMatch(out, /directorate_wait again/u);
-});
+    await launch(
+      "c1",
+      "directorate_auditor",
+      "seal: x\nquestion: q1",
+      "a",
+      "running"
+    );
+    let returned: string | undefined;
+
+    const waiting = call("directorate_wait", { seal }).then(({ content }) => {
+      returned = content;
+
+      return content;
+    });
+
+    /** Until wait polls, time moves in small steps, so lock retries and the Auditor's activity checks run as in real time. */
+    const polled = async (): Promise<void> => {
+      assert.equal(returned, undefined, "wait returned before it polled");
+
+      // The poll sleeps in the tool span, not the nested lock retry span.
+      if (sleptIn("directorate_wait")) {
+        return;
+      }
+
+      await adjust("50 millis");
+      await delay(1);
+
+      return polled();
+    };
+
+    // The budget locks while wait polls, not before it starts.
+    await polled();
+    await adjust("10 minutes");
+    const out = await waiting;
+    assert.match(out, /^The budget is locked: call directorate_report now/mu);
+    assert.doesNotMatch(out, /directorate_wait again/u);
+  }));
 
 test("only the Liaison runs a review: other agents cannot dispatch its subagents or call its tools, and do not see them", async () => {
   const { hooks } = await harness(repo());
@@ -5643,7 +5832,7 @@ test("only the Liaison runs a review: other agents cannot dispatch its subagents
     }
   );
 
-  // A request that names no agent is the session's agent's, as the host resolves it; with neither, the rules decide.
+  // A request that names no agent is the session's agent's, as the host resolves it; with neither, it is refused.
   sessionAgents.set("ses_primary", "build");
 
   const resultResult8 = await decide(
@@ -5672,9 +5861,32 @@ test("only the Liaison runs a review: other agents cannot dispatch its subagents
 
   assert.equal(
     resultResult11[0],
-    "allow",
-    "an unknown caller is left to the agents' rules"
+    "deny",
+    "an unknown caller may not dispatch the Liaison's agents"
   );
+
+  const [unnamedEffect, unnamedMessage] = await decide(
+    permissionEvent(undefined, "directorate_seal", "*")
+  );
+
+  assert.equal(
+    unnamedEffect,
+    "deny",
+    "an unknown caller may not use the review harness"
+  );
+  assert.match(present(unnamedMessage), /Dispatch directorate_liaison/u);
+
+  const unnamedLiaison = await decide(
+    permissionEvent(undefined, "subagent", "directorate_liaison")
+  );
+
+  assert.equal(unnamedLiaison[0], "allow", "anyone may dispatch the Liaison");
+
+  const unnamedOther = await decide(
+    permissionEvent(undefined, "directorate_configure", "*")
+  );
+
+  assert.equal(unnamedOther[0], "allow", "other tools are left to the rules");
 
   const [, message] = await decide(
     permissionEvent("build", "subagent", "directorate_compliance")
@@ -5757,7 +5969,7 @@ test("child events: a failure reported by the subagent tool beats an earlier idl
 
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await fin();
-  assert.equal(present(sealJson(seal).children[0]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "failed");
 });
 
 test("parallel launches with the same description link even when the second launch creates and returns first", async () => {
@@ -5820,7 +6032,7 @@ test("parallel launches with the same description link even when the second laun
   await returned("c2", "b");
   await create("a", titleA);
   assert.deepEqual(
-    sealJson(seal).children.map((c) => [c.call, c.session, c.status]),
+    sealJson(seal).children.map((c) => [c.call, c.session, statusOf(c)]),
     [
       ["c1", S("a"), "running"],
       ["c2", S("b"), "running"],
@@ -5830,10 +6042,10 @@ test("parallel launches with the same description link even when the second laun
   await bus.emit({ data: { sessionID: S("a") }, type: "session.idle" });
   await returned("c1", "a");
   await bus.emit({ data: { sessionID: S("b") }, type: "session.idle" });
-  assert.deepEqual(
-    sealJson(seal).children.map((c) => c.status),
-    ["completed", "completed"]
-  );
+  assert.deepEqual(sealJson(seal).children.map(statusOf), [
+    "completed",
+    "completed",
+  ]);
 });
 
 test("after a plugin reload, a child's events reach its review through the parent session's record", async () => {
@@ -5853,7 +6065,7 @@ test("after a plugin reload, a child's events reach its review through the paren
     data: { error: { message: "execution failed" }, sessionID: h2.S("a") },
     type: "session.execution.failed",
   });
-  assert.equal(present(sealJson(seal).children[0]).status, "failed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "failed");
 });
 
 test("a child still reports completion after a Liaison takeover and plugin reload", async () => {
@@ -5882,15 +6094,15 @@ test("a child still reports completion after a Liaison takeover and plugin reloa
     "next"
   );
   assert.equal(entries.get(first.S("lead"))?.has("directorate-seal"), false);
-  assert.equal(present(sealJson(seal).children[0]).status, "running");
-  await Effect.runPromise(Scope.close(first.scope, Exit.void));
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "running");
+  await runPromise(Scope.close(first.scope, Exit.void));
 
   const reloaded = await harness(dir, "takeover");
   await reloaded.bus.emit({
     data: { sessionID: first.S("a") },
     type: "session.execution.succeeded",
   });
-  assert.equal(present(sealJson(seal).children[0]).status, "completed");
+  assert.equal(statusOf(present(sealJson(seal).children[0])), "completed");
 });
 
 test("a launch the Directive was filed before it linked is stopped when its child appears", async () => {
@@ -5998,35 +6210,36 @@ test("a launch the Directive was filed before it linked is stopped, not adopted,
   assert.deepEqual(sealJson(next).children, []);
 });
 
-test("a subagent launch rejected before it runs (a drain denial) leaves no failed child", async () => {
-  const { S, call, hooks } = await harness(repo());
+test("a subagent launch rejected before it runs (a drain denial) leaves no failed child", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const { S, call, hooks } = await load(repo());
 
-  const { content } = await call("directorate_seal", {
-    budget_minutes: 10,
-    target: { kind: "local" },
-  });
+    const { content } = await call("directorate_seal", {
+      budget_minutes: 10,
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(content);
-  shiftClock(seal, 7);
+    const seal = sealOf(content);
+    await adjust("7 minutes");
 
-  // OpenCode runs execute.before, then the subagent tool, which asks permission (and is denied during drain).
-  await present(hooks["tool.execute.before"])({
-    agent: "directorate_liaison",
-    id: "denied",
-    input: { agent: "directorate_auditor", description: "late", prompt: "q" },
-    sessionID: S("lead"),
-    tool: "subagent",
-  });
-  assert.equal(present(sealJson(seal).children[0]).status, "launching");
-  await present(hooks["tool.execute.after"])({
-    error: { message: "Subagent denied: directorate_auditor" },
-    id: "denied",
-    sessionID: S("lead"),
-    status: "error",
-    tool: "subagent",
-  });
-  assert.deepEqual(sealJson(seal).children, []);
-});
+    // OpenCode runs execute.before, then the subagent tool, which asks permission (and is denied during drain).
+    await present(hooks["tool.execute.before"])({
+      agent: "directorate_liaison",
+      id: "denied",
+      input: { agent: "directorate_auditor", description: "late", prompt: "q" },
+      sessionID: S("lead"),
+      tool: "subagent",
+    });
+    assert.equal(statusOf(present(sealJson(seal).children[0])), "launching");
+    await present(hooks["tool.execute.after"])({
+      error: { message: "Subagent denied: directorate_auditor" },
+      id: "denied",
+      sessionID: S("lead"),
+      status: "error",
+      tool: "subagent",
+    });
+    assert.deepEqual(sealJson(seal).children, []);
+  }));
 
 test(
   "the watchdog reads a reported seal once and still files an overdue one",
@@ -6035,22 +6248,19 @@ test(
     const dir = repo();
     const start = Date.now();
 
-    /** Moves a seal's deadline back to the start; `reopen` drops its report too, as no reported seal could. */
+    /** Moves a seal's window (start and deadline) back to the start; `reopen` drops its report too, as no reported seal could. */
     const overdue = (id: string, reopen = false) => {
-      const file = path.join(state, id, "seal.json");
-      const s = JSON.parse(readFileSync(file, "utf-8"));
-
-      if (reopen) {
-        Reflect.deleteProperty(s, "reportedAt");
-      }
-
-      writeFileSync(
-        file,
-        JSON.stringify({ ...s, deadline: new Date(start).toISOString() })
+      reviseSeal(id, (s) =>
+        Seal.make({
+          ...s,
+          createdAt: DateTime.makeUnsafe(start),
+          deadline: DateTime.makeUnsafe(start),
+          reportedAt: reopen ? undefined : s.reportedAt,
+        })
       );
     };
 
-    await Effect.runPromise(
+    await runPromise(
       Effect.gen(function* watchdogTest() {
         yield* TestClock.setTime(start);
         const run = Effect.runPromiseWith(yield* Effect.context());
@@ -6089,15 +6299,19 @@ test(
           harness(dir, "reread", run)
         );
 
-        // The sweep's file IO runs in real time, which the TestClock does not advance.
-        const until = (count: number, tries = 500): Promise<string[]> =>
+        // The sweep's file IO runs in real time, which the TestClock does not advance, and the next sweep's 30 s start
+        // only once the last one ends: a single adjust can land before that wait begins, so step the clock until filed.
+        const notices = (
+          count: number,
+          tries = 50
+        ): Effect.Effect<readonly string[]> =>
           reloaded.notices.length >= count || tries === 0
-            ? Promise.resolve(reloaded.notices)
-            : delay(10).then(() => until(count, tries - 1));
+            ? Effect.succeed(reloaded.notices)
+            : TestClock.adjust("30 seconds").pipe(
+                Effect.andThen(Effect.promise(() => delay(100))),
+                Effect.andThen(Effect.suspend(() => notices(count, tries - 1)))
+              );
 
-        const notices = (count: number) => Effect.promise(() => until(count));
-
-        yield* TestClock.adjust("30 seconds");
         assert.match(
           (yield* notices(1)).join("\n"),
           new RegExp(`the directive for ${first}`, "u")
@@ -6106,7 +6320,6 @@ test(
         // A sweep that read the reported seal again would now file it, before the second.
         overdue(done, true);
         overdue(second);
-        yield* TestClock.adjust("30 seconds");
 
         const seen = yield* notices(2);
         assert.equal(seen.length, 2);
@@ -6175,87 +6388,88 @@ test("hooks write the seal only for changes: unrelated subagents and running aud
   );
 });
 
-test("one review per session; abandon saves and notifies; resume checks the session's own review and extends a spent budget", async () => {
-  const { call, notices } = await harness(repo());
+test("one review per session; abandon saves and notifies; resume checks the session's own review and extends a spent budget", () =>
+  onVirtualTime(async ({ adjust, load, now }) => {
+    const { call, notices } = await load(repo());
 
-  const contentResult44 = await call("directorate_seal", {
-    mode: "default",
-    target: { kind: "local" },
-  });
+    const contentResult44 = await call("directorate_seal", {
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const first = sealOf(contentResult44.content);
+    const first = sealOf(contentResult44.content);
 
-  await assert.rejects(
-    call("directorate_seal", { mode: "default", target: { kind: "local" } }),
-    /already holds an active containment seal/u
-  );
+    await assert.rejects(
+      call("directorate_seal", { mode: "default", target: { kind: "local" } }),
+      /already holds an active containment seal/u
+    );
 
-  const contentResult45 = await call("directorate_seal", {
-    abandon: true,
-    mode: "default",
-    target: { kind: "local" },
-  });
+    const contentResult45 = await call("directorate_seal", {
+      abandon: true,
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const second = sealOf(contentResult45.content);
+    const second = sealOf(contentResult45.content);
 
-  assert.ok(
-    sealJson(first).reportedAt &&
-      sealJson(first).autoReported &&
-      sealJson(first).abandoned
-  );
-  const [notice] = notices;
-  assert.ok(notice);
-  assert.match(notice, /abandoned for a new review/u);
-  assert.doesNotMatch(notice, /time budget ran out/u);
+    assert.ok(
+      sealJson(first).reportedAt &&
+        sealJson(first).autoReported &&
+        sealJson(first).abandoned
+    );
+    const [notice] = notices;
+    assert.ok(notice);
+    assert.match(notice, /abandoned for a new review/u);
+    assert.doesNotMatch(notice, /time budget ran out/u);
 
-  const contentResult46 = await call(
-    "directorate_seal",
-    { mode: "default", target: { kind: "local" } },
-    "directorate_liaison",
-    "lead2"
-  );
+    const contentResult46 = await call(
+      "directorate_seal",
+      { mode: "default", target: { kind: "local" } },
+      "directorate_liaison",
+      "lead2"
+    );
 
-  const third = sealOf(contentResult46.content);
+    const third = sealOf(contentResult46.content);
 
-  await assert.rejects(
-    call(
+    await assert.rejects(
+      call(
+        "directorate_seal",
+        { resume: second },
+        "directorate_liaison",
+        "lead2"
+      ),
+      new RegExp(`already holds an active containment seal ${third}`, "u")
+    );
+    await adjust("19 minutes");
+    const before = sealJson(second);
+    await call("directorate_seal", { resume: second });
+    const afterResume = sealJson(second);
+    assert.deepEqual(afterResume.createdAt, before.createdAt);
+    assert.deepEqual(afterResume.deadline, before.deadline);
+    // A minute past the deadline: spent, and still inside the watchdog's grace period.
+    await adjust("2 minutes");
+
+    const contentResult47 = await call(
       "directorate_seal",
       { resume: second },
       "directorate_liaison",
-      "lead2"
-    ),
-    new RegExp(`already holds an active containment seal ${third}`, "u")
-  );
-  assert.ok(second);
-  shiftClock(second, 19, 20);
-  const before = sealJson(second);
-  await call("directorate_seal", { resume: second });
-  const afterResume = sealJson(second);
-  assert.deepEqual(afterResume.createdAt, before.createdAt);
-  assert.deepEqual(afterResume.deadline, before.deadline);
-  shiftClock(second, 30, 20);
+      "lead3"
+    );
 
-  const contentResult47 = await call(
-    "directorate_seal",
-    { resume: second },
-    "directorate_liaison",
-    "lead3"
-  );
+    const resumed = contentResult47.content;
 
-  const resumed = contentResult47.content;
-
-  assert.match(resumed, /Resumed containment `directorate-/u);
-  const s = sealJson(second);
-  assert.equal(s.ownerSession.startsWith("ses_lead3"), true);
-  assert.ok(
-    DateTime.toEpochMillis(s.deadline) > Date.now() + 4 * 60_000,
-    "a spent budget gets more time on resume"
-  );
-  await assert.rejects(
-    call("directorate_report", { seal: second }),
-    /Only the session that sealed/u
-  );
-});
+    assert.match(resumed, /Resumed containment `directorate-/u);
+    const s = sealJson(second);
+    assert.equal(s.ownerSession?.startsWith("ses_lead3"), true);
+    assert.ok(
+      DateTime.toEpochMillis(s.deadline) > (await now()) + 4 * 60_000,
+      "a spent budget gets more time on resume"
+    );
+    await assert.rejects(
+      call("directorate_report", { seal: second }),
+      /Only the session that sealed/u
+    );
+  }));
 
 test("simultaneous starts in one session seal one review; abandon keeps the active review when the new target fails", async () => {
   const { call } = await harness(repo());
@@ -6273,7 +6487,7 @@ test("simultaneous starts in one session seal one review; abandon keeps the acti
   const lost = results.filter((r) => r.status === "rejected");
   assert.equal(won.length, 1);
   assert.equal(lost.length, 1);
-  const winner = present(sealOf(present(won[0]).value.content));
+  const winner = sealOf(present(won[0]).value.content);
   assert.match(
     String(lost[0]?.reason),
     new RegExp(`already holds an active containment seal ${winner}`, "u")
@@ -6282,7 +6496,7 @@ test("simultaneous starts in one session seal one review; abandon keeps the acti
   const open = readdirSync(state)
     .filter((id) => /^directorate-\d{14}-[0-9a-f]{6}$/u.test(id))
     .map(sealJson)
-    .filter((s) => !s.reportedAt && s.ownerSession.startsWith("ses_racer"));
+    .filter((s) => !s.reportedAt && s.ownerSession?.startsWith("ses_racer"));
 
   assert.deepEqual(
     open.map((s) => s.id),
@@ -6449,219 +6663,228 @@ test("coverage: 'reviewed' needs a real reader; auditors keep their own read off
   assert.match(out, /R1 recorded as skimmed/u);
 });
 
-test("budget: drain denies auditors not compliance; lock strips tools; role-specific budget text; release after report", async () => {
-  const { S, call, hooks } = await harness(repo());
+test("budget: drain denies auditors not compliance; lock strips tools; role-specific budget text; release after report", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const { S, call, hooks } = await load(repo());
 
-  const contentResult56 = await call("directorate_seal", {
-    budget_minutes: 10,
-    mode: "default",
-    target: { kind: "local" },
-  });
+    const contentResult56 = await call("directorate_seal", {
+      budget_minutes: 10,
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(contentResult56.content);
+    const seal = sealOf(contentResult56.content);
 
-  const ev = (agent: string): PermissionHookEvent => ({
-    action: "subagent",
-    effect: "allow",
-    resources: [agent],
-    sessionID: S("lead"),
-  });
+    // The Liaison dispatches; an unresolved caller is refused before the budget is checked.
+    const ev = (agent: string): PermissionHookEvent => ({
+      action: "subagent",
+      agent: "directorate_liaison",
+      effect: "allow",
+      resources: [agent],
+      sessionID: S("lead"),
+    });
 
-  shiftClock(seal, 7);
-  const e1 = ev("directorate_auditor");
-  await present(hooks["permission.evaluate"])(e1);
-  assert.equal(e1.effect, "deny");
-  assert.match(present(e1.message), /Directorate evacuation \(drain\)/u);
-  const e2 = ev("directorate_compliance");
-  await present(hooks["permission.evaluate"])(e2);
-  assert.equal(e2.effect, "allow");
-  await call(
-    "directorate_ledger_add",
-    add(seal),
-    "directorate_auditor",
-    "scout"
-  );
+    await adjust("7 minutes");
+    const e1 = ev("directorate_auditor");
+    await present(hooks["permission.evaluate"])(e1);
+    assert.equal(e1.effect, "deny");
+    assert.match(present(e1.message), /Directorate evacuation \(drain\)/u);
+    const e2 = ev("directorate_compliance");
+    await present(hooks["permission.evaluate"])(e2);
+    assert.equal(e2.effect, "allow");
+    await call(
+      "directorate_ledger_add",
+      add(seal),
+      "directorate_auditor",
+      "scout"
+    );
 
-  const contentResult57 = await call(
-    "directorate_note",
-    { kind: "limit", seal, text: "stopped at drain" },
-    "directorate_auditor",
-    "scout"
-  );
+    const contentResult57 = await call(
+      "directorate_note",
+      { kind: "limit", seal, text: "stopped at drain" },
+      "directorate_auditor",
+      "scout"
+    );
 
-  const scoutOut = contentResult57.content;
+    const scoutOut = contentResult57.content;
 
-  assert.match(
-    scoutOut,
-    /min left.*file surviving candidates now and hand off/u
-  );
+    assert.match(
+      scoutOut,
+      /min left.*file surviving candidates now and hand off/u
+    );
 
-  // Drain keeps event.system unchanged so the KV-cache prefix holds across normal → drain (tool results carry EVACUATION).
-  const drainAt7: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: {},
-  };
+    // Drain keeps event.system unchanged so the KV-cache prefix holds across normal → drain (tool results carry EVACUATION).
+    const drainAt7: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: {},
+    };
 
-  await present(hooks["session.context"])(drainAt7);
-  shiftClock(seal, 8);
+    await present(hooks["session.context"])(drainAt7);
+    await adjust("1 minute");
 
-  const drainAt8: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: {},
-  };
+    const drainAt8: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: {},
+    };
 
-  await present(hooks["session.context"])(drainAt8);
-  assert.deepEqual(
-    drainAt7.system,
-    drainAt8.system,
-    "drain system prompt stays unchanged between turns"
-  );
-  assert.doesNotMatch(
-    drainAt7.system.map((s) => s.text).join("\n"),
-    /DIRECTORATE \/\/ EVACUATION|min left/u
-  );
-  shiftClock(seal, 11);
+    await present(hooks["session.context"])(drainAt8);
+    assert.deepEqual(
+      drainAt7.system,
+      drainAt8.system,
+      "drain system prompt stays unchanged between turns"
+    );
+    assert.doesNotMatch(
+      drainAt7.system.map((s) => s.text).join("\n"),
+      /DIRECTORATE \/\/ EVACUATION|min left/u
+    );
+    await adjust("3 minutes");
 
-  const lockCtx: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: {
-      directorate_note: {},
-      directorate_report: {},
-      directorate_seal: {},
-      read: {},
-      subagent: {},
-    },
-  };
+    const lockCtx: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: {
+        directorate_note: {},
+        directorate_report: {},
+        directorate_seal: {},
+        read: {},
+        subagent: {},
+      },
+    };
 
-  await present(hooks["session.context"])(lockCtx);
-  assert.match(lockCtx.system.at(-1)?.text ?? "", /DIRECTORATE \/\/ LOCKDOWN/u);
-  assert.deepEqual(Object.keys(lockCtx.tools).toSorted(), [
-    "directorate_note",
-    "directorate_report",
-  ]);
-  const contentResult58 = await call("directorate_report", { seal });
-  const md = contentResult58.content;
-  assert.match(md, /time budget ran out/u);
+    await present(hooks["session.context"])(lockCtx);
+    assert.match(
+      lockCtx.system.at(-1)?.text ?? "",
+      /DIRECTORATE \/\/ LOCKDOWN/u
+    );
+    assert.deepEqual(Object.keys(lockCtx.tools).toSorted(), [
+      "directorate_note",
+      "directorate_report",
+    ]);
+    const contentResult58 = await call("directorate_report", { seal });
+    const md = contentResult58.content;
+    assert.match(md, /time budget ran out/u);
 
-  const afterReport: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: { read: {}, subagent: {} },
-  };
+    const afterReport: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: { read: {}, subagent: {} },
+    };
 
-  await present(hooks["session.context"])(afterReport);
-  assert.deepEqual(Object.keys(afterReport.tools).toSorted(), [
-    "read",
-    "subagent",
-  ]);
-  const e3 = ev("directorate_auditor");
-  await present(hooks["permission.evaluate"])(e3);
-  assert.equal(e3.effect, "allow");
-});
+    await present(hooks["session.context"])(afterReport);
+    assert.deepEqual(Object.keys(afterReport.tools).toSorted(), [
+      "read",
+      "subagent",
+    ]);
+    const e3 = ev("directorate_auditor");
+    await present(hooks["permission.evaluate"])(e3);
+    assert.equal(e3.effect, "allow");
+  }));
 
-test("a refresh from a model step that began before lockdown does not run after it", async () => {
-  const dir = repo();
-  const { S, call, hooks } = await harness(dir);
+test("a refresh from a model step that began before lockdown does not run after it", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const dir = repo();
+    const { S, call, hooks } = await load(dir);
 
-  const { content } = await call("directorate_seal", {
-    budget_minutes: 10,
-    target: { kind: "local" },
-  });
+    const { content } = await call("directorate_seal", {
+      budget_minutes: 10,
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(content);
-  shiftClock(seal, 7);
+    const seal = sealOf(content);
+    await adjust("7 minutes");
 
-  const drain: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: { directorate_refresh: {}, directorate_report: {} },
-  };
+    const drain: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: { directorate_refresh: {}, directorate_report: {} },
+    };
 
-  await present(hooks["session.context"])(drain);
-  assert.ok("directorate_refresh" in drain.tools, "offered during drain");
+    await present(hooks["session.context"])(drain);
+    assert.ok("directorate_refresh" in drain.tools, "offered during drain");
 
-  // The step's call runs against that request's tools, after the budget locked.
-  writeFileSync(path.join(dir, "src/b.ts"), "export const b = 3\n");
-  shiftClock(seal, 11);
-  await assert.rejects(
-    call("directorate_refresh", { seal }),
-    /Directorate lockdown: .* directorate_refresh no longer runs\. Call directorate_report now/u
-  );
-  assert.equal(sealJson(seal).gen, 0);
-  assert.equal(sealJson(seal).refreshes, 0);
-});
+    // The step's call runs against that request's tools, after the budget locked.
+    writeFileSync(path.join(dir, "src/b.ts"), "export const b = 3\n");
+    await adjust("4 minutes");
+    await assert.rejects(
+      call("directorate_refresh", { seal }),
+      /Directorate lockdown: .* directorate_refresh no longer runs\. Call directorate_report now/u
+    );
+    assert.equal(sealJson(seal).gen, 0);
+    assert.equal(sealJson(seal).refreshes, 0);
+  }));
 
-test("a diff read from a model step that began before lockdown records no coverage after it", async () => {
-  const { S, call, hooks } = await harness(repo());
+test("a diff read from a model step that began before lockdown records no coverage after it", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const { S, call, hooks } = await load(repo());
 
-  const { content } = await call("directorate_seal", {
-    budget_minutes: 10,
-    target: { kind: "local" },
-  });
+    const { content } = await call("directorate_seal", {
+      budget_minutes: 10,
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(content);
-  shiftClock(seal, 7);
+    const seal = sealOf(content);
+    await adjust("7 minutes");
 
-  const drain: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: S("lead"),
-    system: [],
-    tools: { directorate_diff: {}, directorate_report: {} },
-  };
+    const drain: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: S("lead"),
+      system: [],
+      tools: { directorate_diff: {}, directorate_report: {} },
+    };
 
-  await present(hooks["session.context"])(drain);
-  assert.ok("directorate_diff" in drain.tools, "offered during drain");
+    await present(hooks["session.context"])(drain);
+    assert.ok("directorate_diff" in drain.tools, "offered during drain");
 
-  // The steps' calls run against those requests' tools, after the budget locked.
-  shiftClock(seal, 11);
-  await assert.rejects(
-    call("directorate_diff", { seal }),
-    /Directorate lockdown: .* directorate_diff no longer runs\. Call directorate_report now/u
-  );
-  await assert.rejects(
-    call("directorate_diff", { seal }, "directorate_auditor", "scout"),
-    /Directorate lockdown: .* directorate_diff no longer runs\. Hand off what you hold now/u
-  );
-  assert.ok(
-    sealJson(seal).regions.every((r) => !r.ownerRead && !r.readBy.length),
-    "no read receipts after lockdown"
-  );
+    // The steps' calls run against those requests' tools, after the budget locked.
+    await adjust("4 minutes");
+    await assert.rejects(
+      call("directorate_diff", { seal }),
+      /Directorate lockdown: .* directorate_diff no longer runs\. Call directorate_report now/u
+    );
+    await assert.rejects(
+      call("directorate_diff", { seal }, "directorate_auditor", "scout"),
+      /Directorate lockdown: .* directorate_diff no longer runs\. Hand off what you hold now/u
+    );
+    assert.ok(
+      sealJson(seal).regions.every((r) => !r.ownerRead && !r.readBy.length),
+      "no read receipts after lockdown"
+    );
 
-  const report = await call("directorate_report", { seal });
-  assert.match(report.content, /status: \*\*partial\*\*/u);
+    const report = await call("directorate_report", { seal });
+    assert.match(report.content, /status: \*\*partial\*\*/u);
 
-  // A reported seal stays readable.
-  const reread = await call("directorate_diff", { seal });
-  assert.match(reread.content, /\[coverage 0\//u);
-});
+    // A reported seal stays readable.
+    const reread = await call("directorate_diff", { seal });
+    assert.match(reread.content, /\[coverage 0\//u);
+  }));
 
-test("the report gate does not ask for Seat dispatches during drain", async () => {
-  const { call } = await harness(repo());
+test("the report gate does not ask for Seat dispatches during drain", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const { call } = await load(repo());
 
-  const { content } = await call("directorate_seal", {
-    budget_minutes: 10,
-    panel_models: ["prov/alpha"],
-    target: { kind: "local" },
-  });
+    const { content } = await call("directorate_seal", {
+      budget_minutes: 10,
+      panel_models: ["prov/alpha"],
+      target: { kind: "local" },
+    });
 
-  const seal = sealOf(content);
-  await call("directorate_diff", { seal });
-  shiftClock(seal, 7);
-  await assert.rejects(
-    call("directorate_report", { seal }),
-    /Protocol hold \(Seats\).*Seats can no longer be launched or continued during drain/u
-  );
-  const report = await call("directorate_report", { seal });
-  assert.match(report.content, /status: \*\*partial\*\*/u);
-});
+    const seal = sealOf(content);
+    await call("directorate_diff", { seal });
+    await adjust("7 minutes");
+    await assert.rejects(
+      call("directorate_report", { seal }),
+      /Protocol hold \(Seats\).*Seats can no longer be launched or continued during drain/u
+    );
+    const report = await call("directorate_report", { seal });
+    assert.match(report.content, /status: \*\*partial\*\*/u);
+  }));
 
 test("ledger listing is repository-local, including outside Git", async () => {
   const first = await harness(repo());
@@ -6698,15 +6921,23 @@ test("ledger listing names the most recently reported seal, however many newer s
     target: { kind: "local" },
   });
 
-  const base = JSON.parse(
-    readFileSync(path.join(state, h.sealOf(content), "seal.json"), "utf-8")
-  );
+  const base = sealJson(h.sealOf(content));
 
-  const put = (id: string, reportedAt?: string) => {
+  const put = (seal: string, reportedAt?: string) => {
+    const id = SealIdSchema.make(seal);
     mkdirSync(path.join(state, id));
     writeFileSync(
       path.join(state, id, "seal.json"),
-      JSON.stringify({ ...base, id, reportedAt })
+      Schema.encodeSync(SealJson)(
+        Seal.make({
+          ...base,
+          id,
+          reportedAt:
+            reportedAt === undefined
+              ? undefined
+              : DateTime.makeUnsafe(reportedAt),
+        })
+      )
     );
   };
 
@@ -6729,50 +6960,51 @@ test("ledger listing names the most recently reported seal, however many newer s
   );
 });
 
-test("after a plugin reload, the session's unreported seal is found even after an abandon; strangers are not bound", async () => {
-  const dir = repo();
-  const h1 = await harness(dir, "reload");
-  await h1.call("directorate_seal", {
-    mode: "default",
-    target: { kind: "local" },
-  });
+test("after a plugin reload, the session's unreported seal is found even after an abandon; strangers are not bound", () =>
+  onVirtualTime(async ({ adjust, load }) => {
+    const dir = repo();
+    const h1 = await load(dir, "reload");
+    await h1.call("directorate_seal", {
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const contentResult59 = await h1.call("directorate_seal", {
-    abandon: true,
-    budget_minutes: 10,
-    mode: "default",
-    target: { kind: "local" },
-  });
+    const contentResult59 = await h1.call("directorate_seal", {
+      abandon: true,
+      budget_minutes: 10,
+      mode: "default",
+      target: { kind: "local" },
+    });
 
-  const live = h1.sealOf(contentResult59.content);
+    h1.sealOf(contentResult59.content);
 
-  shiftClock(live, 11);
-  const h2 = await harness(dir, "reload");
+    await adjust("11 minutes");
+    const h2 = await load(dir, "reload");
 
-  const mine: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: h2.S("lead"),
-    system: [],
-    tools: { directorate_report: {}, read: {} },
-  };
+    const mine: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: h2.S("lead"),
+      system: [],
+      tools: { directorate_report: {}, read: {} },
+    };
 
-  await present(h2.hooks["session.context"])(mine);
-  assert.deepEqual(
-    Object.keys(mine.tools),
-    ["directorate_report"],
-    "locked after reload"
-  );
+    await present(h2.hooks["session.context"])(mine);
+    assert.deepEqual(
+      Object.keys(mine.tools),
+      ["directorate_report"],
+      "locked after reload"
+    );
 
-  const stranger: SessionHookEvent = {
-    agent: "directorate_liaison",
-    sessionID: "someone-else",
-    system: [],
-    tools: { read: {} },
-  };
+    const stranger: SessionHookEvent = {
+      agent: "directorate_liaison",
+      sessionID: "someone-else",
+      system: [],
+      tools: { read: {} },
+    };
 
-  await present(h2.hooks["session.context"])(stranger);
-  assert.deepEqual(Object.keys(stranger.tools), ["read"]);
-});
+    await present(h2.hooks["session.context"])(stranger);
+    assert.deepEqual(Object.keys(stranger.tools), ["read"]);
+  }));
 
 /** A standalone review: a Liaison under `caller` that sealed the local changes and has not reported. */
 const openReview = async (h: Harness, session = "lead") => {
@@ -6940,10 +7172,10 @@ test(
       const seal = await openReview(h);
       idled(h);
       const id = SessionMessage.ID.create();
-      const intent = { id, ownerSession: h.S("lead") };
+      const intent = Recovery.make({ id, ownerSession: h.S("lead") });
 
       // As a crash after the intent was saved and before the host admitted the wake leaves it.
-      patchSeal(seal, { recovery: intent });
+      reviseSeal(seal, (s) => Seal.make({ ...s, recovery: intent }));
       const unsent = await load(dir, "review-intent");
       await sweep();
       assert.deepEqual(
@@ -6953,7 +7185,7 @@ test(
       assert.equal(sealJson(seal).recovery?.admitted, true);
 
       // As a crash after the host admitted it and before that was saved: the Liaison ran it and idled again.
-      patchSeal(seal, { recovery: intent });
+      reviseSeal(seal, (s) => Seal.make({ ...s, recovery: intent }));
       await unsent.promote(present(inbox.find((item) => item.id === id)));
       idled(unsent);
       const unacknowledged = await load(dir, "review-intent");
@@ -6993,9 +7225,13 @@ test(
       await start("working");
       await start("finishes-on-wait");
 
-      const status = (child: string) =>
-        sealJson(seal).children.find((run) => run.session === h.S(child))
-          ?.status;
+      const status = (child: string) => {
+        const found = sealJson(seal).children.find(
+          (run) => run.session === h.S(child)
+        );
+
+        return found && statusOf(found);
+      };
 
       assert.equal(status("finished"), "running");
 
@@ -7056,7 +7292,7 @@ test(
       const reloaded = await load(dir, "review-child-follow-up");
       await sweep();
       assert.notEqual(
-        run().status,
+        statusOf(run()),
         "completed",
         "the earlier success does not settle queued input"
       );
@@ -7067,7 +7303,7 @@ test(
       reloaded.projectOutcome("failed", "child");
       await sweep();
       assert.equal(run().followUp?.delivered, true);
-      assert.equal(run().status, "completed");
+      assert.equal(statusOf(run()), "completed");
     })
 );
 
@@ -7142,7 +7378,7 @@ test(
       // Its sessions execute in that process, so this one sees a start with no end and nothing running.
       h.projectOutcome("started");
       executing.delete(h.S("lead"));
-      patchSeal(seal, { pid: process.ppid });
+      reviseSeal(seal, (s) => Seal.make({ ...s, pid: process.ppid }));
 
       const reloaded = await load(dir, "review-foreign");
       await sweep();
@@ -7157,7 +7393,7 @@ test(
   async () => {
     const dir = repo();
     const start = Date.now();
-    await Effect.runPromise(
+    await runPromise(
       Effect.gen(function* watchdogTest() {
         yield* TestClock.setTime(start);
         const run = Effect.runPromiseWith(yield* Effect.context());
@@ -7216,7 +7452,7 @@ test(
     const here = repo();
     const there = repo();
     const start = Date.now();
-    await Effect.runPromise(
+    await runPromise(
       Effect.gen(function* watchdogTest() {
         yield* TestClock.setTime(start);
         const run = Effect.runPromiseWith(yield* Effect.context());
@@ -7358,9 +7594,8 @@ test("old-format seals in the store and hook faults never break a session", asyn
     target: { kind: "local" },
   });
 
-  const seal = sealOf(contentResult66.content);
+  sealOf(contentResult66.content);
 
-  assert.ok(seal);
   await present(hooks["tool.execute.before"])({
     agent: "directorate_liaison",
     id: "x",
@@ -7462,7 +7697,7 @@ test("re-check: the same Liaison session re-seals a reported review, Compliance 
     target: { kind: "local" },
   });
 
-  const first = present(sealOf(contentResult71.content));
+  const first = sealOf(contentResult71.content);
 
   await call("directorate_diff", { seal: first });
   await call(
@@ -7513,7 +7748,7 @@ test("re-check: the same Liaison session re-seals a reported review, Compliance 
     sealed,
     /Reopened for re-decision[^\n]*\n- F1 \(important, F1 in the earlier review\) Division by zero/u
   );
-  const seal = present(sealOf(sealed));
+  const seal = sealOf(sealed);
   assert.notEqual(seal, first);
   assert.equal(sealJson(seal).recheckOf, first);
 
@@ -7580,7 +7815,7 @@ test("re-check: the same Liaison session re-seals a reported review, Compliance 
     "lead9"
   );
 
-  const active = present(sealOf(contentResult77.content));
+  const active = sealOf(contentResult77.content);
 
   await assert.rejects(
     call(
@@ -7592,4 +7827,101 @@ test("re-check: the same Liaison session re-seals a reported review, Compliance 
     /has not been reported/u
   );
   assert.equal(sealJson(active).reportedAt, undefined);
+});
+
+test("directorate_configure: an unreadable settings file is not a model problem; show names the panel factor", async () => {
+  const dir = repo();
+  const { call } = await harness(dir);
+  mkdirSync(path.join(dir, ".opencode"));
+  writeFileSync(path.join(dir, ".opencode/directorate.json"), "{invalid");
+
+  await assert.rejects(
+    call(
+      "directorate_configure",
+      { action: "write", scope: "global", settings: { mode: "full" } },
+      "build",
+      "cfg"
+    ),
+    (error: Error) => {
+      assert.match(error.message, /is not valid Directorate settings/u);
+      assert.doesNotMatch(error.message, /Look models up/u);
+
+      return true;
+    }
+  );
+
+  rmSync(path.join(dir, ".opencode/directorate.json"));
+
+  const { content } = await call(
+    "directorate_configure",
+    { action: "show" },
+    "build",
+    "cfg"
+  );
+
+  assert.ok(content.includes(`×${PANEL_BUDGET_FACTOR} for panels`));
+});
+
+test("a reported seal pages a long region through from, and saves nothing", async () => {
+  const dir = repo();
+  writeFileSync(
+    path.join(dir, "src/wide.ts"),
+    `${Array.from(
+      { length: 300 },
+      (_, i) => `export const v${i} = "${"x".repeat(400)}"`
+    ).join("\n")}\n`
+  );
+  const { call } = await harness(dir);
+  const sealed = await call("directorate_seal", { target: { kind: "local" } });
+  const seal = sealOf(sealed.content);
+
+  const wide = present(
+    sealJson(seal).regions.find((r) => r.file === "src/wide.ts")
+  ).id;
+
+  await assert.rejects(
+    call("directorate_diff", { from: 2, regions: [wide], seal }),
+    /is open, so directorate_diff continues long regions by itself/u
+  );
+  await assert.rejects(
+    call("directorate_report", { seal }),
+    /Protocol hold \(Coverage\)/u
+  );
+  await call("directorate_report", { seal });
+
+  const stored = readFileSync(path.join(state, seal, "seal.json"), "utf-8");
+
+  const page = async (input: ToolInput) => {
+    const result = await call("directorate_diff", {
+      regions: [wide],
+      seal,
+      ...input,
+    });
+
+    return result.content;
+  };
+
+  const first = await page({});
+
+  const from = new RegExp(
+    `\\[${wide} continues: \\d+ more lines; call directorate_diff again with regions \\["${wide}"\\] and from (?<from>\\d+)\\]`,
+    "u"
+  ).exec(first)?.groups?.from;
+
+  assert.ok(from, first);
+  assert.equal(await page({}), first, "nothing advanced on its own");
+
+  const second = await page({ from: Number(from) });
+
+  assert.match(second, new RegExp(`continued from body line ${from}\\b`, "u"));
+  assert.notEqual(second, first);
+  assert.equal(
+    readFileSync(path.join(state, seal, "seal.json"), "utf-8"),
+    stored,
+    "no receipt or offset was saved"
+  );
+  await assert.rejects(
+    call("directorate_diff", { from: 2, seal }),
+    /pass exactly one region id/u
+  );
 });

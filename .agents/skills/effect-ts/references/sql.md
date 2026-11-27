@@ -1,13 +1,13 @@
 # Effect SQL and Drizzle
 
 Read this only for `effect/sql`, `@effect/sql-pg`, or Effect-native
-Drizzle. Inspect installed source before using an unfamiliar API. No SQL driver
-or Drizzle package is currently installed in this repository.
+Drizzle. Inspect installed source before using an unfamiliar API, and verify
+the target SQL driver or Drizzle package is installed before importing it.
 
 ## Choose
 
 - Put driver and pool wiring behind an application-owned service, not inside
-  this server-function integration library.
+  reusable domain or library code.
 - Use yieldable Effect-native Drizzle builders only if a compatible integration
   is installed; do not assume ordinary Drizzle builders are Effect-native.
 - Use `SqlClient.SqlClient` for driver-agnostic raw SQL. Tagged-template values

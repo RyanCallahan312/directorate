@@ -14,17 +14,19 @@ cancellation, and lifetime once, then keep the feature Effect-native.
 | Reports one callback result | `Effect.callback` |
 | Reports many values | `Stream.callback` |
 
-Map every unknown cause immediately into a domain error, normally a local
-`Data.TaggedError`. Use `Schema.TaggedError` instead when the adapter error
-is serialized across an HTTP, RPC, workflow, persistence, or other boundary.
+Map every unknown cause immediately into a domain error, defaulting to a
+branded `Schema.TaggedError` (`Schema.Defect()` for unknown causes).
 
 ```ts
-import { Data, Effect } from "effect"
+import { Effect, Schema } from "effect"
 
-class RequestError extends Data.TaggedError("RequestError")<{
-  readonly url: string
-  readonly cause: unknown
-}> {}
+class RequestError extends Schema.TaggedError<
+  RequestError,
+  { readonly brand: unique symbol }
+>()("RequestError", {
+  url: Schema.String,
+  cause: Schema.Defect()
+}) {}
 
 declare const request: (url: string, signal: unknown) => Promise<unknown>
 

@@ -15,6 +15,7 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "ignoreEffectSuggestionsInTscExitCode": false,
         "allowedExperimentalApis": ["effect/encoding/Zip"],
         "allowedUnstableApis": [
           "effect/ByteSize#toNumber",
@@ -25,10 +26,10 @@
           "effect/PlatformError",
           "effect/encoding/Yaml",
           "effect/process",
+          "@effect/platform-node/NodeFileSystem",
+          "@effect/platform-node/NodePath",
           "@effect/platform-node-shared/NodeChildProcessSpawner",
-          "@effect/platform-node-shared/NodeCrypto",
-          "@effect/platform-node-shared/NodeFileSystem",
-          "@effect/platform-node-shared/NodePath"
+          "@effect/platform-node-shared/NodeCrypto"
         ]
       }
     ]

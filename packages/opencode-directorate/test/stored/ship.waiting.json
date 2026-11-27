@@ -1,0 +1,28 @@
+{
+  "admitting": true,
+  "boot": "boot-1",
+  "chain": [
+    "directorate-20260101000000-aaaaaa",
+    "directorate-20260102000000-bbbbbb"
+  ],
+  "id": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
+  "inbox": {
+    "continuation": true,
+    "id": "msg_inb1"
+  },
+  "location": "/repo",
+  "pid": 4242,
+  "plan": {
+    "id": "msg_plan1",
+    "origin": "msg_1",
+    "rendered": false,
+    "text": "1. Fix E1"
+  },
+  "reason": "1 confirmed finding remains.",
+  "request": "ship the feature",
+  "reviewsAtResume": 1,
+  "rounds": 2,
+  "startedAt": 1767261600000,
+  "status": "waiting",
+  "step": "fix:directorate-20260102000000-bbbbbb"
+}

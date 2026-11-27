@@ -1,0 +1,14 @@
+{
+  "panel": {
+    "models": [
+      {
+        "model": "claude-agent/opus"
+      }
+    ]
+  },
+  "mode": "full",
+  "lenses": {
+    "disabled": []
+  },
+  "budget_minutes": {}
+}

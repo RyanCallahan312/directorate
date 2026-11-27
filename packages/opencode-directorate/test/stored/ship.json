@@ -1,0 +1,41 @@
+{
+  "admitting": true,
+  "awaiting": {
+    "ses_child1": 1767261700000
+  },
+  "boot": "boot-1",
+  "chain": [
+    "directorate-20260101000000-aaaaaa",
+    "directorate-20260102000000-bbbbbb"
+  ],
+  "id": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
+  "inbox": {
+    "continuation": true,
+    "deliveredAt": 1767261800000,
+    "id": "msg_inb1"
+  },
+  "lastHostFailure": "provider overloaded",
+  "location": "/repo",
+  "needsAttachments": true,
+  "notices": {
+    "msg_inb2": "ses_child1"
+  },
+  "origin": "msg_1",
+  "pid": 4242,
+  "plan": {
+    "checkpoint": "msg_cp",
+    "id": "msg_plan1",
+    "origin": "msg_1",
+    "rendered": true,
+    "text": "1. Fix E1"
+  },
+  "reason": "Reviewing",
+  "recovery": "msg_rec1",
+  "request": "ship the feature",
+  "reviewsAtResume": 1,
+  "rounds": 2,
+  "startedAt": 1767261600000,
+  "status": "active",
+  "step": "review",
+  "wokeAt": 1767261900000
+}

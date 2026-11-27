@@ -4,7 +4,8 @@ Read this when changing Effect-native tests.
 
 ## Default shape
 
-- Use ordinary Bun/Vitest tests for pure functions.
+- Use the package's existing test runner (`bun test`, Vitest, or `node --test`)
+  for pure functions.
 - Where the package has `@effect/vitest`, use `it.effect` for Effect-returning
   tests; use `it.live` only when live runtime services are the behavior under
   test.
@@ -56,12 +57,12 @@ import { Context, Effect, Layer, Ref } from "effect"
 
 class Notifier extends Context.Service<Notifier, {
   readonly send: (message: string) => Effect.Effect<void>
-}>()("directorate/example/Notifier") {}
+}>()("app/Notifier") {}
 
 class TestNotifier extends Context.Service<TestNotifier, {
   readonly send: (message: string) => Effect.Effect<void>
   readonly sentMessages: Effect.Effect<ReadonlyArray<string>>
-}>()("directorate/example/Notifier/Test") {}
+}>()("app/Notifier/Test") {}
 
 export const NotifierTestLayer = Layer.effectContext(
   Effect.gen(function* () {

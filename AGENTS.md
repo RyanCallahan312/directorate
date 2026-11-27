@@ -10,3 +10,8 @@ From the repository root, use `bun run` for project scripts and installed tools.
 - `bun run lint` runs lint and formatting checks without type checking or tests.
 - `bun run oxlint <path>` runs only Oxlint on the specified files or directories.
 - `bun run oxfmt <path>` formats the specified files or directories in place.
+- `node --test 'tools/oxlint/directorate/**/*.test.ts'` runs the tests of the repository's own Oxlint rules (`tools/oxlint/directorate/`); `tools/oxlint/anti-slop/` is vendored.
+
+## Every diagnostic is a failure
+
+Lint, formatting, type checking, builds, and tests must exit `0` and print no errors, warnings, hints, notices, or informational diagnostics. That includes Effect language-service diagnostics at every severity: `ignoreEffectSuggestionsInTscExitCode: false` makes suggestions fail `tsc`, too. A passing test run prints nothing but the runner's results. A test that deliberately triggers a logged failure captures it and asserts it (`expectWarnings` in `packages/opencode-directorate/test/logs.ts`). Never silence a diagnostic with a disable comment, an ignore entry, or a relaxed config: fix its cause. "Left as informational" is not an acceptable outcome.

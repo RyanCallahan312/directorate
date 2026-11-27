@@ -1,0 +1,27 @@
+{
+  "budget_minutes": {
+    "code-quality": 45,
+    "default": 25,
+    "full": 90
+  },
+  "default_scope": "local",
+  "lenses": {
+    "disabled": [
+      "ux",
+      "docs"
+    ]
+  },
+  "mode": "code-quality",
+  "panel": {
+    "enabled": true,
+    "models": [
+      {
+        "model": "openai/gpt-6.2-sol",
+        "variant": "high"
+      },
+      {
+        "model": "claude-agent/opus"
+      }
+    ]
+  }
+}

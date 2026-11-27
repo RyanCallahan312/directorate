@@ -3,8 +3,8 @@
 Read this whenever implementation uses `Stream`. A `Stream<A, E, R>` is lazy and
 pull-based: a `run*` destructor starts acquisition, demand, and finalization.
 Keep data streaming until the consumer boundary; do not collect just to use array
-helpers. Use [scheduling](./scheduling.md) for a repeated effect with no emitted
-values.
+helpers. Use a scheduled Effect (see the scheduling branch) for a repeated
+effect with no emitted values.
 
 ## Sources and transforms
 

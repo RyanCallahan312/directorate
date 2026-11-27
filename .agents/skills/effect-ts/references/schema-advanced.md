@@ -1,16 +1,73 @@
 # Advanced Schema
 
+Contents: Model Domain Concepts as Schema Classes · Codecs and Recursion · Variants and Errors · Evolution and Derivation
+
 Use this for codecs, recursion, variants, serialized contracts, or derivation.
 Target installed Effect 4.1.2. Verify unfamiliar APIs in
 `node_modules/effect/src/Schema.ts` and
 `node_modules/effect/src/SchemaTransformation.ts`.
 
-## Model Records First
+## Model Domain Concepts as Schema Classes
 
-Default records to `Schema.Struct(...)`; derive the TypeScript type from it.
-Use `Schema.Opaque` only when a plain-object record needs nominal identity.
-Use `Schema.Class` only when prototype methods, custom construction, `Equal`, or
-inheritance provide concrete value. Do not introduce classes merely to name data.
+Model domain concepts with Effect Schema from the start—even for internal
+values that are not parsed from external input yet. Default named domain
+concepts to branded `Schema.Class` (empty class bodies with standalone pure
+functions are the clean default; add methods on the class only when behavior
+cohesively belongs on the type) instead of maintaining a parallel `interface`:
+
+```ts
+import { Schema } from "effect"
+
+export const UserIdSchema = Schema.Int.pipe(Schema.brand("UserId"))
+export type UserId = typeof UserIdSchema.Type
+
+export class User extends Schema.Class<
+  User,
+  { readonly brand: unique symbol }
+>("app/User")({
+  id: UserIdSchema,
+  name: Schema.NonEmptyString
+}) {}
+
+export const createUser = (id: number, name: string) =>
+  User.make({ id: UserIdSchema.make(id), name })
+
+export const renameUser = (user: User, name: string) =>
+  new User({ ...user, name })
+```
+
+Pure schemas with no class methods work the same way for closed name sets,
+tagged records, and anonymous shapes (`Schema.Literals`, `Schema.Struct`,
+`Schema.Opaque`), deriving types with `typeof XSchema.Type` and keeping
+operations as plain functions:
+
+```ts
+import { Schema } from "effect"
+
+export const RoleSchema = Schema.Literals(["viewer", "editor", "admin"])
+export type Role = typeof RoleSchema.Type
+
+export const MembershipSchema = Schema.Struct({
+  userId: Schema.Int.pipe(Schema.brand("UserId")),
+  role: RoleSchema
+})
+export type Membership = typeof MembershipSchema.Type
+
+export const isAdmin = Schema.is(RoleSchema.pick(["admin"]))
+const isEditorRole = Schema.is(RoleSchema.pick(["editor", "admin"]))
+export const canEdit = (m: Membership) => isEditorRole(m.role)
+```
+
+A `Schema.Class` unifies schema, nominal type, validated construction
+(`new User(...)` / `User.make(...)`), `Equal`, and optional pure domain methods.
+Branding prevents plain objects from silently satisfying a class type, and
+constructing a new instance on updates (`new User({ ...user, name })`) keeps
+invariants checked on every transition. Pass a checked
+`Schema.Struct(...).check(...)` to `Schema.Class` for cross-field invariants.
+
+Escape hatches: use `Schema.Struct(...)` for anonymous shapes, tool inputs, and
+shared field fragments; use `Schema.Opaque` when a plain object needs nominal
+identity without class behavior.
 
 Apply constraints before `Schema.brand(...)`: a brand is nominal typing, not
 runtime validation. Decode unknown input once with
@@ -33,11 +90,46 @@ Do not distribute ad-hoc parsers and formatters around a canonical codec.
 
 ## Variants and Errors
 
-Use `Data.TaggedEnum` for internal control-flow algebras. It supplies
-constructors and exhaustive `$match` without creating a wire contract. Use
-`Schema.TaggedStruct` for an ordinary schema-owned `_tag` member and
-`Schema.TaggedUnion` when a union crosses persistence, HTTP, RPC, workflow, or
-another serialized boundary.
+Default domain variants (internal or serialized) to branded
+`Schema.TaggedClass` members combined with
+`Schema.Union([...]).pipe(Schema.toTaggedUnion("_tag"))`, or
+`Schema.TaggedUnion({ ... })` when plain tagged records fit better. Both supply
+validated construction, `.match`, `.isAnyOf`, and `.guards` from a single
+schema. Use `Data.TaggedEnum` only when a strictly internal control-flow
+algebra has no reason to be a schema.
+
+```ts
+import { Schema } from "effect"
+
+export class Pending extends Schema.TaggedClass<
+  Pending,
+  { readonly brand: unique symbol }
+>()("Pending", {
+  id: Schema.NonEmptyString
+}) {}
+
+export class Shipped extends Schema.TaggedClass<
+  Shipped,
+  { readonly brand: unique symbol }
+>()("Shipped", {
+  id: Schema.NonEmptyString,
+  trackingCode: Schema.NonEmptyString
+}) {}
+
+export const ShipmentSchema = Schema.Union([Pending, Shipped]).pipe(
+  Schema.toTaggedUnion("_tag")
+)
+export type Shipment = typeof ShipmentSchema.Type
+
+export const ship = (shipment: Shipment, trackingCode: string) =>
+  ShipmentSchema.match(shipment, {
+    Pending: (p) => Shipped.make({ id: p.id, trackingCode }),
+    Shipped: (s) => s
+  })
+```
+
+For deciding which slice owns transitions and when to route mutations through a
+single guarded door, see [Architecture](./architecture.md).
 
 Do not inspect `_tag` directly in runtime application code. This includes
 comparisons, ternaries, `switch`, optional reads, destructuring, collection
@@ -46,12 +138,11 @@ persistence or diagnostics. Use the API belonging to the tagged value:
 
 | Need | Preferred API |
 |---|---|
-| Check one internal `Data.TaggedEnum` variant | `Constructors.$is("Tag")(value)` |
-| Exhaustively branch over `Data.TaggedEnum` | `Constructors.$match(value, cases)` |
-| Check one or several `Schema.TaggedUnion` variants | `Union.isAnyOf(["Tag", ...])(value)` |
-| Exhaustively branch over `Schema.TaggedUnion` | `Union.match(value, cases)` |
+| Check one or several union variants | `Union.isAnyOf(["Tag", ...])(value)` |
+| Exhaustively branch over a union | `Union.match(value, cases)` |
 | Branch incrementally or group several tags | `Match.value(value)` with `Match.tag(...)` and `Match.exhaustive` |
 | Validate unknown input as one schema variant | `Union.guards.Tag(value)` |
+| Check / branch on a `Data.TaggedEnum` (when used) | `Constructors.$is("Tag")(value)` / `Constructors.$match(value, cases)` |
 | Handle typed Effect failures | `Effect.catchTag` / `Effect.catchTags` |
 | Inspect `Cause`, `Option`, `Either`, `Exit`, or `Result` | Their `is*`, `match`, and extraction helpers |
 
@@ -69,15 +160,15 @@ closed union visible to TypeScript instead of silently flowing through an
 `else`, default branch, or string set.
 
 Direct `_tag` syntax remains appropriate only where it defines the algebra or
-its type, such as `Schema.TaggedStruct`, `Data.TaggedEnum`, and type-level
-`Extract<Union, { _tag: "Tag" }>` declarations. It is not a runtime branching
-or state-access API.
+its type, such as `Schema.TaggedClass`, `Schema.TaggedStruct`,
+`Data.TaggedEnum`, and type-level `Extract<Union, { _tag: "Tag" }>`
+declarations. It is not a runtime branching or state-access API.
 
-Use `Data.TaggedError` for local, non-serialized errors. Use
-`Schema.TaggedError` for errors that cross HTTP, RPC, workflow,
-persistence, or another serialized boundary. Give boundary errors stable,
-domain-specific tags and schema fields; map infrastructure failures at the
-adapter boundary.
+Default errors to branded `Schema.TaggedError<Self, { readonly brand: unique symbol }>()("Tag", fields)`
+so every domain failure is schema-validated, yieldable, and ready to cross any
+boundary. Give errors stable, domain-specific tags and schema fields; map
+infrastructure failures at the adapter boundary. Reserve `Data.TaggedError` for
+strictly local, non-schema errors where schema validation adds no value.
 
 ## Evolution and Derivation
 

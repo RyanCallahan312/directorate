@@ -1,0 +1,254 @@
+{
+  "entries": [
+    {
+      "anchor": {
+        "endLine": 12,
+        "line": 10,
+        "path": "src/modified.ts",
+        "side": "new"
+      },
+      "brief": "Off by one",
+      "carried": {
+        "id": "F9",
+        "status": "confirmed"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "fix": "Use <=",
+      "history": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_child3"
+          },
+          "evidence": [
+            "src/a.ts:3"
+          ],
+          "of": "F1",
+          "rationale": "Ruled refuted",
+          "severity": "minor",
+          "verdict": "refuted"
+        }
+      ],
+      "id": "F1",
+      "kind": "defect",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "blocking",
+      "staleReason": "Region moved",
+      "status": "confirmed",
+      "title": "Finding F1",
+      "trigger": "Call with empty input",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_child3"
+          },
+          "evidence": [
+            "src/a.ts:3"
+          ],
+          "of": "F1",
+          "rationale": "Ruled confirmed",
+          "severity": "important",
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "anchor": {
+        "endLine": 4,
+        "line": 4,
+        "path": "src/old.ts",
+        "side": "old"
+      },
+      "carried": {
+        "id": "F8",
+        "status": "unverified"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "id": "F2",
+      "kind": "test-gap",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "important",
+      "status": "open",
+      "title": "Finding F2",
+      "trigger": "Call with empty input",
+      "verdicts": []
+    },
+    {
+      "anchor": {
+        "endLine": 12,
+        "line": 10,
+        "path": "src/modified.ts",
+        "side": "new"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "id": "F3",
+      "kind": "quality",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "minor",
+      "status": "refuted",
+      "title": "Finding F3",
+      "trigger": "Call with empty input",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_child3"
+          },
+          "evidence": [
+            "src/a.ts:3"
+          ],
+          "rationale": "Ruled refuted",
+          "verdict": "refuted"
+        }
+      ]
+    },
+    {
+      "anchor": {
+        "endLine": 12,
+        "line": 10,
+        "path": "src/modified.ts",
+        "side": "new"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "id": "F4",
+      "kind": "defect",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "minor",
+      "status": "duplicate",
+      "title": "Finding F4",
+      "trigger": "Call with empty input",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_child3"
+          },
+          "evidence": [
+            "src/a.ts:3"
+          ],
+          "of": "F1",
+          "rationale": "Ruled duplicate",
+          "verdict": "duplicate"
+        }
+      ]
+    },
+    {
+      "anchor": {
+        "endLine": 12,
+        "line": 10,
+        "path": "src/modified.ts",
+        "side": "new"
+      },
+      "consequence": "Wrong result",
+      "createdAt": "2026-03-01T10:00:00.000Z",
+      "evidence": [
+        "src/modified.ts:10"
+      ],
+      "id": "F5",
+      "kind": "defect",
+      "lens": "correctness",
+      "quote": "return x",
+      "raisedBy": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "severity": "important",
+      "status": "resolved",
+      "title": "Finding F5",
+      "trigger": "Call with empty input",
+      "verdicts": [
+        {
+          "at": "2026-03-02T10:00:00.000Z",
+          "by": {
+            "agent": "directorate_compliance",
+            "session": "ses_child3"
+          },
+          "evidence": [
+            "src/a.ts:3"
+          ],
+          "rationale": "Ruled resolved",
+          "verdict": "resolved"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    {
+      "at": "2026-03-02T10:00:00.000Z",
+      "by": {
+        "agent": "directorate_liaison",
+        "session": "ses_liaison"
+      },
+      "kind": "unanswered",
+      "text": "Who calls this?"
+    },
+    {
+      "at": "2026-03-02T10:00:00.000Z",
+      "by": {
+        "agent": "directorate_liaison",
+        "session": "ses_liaison"
+      },
+      "kind": "limit",
+      "text": "Did not run tests"
+    },
+    {
+      "at": "2026-03-02T10:00:00.000Z",
+      "by": {
+        "agent": "directorate_auditor",
+        "session": "ses_child1"
+      },
+      "kind": "assumption",
+      "text": "Input is sorted"
+    },
+    {
+      "at": "2026-03-02T10:00:00.000Z",
+      "by": {
+        "agent": "directorate_liaison",
+        "session": "ses_liaison"
+      },
+      "kind": "answered",
+      "text": "Is the lock held?"
+    }
+  ]
+}

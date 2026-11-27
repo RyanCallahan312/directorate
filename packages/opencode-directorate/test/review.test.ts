@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import nodePath from "node:path";
-import { after, test } from "node:test";
+import { after, afterEach, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import type { Plugin } from "@opencode/plugin/effect";
 import {
   ConfigProvider,
   DateTime,
@@ -22,7 +24,67 @@ import {
 } from "effect";
 import { ChildProcess } from "effect/process";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
+import { TestClock } from "effect/testing";
 
+import { isSecret } from "../src/exclusions.ts";
+import { Actor, agentOf, budgetLine } from "../src/feature/agents/agent.ts";
+import {
+  Completed,
+  Failed,
+  failedDispatches,
+  followUpPrompt,
+  mayBeFollowUp,
+  Running,
+} from "../src/feature/dispatch/lifecycle.ts";
+import {
+  currentSeverity,
+  decide,
+  reopen,
+  unresolved,
+  verdictError,
+} from "../src/feature/ledger/decide.ts";
+import {
+  Carried,
+  Entry,
+  EntryIdSchema,
+  Ledger,
+  Note,
+  Verdict,
+} from "../src/feature/ledger/entry.ts";
+import { assess } from "../src/feature/report/directive.ts";
+import { finalize } from "../src/feature/report/filing.ts";
+import { renderReport } from "../src/feature/report/render.ts";
+import { SettingsStore } from "../src/feature/settings/settings.ts";
+import { platformLayer } from "../src/index.ts";
+import type { Platform } from "../src/index.ts";
+import { command } from "../src/platform/command.ts";
+import { Git } from "../src/platform/git.ts";
+import { CallIdSchema, SessionIdSchema } from "../src/platform/host-id.ts";
+import type { SessionId } from "../src/platform/host-id.ts";
+import { Host } from "../src/platform/host.ts";
+import { StateRoot, Records } from "../src/records/records.ts";
+import {
+  checkEvidence,
+  checkQuote,
+  depsOf,
+  readable,
+  sealedFile,
+} from "../src/seal/content.ts";
+import {
+  coverageSummary,
+  dispose,
+  markShown,
+  Shown,
+  nextRegions,
+} from "../src/seal/coverage.ts";
+import { assemble, buildRegions, RawDiff } from "../src/seal/diff.ts";
+import { currentFingerprint } from "../src/seal/ends.ts";
+import { Seal } from "../src/seal/record.ts";
+import { Anchor, readerOf, Region } from "../src/seal/region.ts";
+import { RepoPath, RepoScope } from "../src/seal/repo-path.ts";
+import { SealIdSchema } from "../src/seal/seal-id.ts";
+import { changesSinceSeal } from "../src/seal/seal.ts";
+import { Sessions } from "../src/seal/sessions.ts";
 import {
   grepSealed,
   history,
@@ -31,55 +93,18 @@ import {
   OUTPUT_MAX_LINES,
   readLines,
   renderRegions,
-} from "../src/browse.ts";
-import { budget, budgetLine } from "../src/budget.ts";
-import { childFailures } from "../src/children.ts";
-import { command } from "../src/command.ts";
+} from "../src/seal/views.ts";
 import {
-  checkEvidence,
-  checkQuote,
-  depsOf,
-  readable,
-  sealedFile,
-} from "../src/content.ts";
-import {
-  coverageSummary,
-  dispose,
-  markShown,
-  nextRegions,
-} from "../src/coverage.ts";
-import { assemble, buildRegions, RawDiff } from "../src/diff.ts";
-import { isSecret } from "../src/exclusions.ts";
-import { Git } from "../src/git.ts";
-import {
-  currentSeverity,
-  decide,
-  reopen,
-  unresolved,
-  verdictError,
-} from "../src/ledger.ts";
-import type {
-  Actor,
-  Entry,
-  Ledger,
-  Mode,
-  Seal,
-  Verdict,
-} from "../src/model.ts";
-import { platformLayer } from "../src/platform.ts";
-import type { Platform } from "../src/platform.ts";
-import { RepoPath, RepoScope } from "../src/repo-path.ts";
-import { assess, finalize, renderReport } from "../src/report.ts";
-import {
-  changedSinceSeal,
   createSeal,
   recheckSeal,
   refreshSeal,
-} from "../src/seal.ts";
-import { SettingsStore } from "../src/settings.ts";
-import { StateRoot, Store } from "../src/store.ts";
-import { currentFingerprint } from "../src/target.ts";
-import { commandFixture } from "./fixtures.ts";
+} from "../src/workflow/review/lifecycle.ts";
+import type { Mode } from "../src/workflow/review/request.ts";
+import { budget, Window } from "../src/workflow/review/window.ts";
+import { bareSeal, commandFixture, emptyLedger } from "./fixtures.ts";
+import { runPromise, verifyLogs } from "./logs.ts";
+
+afterEach(verifyLogs);
 
 const present = <T>(value: T | null | undefined): T => {
   assert.ok(value !== undefined && value !== null, "expected a value");
@@ -110,33 +135,44 @@ const platformWithEnv = (env: Record<string, string>) =>
 const testPlatform = platformWithEnv({ DIRECTORATE_STATE_DIR: state });
 
 const run = <A, E>(effect: Effect.Effect<A, E, Platform>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(testPlatform)));
+  runPromise(effect.pipe(Effect.provide(testPlatform)));
 
 const withGh = (script: string) => {
   const layer = testPlatform.pipe(Layer.provide(commandFixture("gh", script)));
 
   return <A, E>(effect: Effect.Effect<A, E, Platform>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(layer)));
+    runPromise(effect.pipe(Effect.provide(layer)));
 };
 
 // The seal store, as the tests reach it.
-const store = Effect.service(Store);
+const store = Effect.service(Records);
 const diffFile = (s: Seal) => store.pipe(Effect.map((st) => st.diffFile(s)));
 
+/** The session of `lead`, the Liaison these tests seal as. */
+const LEAD_SESSION = SessionIdSchema.make("ses_lead");
+
+/** The seal's lead as a reader (a seal sealed outside a session is led by `lead`). */
+const leadOf = (s: Seal) =>
+  readerOf(s.ownerSession ?? LEAD_SESSION, s.ownerSession ?? LEAD_SESSION);
+
 const loadSeal = (id: string) =>
-  store.pipe(Effect.flatMap((st) => st.load(id)));
+  store.pipe(Effect.flatMap((st) => st.load(SealIdSchema.make(id))));
 
 const loadLedger = (id: string) =>
-  store.pipe(Effect.flatMap((st) => st.loadLedger(id)));
+  store.pipe(Effect.flatMap((st) => st.loadLedger(SealIdSchema.make(id))));
 
 /** The seal with each region changed by `f`. */
 const regions = (
   s: Seal,
   f: (r: Seal["regions"][number], i: number) => Partial<Seal["regions"][number]>
-): Seal => ({ ...s, regions: s.regions.map((r, i) => ({ ...r, ...f(r, i) })) });
+): Seal =>
+  Seal.make({
+    ...s,
+    regions: s.regions.map((r, i) => Region.make({ ...r, ...f(r, i) })),
+  });
 
 const settingsFile = (env: Record<string, string>) =>
-  Effect.runPromise(
+  runPromise(
     SettingsStore.use((s) => s.file("global", "/x/repo")).pipe(
       Effect.provide(platformWithEnv(env))
     )
@@ -170,7 +206,7 @@ test("the global settings file follows OpenCode configuration and the native hom
 });
 
 const stateRoot = (env: Record<string, string>) =>
-  Effect.runPromise(
+  runPromise(
     Effect.service(StateRoot).pipe(Effect.provide(platformWithEnv(env)))
   );
 
@@ -337,9 +373,20 @@ const makeExecutable = (dir: string, file: string) => {
   }
 };
 
-const scout = { agent: "directorate_auditor", session: "s-scout" };
-const lead = { agent: "directorate_liaison", session: "s-lead" };
-const refuter = { agent: "directorate_compliance", session: "s-ref" };
+const scout = Actor.make({
+  agent: "directorate_auditor",
+  session: SessionIdSchema.make("ses_scout"),
+});
+
+const lead = Actor.make({
+  agent: "directorate_liaison",
+  session: LEAD_SESSION,
+});
+
+const refuter = Actor.make({
+  agent: "directorate_compliance",
+  session: SessionIdSchema.make("ses_ref"),
+});
 
 const local = async (dir: string, mode: Mode = "default") =>
   await run(
@@ -565,36 +612,39 @@ const T0 = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 test("only a subsequent successful retry clears a failed question", async () => {
   const seal = await local(repo());
 
-  const first = {
-    agent: scout.agent,
-    call: "first",
+  const fields = {
+    agent: "directorate_auditor",
+    call: CallIdSchema.make("first"),
     prompt: "question: same",
     startedAt: T0,
-    status: "completed",
   } as const;
 
-  const failed = {
-    ...first,
-    call: "failed",
+  const first = new Completed(fields);
+
+  const failed = new Failed({
+    ...fields,
+    call: CallIdSchema.make("failed"),
     prompt: "question: same\ncheck the guard",
-    status: "failed",
-  } as const;
+  });
 
-  const reviewed = { ...seal, children: [first, failed], regions: [] };
-  assert.deepEqual(childFailures(reviewed, { entries: [], notes: [] }), [
-    failed,
-  ]);
-  assert.equal(
-    assess(reviewed, { entries: [], notes: [] }, {}, "normal").status,
-    "partial"
-  );
+  const reviewed = Seal.make({
+    ...seal,
+    children: [first, failed],
+    regions: [],
+  });
+
+  assert.deepEqual(failedDispatches(reviewed, emptyLedger), [failed]);
+  assert.equal(assess(reviewed, emptyLedger, {}, "normal").status, "partial");
   assert.equal(
     assess(
-      {
+      Seal.make({
         ...reviewed,
-        children: [...reviewed.children, { ...first, call: "retry" }],
-      },
-      { entries: [], notes: [] },
+        children: [
+          ...reviewed.children,
+          new Completed({ ...fields, call: CallIdSchema.make("retry") }),
+        ],
+      }),
+      emptyLedger,
       {},
       "normal"
     ).status,
@@ -605,22 +655,22 @@ test("only a subsequent successful retry clears a failed question", async () => 
 test("the Liaison's answer settles a twice-failed Auditor question", async () => {
   const seal = await local(repo());
 
-  const failed = {
-    agent: scout.agent,
-    call: "failed",
+  const failed = new Failed({
+    agent: "directorate_auditor",
+    call: CallIdSchema.make("failed"),
     prompt: "seal: x\nquestion: same\ncheck the guard",
     startedAt: T0,
-    status: "failed",
-  } as const;
-
-  const reviewed = { ...seal, children: [failed], regions: [] };
-
-  const answered = (text: string) => ({
-    entries: [],
-    notes: [{ at: T0, by: lead, kind: "answered" as const, text }],
   });
 
-  assert.deepEqual(childFailures(reviewed, answered("other")), [failed]);
+  const reviewed = Seal.make({ ...seal, children: [failed], regions: [] });
+
+  const answered = (text: string) =>
+    Ledger.make({
+      entries: [],
+      notes: [Note.make({ at: T0, by: lead, kind: "answered" as const, text })],
+    });
+
+  assert.deepEqual(failedDispatches(reviewed, answered("other")), [failed]);
 
   const a = assess(reviewed, answered("question: same"), {}, "normal");
   assert.equal(a.status, "complete");
@@ -640,36 +690,38 @@ test("re-check: carries an Auditor question the earlier review never answered", 
   const sealed = await local(repo());
 
   const run1 = {
-    agent: scout.agent,
-    call: "a1",
+    agent: "directorate_auditor",
+    call: CallIdSchema.make("a1"),
     prompt: "seal: x\nquestion: is div ever called with 0?",
     startedAt: T0,
-    status: "failed",
   } as const;
 
-  const prior: Seal = {
+  const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
     children: [
-      run1,
-      { ...run1, call: "a2" },
-      {
+      new Failed(run1),
+      new Failed({ ...run1, call: CallIdSchema.make("a2") }),
+      new Running({
         ...run1,
-        call: "s1",
+        call: CallIdSchema.make("s1"),
         prompt: "seal: x\nquestion: still running",
-        status: "running",
-      },
-      {
+      }),
+      new Failed({
         ...run1,
         agent: "directorate_compliance",
-        call: "c1",
+        call: CallIdSchema.make("c1"),
         prompt: "seal: x\nentries: [F9]",
-      },
+      }),
     ],
     reportedAt: T0,
-  };
+  });
 
   const r = await run(
-    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+    recheckSeal({
+      ledger: emptyLedger,
+      owner: lead,
+      prior,
+    })
   );
 
   assert.deepEqual(r.files, []);
@@ -681,17 +733,17 @@ test("re-check: carries an Auditor question the earlier review never answered", 
 
   const settled = await run(
     recheckSeal({
-      ledger: {
+      ledger: Ledger.make({
         entries: [],
         notes: [
-          {
+          Note.make({
             at: T0,
             by: lead,
             kind: "answered",
             text: "is div ever called with 0?",
-          },
+          }),
         ],
-      },
+      }),
       owner: lead,
       prior,
     })
@@ -700,69 +752,77 @@ test("re-check: carries an Auditor question the earlier review never answered", 
   assert.deepEqual(settled.unanswered, ["still running"]);
 });
 
-const at = (path: string, line: number, side: "new" | "old" = "new") => ({
-  endLine: line,
-  line,
-  path,
-  side,
-});
+const at = (path: string, line: number, side: "new" | "old" = "new") =>
+  Anchor.make({
+    endLine: line,
+    line,
+    path,
+    side,
+  });
 
-const entry = (id: string, o: Partial<Entry> = {}): Entry => ({
-  anchor: at("src/math.ts", 2),
-  consequence: "Infinity",
-  createdAt: T0,
-  evidence: ["src/math.ts:2"],
-  id,
-  kind: "defect",
-  lens: "c",
-  quote: "  return a / b",
-  raisedBy: scout,
-  severity: "minor",
-  status: "open",
-  title: `title ${id}`,
-  trigger: "b=0",
-  verdicts: [],
-  ...o,
-});
+const entry = (id: string, o: Partial<Entry> = {}) =>
+  Entry.make({
+    anchor: at("src/math.ts", 2),
+    consequence: "Infinity",
+    createdAt: T0,
+    evidence: ["src/math.ts:2"],
+    id: EntryIdSchema.make(id),
+    kind: "defect",
+    lens: "correctness",
+    quote: "  return a / b",
+    raisedBy: scout,
+    severity: "minor",
+    status: "open",
+    title: `title ${id}`,
+    trigger: "b=0",
+    verdicts: [],
+    ...o,
+  });
 
 test("a failed Compliance batch is answered once narrowed retries decide every entry on it", async () => {
   const seal = await local(repo());
 
-  const batch = (call: string, ids: string, status: "completed" | "failed") =>
-    ({
+  const batch = (
+    call: string,
+    ids: string,
+    ending: typeof Completed | typeof Failed
+  ) =>
+    new ending({
       agent: "directorate_compliance",
-      call,
+      call: CallIdSchema.make(call),
       prompt: `seal: ${seal.id}\nentries: [${ids}]`,
       startedAt: T0,
-      status,
-    }) as const;
+    });
 
-  const reviewed = {
+  const reviewed = Seal.make({
     ...seal,
     children: [
-      batch("batch", "F1, F2", "failed"),
-      batch("first", "F1", "completed"),
-      batch("second", "F2", "completed"),
+      batch("batch", "F1, F2", Failed),
+      batch("first", "F1", Completed),
+      batch("second", "F2", Completed),
     ],
     regions: [],
-  };
+  });
 
   const confirmed = { status: "confirmed" } as const;
 
   assert.deepEqual(
-    childFailures(reviewed, {
-      entries: [entry("F1", confirmed), entry("F2")],
-      notes: [],
-    }),
+    failedDispatches(
+      reviewed,
+      Ledger.make({
+        entries: [entry("F1", confirmed), entry("F2")],
+        notes: [],
+      })
+    ),
     [reviewed.children[0]]
   );
   assert.equal(
     assess(
       reviewed,
-      {
+      Ledger.make({
         entries: [entry("F1", confirmed), entry("F2", confirmed)],
         notes: [],
-      },
+      }),
       {},
       "normal"
     ).status,
@@ -865,7 +925,7 @@ test("names git quotes in patch headers (quotes, tabs, non-ASCII) seal exactly; 
   assert.ok(await run(checkQuote(seal, at(tabbed, 1), "const tab = 1")));
   const tc = seal.regions.filter((r) => r.file === "t.ts");
   assert.ok(tc.length >= 2, "both sections of the typechange are regions");
-  const shown = await run(renderRegions(seal, tc));
+  const shown = await run(renderRegions(seal, tc, leadOf(seal)));
   assert.match(shown.text, /-t$/mu);
   assert.match(shown.text, /\+symlink -> plain\.ts|\+plain\.ts/mu);
 });
@@ -890,20 +950,6 @@ test("tool paths decode to the repository's form: contained, normalized, the roo
     ["", "", "src"]
   );
   assert.ok(Option.isNone(decodeScope("../x")));
-
-  if (windows) {
-    for (const bad of [
-      "..\\outside",
-      "C:\\outside",
-      "\\\\server\\share",
-      "a.txt:stream",
-      ".git. /config",
-    ]) {
-      assert.ok(Option.isNone(decodePath(bad)), bad);
-    }
-
-    assert.equal(Option.getOrThrow(decodePath("src\\a.ts")), "src/a.ts");
-  }
 });
 
 // ---------- sealing ----------
@@ -946,20 +992,17 @@ test("seal race: an edit during capture forces a retry, so the diff and snapshot
   let edits = 0;
 
   const seal = await run(
-    createSeal({
-      beforeCapture: () =>
+    createSeal(
+      { mode: "default", owner: lead, repo: dir, target: { kind: "local" } },
+      () =>
         Effect.sync(() => {
           edits += 1;
 
           if (edits === 1) {
             write(dir, "src/math.ts", `${MATH}// edit two\n`);
           }
-        }),
-      mode: "default",
-      owner: lead,
-      repo: dir,
-      target: { kind: "local" },
-    })
+        })
+    )
   );
 
   assert.match(
@@ -969,16 +1012,13 @@ test("seal race: an edit during capture forces a retry, so the diff and snapshot
   assert.match((await run(sealedFile(seal, "src/math.ts"))) ?? "", /edit two/u);
   await assert.rejects(
     run(
-      createSeal({
-        beforeCapture: () =>
+      createSeal(
+        { mode: "default", owner: lead, repo: dir, target: { kind: "local" } },
+        () =>
           Effect.sync(() =>
             write(dir, "src/math.ts", `${MATH}// ${(edits += 1)}\n`)
-          ),
-        mode: "default",
-        owner: lead,
-        repo: dir,
-        target: { kind: "local" },
-      })
+          )
+      )
     ),
     /kept changing/u
   );
@@ -1413,51 +1453,13 @@ test("grep withholds secrets by their full name, even one containing a colon", a
   assert.ok(out.split("\n").includes(`${source}:1:const TOKEN = 1`));
 });
 
-test("store: legacy seals migrate on load; malformed seals and ledgers are damaged, not defaults", async () => {
+test("store: malformed seals and ledgers are damaged, not defaults", async () => {
   const dir = repo();
   write(dir, "src/math.ts", `${MATH}// edit\n`);
   const seal = await local(dir);
   const file = join(state, seal.id, "seal.json");
-  const legacy = JSON.parse(readFileSync(file, "utf-8"));
-
-  delete legacy.gen;
-  delete legacy.refreshes;
-  delete legacy.children;
-  delete legacy.deleted;
-
-  for (const r of legacy.regions) {
-    delete r.readBy;
-  }
-
-  legacy.gates = {
-    children: true,
-    coverage: true,
-    freshness: true,
-    open: true,
-  };
-  writeFileSync(file, JSON.stringify(legacy));
-  const loaded = await run(loadSeal(seal.id));
-  assert.deepEqual(
-    [
-      loaded.gen,
-      loaded.refreshes,
-      loaded.children,
-      loaded.deleted,
-      loaded.regions[0]?.readBy,
-    ],
-    [0, 0, [], [], []]
-  );
-  assert.deepEqual(
-    loaded.gates,
-    { children: [], coverage: [], freshness: "", open: [] },
-    "a legacy true gate matches nothing new"
-  );
-  await run(store.pipe(Effect.flatMap((st) => st.save(loaded))));
-  assert.deepEqual(
-    JSON.parse(readFileSync(file, "utf-8")).gates,
-    loaded.gates,
-    "saved in the current format"
-  );
+  const stored = JSON.parse(readFileSync(file, "utf-8"));
+  const { gen: _gen, ...withoutGen } = stored;
 
   // A non-ISO deadline used to parse as NaN, which made the watchdog report at once.
   const rejectsSeal = async (json: string) => {
@@ -1465,13 +1467,14 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
     await assert.rejects(run(loadSeal(seal.id)), /is damaged/u);
   };
 
-  await rejectsSeal(JSON.stringify({ ...legacy, deadline: "soon" }));
-  await rejectsSeal(JSON.stringify({ ...legacy, mode: "fast" }));
-  await rejectsSeal(JSON.stringify([legacy]));
+  await rejectsSeal(JSON.stringify({ ...stored, deadline: "soon" }));
+  await rejectsSeal(JSON.stringify({ ...stored, mode: "fast" }));
+  await rejectsSeal(JSON.stringify(withoutGen));
+  await rejectsSeal(JSON.stringify([stored]));
 
   writeFileSync(
     join(state, seal.id, "ledger.json"),
-    JSON.stringify({ entries: [{ id: "F1" }], notes: [] })
+    JSON.stringify({ entries: [{ id: EntryIdSchema.make("F1") }], notes: [] })
   );
   await assert.rejects(
     run(loadLedger(seal.id)),
@@ -1479,7 +1482,7 @@ test("store: legacy seals migrate on load; malformed seals and ledgers are damag
   );
   unlinkSync(join(state, seal.id, "ledger.json"));
   await assert.rejects(
-    run(Store.use((st) => st.loadLedger(seal.id, { required: true }))),
+    run(Records.use((st) => st.loadLedger(seal.id, { required: true }))),
     /ledger .* missing/u
   );
 });
@@ -1516,7 +1519,7 @@ test("worktree read errors fail the capture; withheld files are never read and s
   const layer = testPlatform.pipe(Layer.provide(failReads));
 
   const capture = (target: Parameters<typeof createSeal>[0]["target"]) =>
-    Effect.runPromise(
+    runPromise(
       createSeal({ mode: "full", owner: lead, repo: dir, target }).pipe(
         Effect.provide(layer)
       )
@@ -1533,7 +1536,9 @@ test("worktree read errors fail the capture; withheld files are never read and s
     present(paths.files.find((f) => f.path === ".env")).excluded ?? "",
     /secret/u
   );
-  const report = await run(finalize(paths, { entries: [], notes: [] }, {}));
+
+  const report = await run(finalize(paths, emptyLedger, {}));
+
   assert.match(report.md, /1 changed secret-like file was withheld/u);
 
   const localSeal = await capture({ kind: "local", paths: [".env"] });
@@ -1578,34 +1583,24 @@ test(
 
     // Later chunks render from their own start, numbered as the hunk would number them.
     const mid = present(bigRegions[250]);
-    const tail = await run(renderRegions(regionsResult, [mid]));
+
+    const tail = await run(
+      renderRegions(regionsResult, [mid], leadOf(regionsResult))
+    );
+
     assert.deepEqual([mid.newStart, mid.newEnd], [100_000, 100_399]);
     assert.match(tail.text, /^\s+100000 \+line 99999$/mu);
     assert.match(tail.text, /^\s+100399 \+line 100398$/mu);
 
     const end = await run(
-      renderRegions(regionsResult, [present(bigRegions.at(-1))])
+      renderRegions(
+        regionsResult,
+        [present(bigRegions.at(-1))],
+        leadOf(regionsResult)
+      )
     );
 
     assert.match(end.text, /^\s+200000 \+line 199999$/mu);
-
-    const legacy = await run(
-      renderRegions(regionsResult, [
-        {
-          ...mid,
-          hunkStart: undefined,
-          newLine: undefined,
-          oldLine: undefined,
-          sectionStart: undefined,
-        },
-      ])
-    );
-
-    assert.equal(
-      legacy.text,
-      tail.text,
-      "regions from older seals render the same by scanning back"
-    );
   }
 );
 
@@ -1615,11 +1610,8 @@ test("mode changes count as drift; binary files compare by bytes", async () => {
   write(dir, "run.sh", "echo hello\n");
   write(dir, "img.bin", Buffer.from([0, 255, 128, 0, 7]));
   const seal = await local(dir);
-  assert.deepEqual(
-    await run(changedSinceSeal(seal, seal)),
-    [],
-    "binary snapshot equals live bytes"
-  );
+  const unchanged = await run(changesSinceSeal(seal, seal));
+  assert.deepEqual(unchanged.listed, [], "binary snapshot equals live bytes");
   const fingerprintResult3 = await run(currentFingerprint(seal));
   assert.equal(fingerprintResult3.fingerprint, seal.fingerprint);
   makeExecutable(dir, "run.sh");
@@ -1650,7 +1642,8 @@ test("a checked-out submodule signs its commit: moving it again after the seal i
   g(join(dir, "sub"), "checkout", "-q", c);
   const cur = await run(currentFingerprint(seal));
   assert.notEqual(cur.fingerprint, seal.fingerprint);
-  assert.deepEqual(await run(changedSinceSeal(seal, cur)), ["sub"]);
+  const moved = await run(changesSinceSeal(seal, cur));
+  assert.deepEqual(moved.listed, ["sub"]);
 });
 
 // ---------- coverage ----------
@@ -1672,15 +1665,10 @@ test("coverage: size-charged chunks, per-chunk line ranges, owner reads, explici
     })
   );
 
-  assert.equal(
-    nextRegions(p, { owner: true, reader: "owner" }).picked.length,
-    2
-  );
+  assert.equal(nextRegions(p, leadOf(p), {}).picked.length, 2);
 
-  const ex = nextRegions(p, {
+  const ex = nextRegions(p, leadOf(p), {
     ids: p.regions.map((r) => r.id),
-    owner: true,
-    reader: "owner",
   });
 
   assert.deepEqual(
@@ -1698,22 +1686,32 @@ test("coverage: size-charged chunks, per-chunk line ranges, owner reads, explici
       [1200, 1200],
     ]
   );
-  const R1 = [{ complete: true, id: "R1", next: 0 }];
-  const scouted = markShown(l, R1, { key: "s-scout", owner: false });
+  const R1 = [Shown.make({ complete: true, id: "R1", next: 0 })];
+
+  const scouted = markShown(
+    l,
+    R1,
+    readerOf(SessionIdSchema.make("ses_scout"), l.ownerSession)
+  );
+
   assert.equal(
     coverageSummary(scouted).unread.length,
     4,
     "a scout's read does not cover the lead"
   );
-  const read = markShown(scouted, R1, { key: "owner", owner: true });
+  const read = markShown(scouted, R1, leadOf(scouted));
   assert.equal(coverageSummary(read).read, 1);
   assert.deepEqual(
     read.regions[0]?.readBy,
-    ["s-scout", "owner"],
+    ["ses_scout", "owner"],
     "readers are sessions, so two of one role each read everything"
   );
   assert.equal(
-    nextRegions(read, { owner: false, reader: "s-other" }).picked[0]?.id,
+    nextRegions(
+      read,
+      readerOf(SessionIdSchema.make("ses_other"), read.ownerSession),
+      {}
+    ).picked[0]?.id,
     "R1",
     "another reader of the same role still gets R1"
   );
@@ -1737,7 +1735,7 @@ test("blank context lines are numbered even when Git is configured to suppress t
   write(dir, "sample.txt", "before\n\nnew\nafter\n");
 
   const seal = await local(dir);
-  const { text } = await run(renderRegions(seal, seal.regions));
+  const { text } = await run(renderRegions(seal, seal.regions, leadOf(seal)));
   assert.match(text, /^\s+3 \+new$/mu);
   assert.equal(present(seal.regions[0]).newEnd, 4);
 });
@@ -1746,8 +1744,12 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
   const dir = repo();
   write(dir, "src/math.ts", `${MATH}// tail\n`);
   const seal = await local(dir);
-  const { text, shown } = await run(renderRegions(seal, seal.regions));
-  assert.deepEqual(shown, [{ complete: true, id: "R1", next: 0 }]);
+
+  const { text, shown } = await run(
+    renderRegions(seal, seal.regions, leadOf(seal))
+  );
+
+  assert.deepEqual(shown, [Shown.make({ complete: true, id: "R1", next: 0 })]);
   assert.match(text, /^\s+4 \+\/\/ tail$/mu);
   assert.match(text, /^\s+2\s+2\s+return a \/ b$/mu);
 
@@ -1769,7 +1771,7 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
     })
   );
 
-  const first = await run(renderRegions(p, p.regions));
+  const first = await run(renderRegions(p, p.regions, leadOf(p)));
   assert.ok(
     Buffer.byteLength(first.text) <= OUTPUT_MAX_BYTES + 500,
     `${Buffer.byteLength(first.text)}`
@@ -1781,7 +1783,7 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
     i ? {} : { offsets: { owner: firstRegion.next } }
   );
 
-  const second = await run(renderRegions(p2, p2.regions));
+  const second = await run(renderRegions(p2, p2.regions, leadOf(p2)));
   assert.match(second.text, /continued from body line/u);
   const one = "y".repeat(150_000);
   const dir3 = repo({ "a.ts": "x\n" });
@@ -1796,7 +1798,7 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
     })
   );
 
-  const r3 = await run(renderRegions(p3, p3.regions));
+  const r3 = await run(renderRegions(p3, p3.regions, leadOf(p3)));
   assert.ok(
     Buffer.byteLength(r3.text) <= OUTPUT_MAX_BYTES + 500,
     "a long line is paged, not dumped"
@@ -1810,15 +1812,15 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
 
   const pages = await run(
     Effect.gen(function* countPages() {
-      let paged = markShown(p3, r3.shown, { key: "owner", owner: true });
+      let paged = markShown(p3, r3.shown, leadOf(p3));
       let pageCount = 1;
 
       for (let done = false; !done && pageCount < 10; pageCount += 1) {
-        const r = yield* renderRegions(paged, paged.regions);
+        const r = yield* renderRegions(paged, paged.regions, leadOf(paged));
         const [receipt] = r.shown;
         assert.ok(receipt);
         done = receipt.complete;
-        paged = markShown(paged, r.shown, { key: "owner", owner: true });
+        paged = markShown(paged, r.shown, leadOf(paged));
       }
 
       return pageCount;
@@ -1845,7 +1847,7 @@ test("renderRegions: old and new line numbers, a byte-bounded page with continua
     })
   );
 
-  const many = await run(renderRegions(p4, p4.regions));
+  const many = await run(renderRegions(p4, p4.regions, leadOf(p4)));
   assert.ok(
     many.text.split("\n").length <= OUTPUT_MAX_LINES + 20,
     "and by lines"
@@ -2038,7 +2040,7 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
   const F2 = entry("F2", { severity: "important" });
   const F3 = entry("F3", { raisedBy: lead });
   const F4 = entry("F4", { status: "refuted" });
-  const ledger: Ledger = { entries: [F1, F2, F3, F4], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2, F3, F4], notes: [] });
 
   const v = (
     e: Entry,
@@ -2047,7 +2049,11 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
     extra: Partial<Verdict> = {}
   ) => verdictError(e, by, { evidence: ["a:1"], verdict, ...extra }, ledger);
 
-  const lead2 = { agent: "directorate_liaison", session: "s-other" };
+  const lead2 = Actor.make({
+    agent: "directorate_liaison",
+    session: SessionIdSchema.make("ses_other"),
+  });
+
   assert.equal(v(F1, lead, "confirmed"), undefined);
   assert.match(
     v(F1, lead, "confirmed", { severity: "important" }) ?? "",
@@ -2060,7 +2066,7 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
     "lead cannot bury an important entry"
   );
   assert.match(
-    v(F2, lead, "duplicate", { of: "F1" }) ?? "",
+    v(F2, lead, "duplicate", { of: EntryIdSchema.make("F1") }) ?? "",
     /needs directorate_compliance/u
   );
   assert.equal(v(F2, refuter, "confirmed"), undefined);
@@ -2081,7 +2087,7 @@ test("verdict rules: lead decides only minor entries by others; refuter decides 
   );
   assert.equal(v(F4, refuter, "confirmed"), undefined);
   assert.match(
-    v(F1, lead, "duplicate", { of: "F4" }) ?? "",
+    v(F1, lead, "duplicate", { of: EntryIdSchema.make("F4") }) ?? "",
     /only of open or confirmed/u
   );
   assert.match(
@@ -2094,14 +2100,14 @@ test("severity follows the current generation: a reopened upgraded entry still n
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         rationale: "",
         severity: "blocking",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
@@ -2117,7 +2123,7 @@ test("severity follows the current generation: a reopened upgraded entry still n
       R1,
       lead,
       { evidence: ["a:1"], verdict: "confirmed" },
-      { entries: [R1], notes: [] }
+      Ledger.make({ entries: [R1], notes: [] })
     ) ?? "",
     /needs directorate_compliance/u
   );
@@ -2127,14 +2133,14 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
         rationale: "",
         severity: "minor",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
@@ -2142,14 +2148,14 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
     severity: "blocking",
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
-        of: "F1",
+        of: EntryIdSchema.make("F1"),
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
@@ -2158,47 +2164,25 @@ test("duplicates: merged claims never raise a verified severity; orphans stay un
   const F4 = entry("F4", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: lead,
         evidence: ["a:1"],
-        of: "F3",
+        of: EntryIdSchema.make("F3"),
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
-  const ledger: Ledger = { entries: [F1, F2, F3, F4], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2, F3, F4], notes: [] });
   assert.equal(currentSeverity(F1), "minor");
   assert.deepEqual(
     unresolved(ledger).map((e) => e.id),
     ["F4"]
   );
 
-  const seal: Seal = {
-    baseSha: "base",
-    budgetMinutes: 10,
-    children: [],
-    createdAt: T0,
-    deadline: T0,
-    deleted: [],
-    description: "d",
-    files: [],
-    fingerprint: "f",
-    gates: {},
-    gen: 0,
-    headSha: "head",
-    id: "x",
-    mode: "default",
-    owner: lead.agent,
-    ownerSession: lead.session,
-    postImage: "commit",
-    refreshes: 0,
-    regions: [],
-    repo: "/test",
-    target: { kind: "auto" },
-  };
+  const seal = bareSeal({ createdAt: T0, deadline: T0 });
 
   const md = renderReport({ ledger, reasons: [], seal, status: "complete" });
   assert.match(
@@ -2229,7 +2213,8 @@ test("freshness: committing the reviewed change is not drift; a real edit is; wi
     seal.fingerprint,
     "adding a withheld file after the seal is drift"
   );
-  assert.deepEqual(await run(changedSinceSeal(seal, withSecret)), [".env"]);
+  const secret = await run(changesSinceSeal(seal, withSecret));
+  assert.deepEqual(secret.listed, [".env"]);
   write(dir, ".env", "X=2\n");
   const rewritten = await run(currentFingerprint(seal));
   assert.equal(
@@ -2239,16 +2224,14 @@ test("freshness: committing the reviewed change is not drift; a real edit is; wi
   );
 
   const refreshed = await run(
-    refreshSeal(seal, { entries: [], notes: [] }).pipe(
-      Effect.map((r) => r.seal)
-    )
+    refreshSeal(seal, emptyLedger).pipe(Effect.map((r) => r.seal))
   );
 
   assert.equal(refreshed.sigs?.[".env"], "withheld");
   assert.match(
     assess(
       regions(refreshed, () => ({ ownerRead: true })),
-      { entries: [], notes: [] },
+      emptyLedger,
       {},
       "normal"
     ).reasons.join(","),
@@ -2286,19 +2269,19 @@ test("worktree refresh: new generation, @@-aligned regions, removed '--' lines i
   write(dir, "q.sql", "select 2;\n-- keep me\n-- drop me\n");
   const seal = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         evidence: ["src/math.ts:4"],
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
       entry("F2", {
@@ -2306,23 +2289,32 @@ test("worktree refresh: new generation, @@-aligned regions, removed '--' lines i
         evidence: ["src/other.ts:1"],
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/guard.ts:1"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
     ],
     notes: [],
-  };
+  });
 
   write(dir, "src/guard.ts", "export const ok = false\n");
   write(dir, "q.sql", "select 2;\n-- keep me\n");
   unlinkSync(join(dir, "src/gone.ts"));
-  const r = await run(refreshSeal(seal, ledger));
+
+  // refreshSeal re-captures; the door saves what it hands back.
+  const r = await run(
+    refreshSeal(seal, ledger).pipe(
+      Effect.tap((next) =>
+        store.pipe(Effect.flatMap((st) => st.saveBoth(next.seal, next.ledger)))
+      )
+    )
+  );
+
   assert.deepEqual(r.files.toSorted(), [
     "q.sql",
     "src/gone.ts",
@@ -2382,27 +2374,36 @@ test("range: base moved to head is stale; refresh rebuilds the empty target diff
   g(dir, "merge", "-q", "--ff-only", "feat");
   g(dir, "checkout", "-q", "feat");
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         quote: "  return Math.floor(a / b)",
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
     ],
     notes: [],
-  };
+  });
 
   const s0 = await run(loadSeal(seal.id));
-  const { md } = await run(finalize(s0, ledger, {}));
+
+  // finalize renders; the door publishes what it hands back.
+  const { md } = await run(
+    finalize(s0, ledger, {}).pipe(
+      Effect.tap((filed) =>
+        store.pipe(Effect.flatMap((st) => st.publish(filed.seal, filed.md)))
+      )
+    )
+  );
+
   assert.match(md, /status: \*\*stale\*\*/u);
   const reported = await run(loadSeal(seal.id));
   const directive = present(reported.directive);
@@ -2495,7 +2496,7 @@ test("range refresh deltas withhold secrets", async () => {
   write(dir, ".env", "API_KEY=leakme\n");
   g(dir, "add", "-A");
   g(dir, "commit", "-qm", "b");
-  const r = await run(refreshSeal(s, { entries: [], notes: [] }));
+  const r = await run(refreshSeal(s, emptyLedger));
   assert.ok(r.files.includes(".env"));
   assert.ok(
     !readFileSync(await run(diffFile(r.seal)), "utf-8").includes("leakme")
@@ -2503,7 +2504,7 @@ test("range refresh deltas withhold secrets", async () => {
 });
 
 // ---------- budget, report ----------
-test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", () => {
+test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", async () => {
   const cases = [
     [20, 13, "normal"],
     [20, 14.5, "drain"],
@@ -2511,11 +2512,53 @@ test("budget: drain is at least 20% and up to 6 minutes; lock at deadline", () =
     [20, 20.1, "locked"],
   ] as const;
 
-  for (const [minutes, elapsed, phase] of cases) {
-    const seal = { createdAt: T0, deadline: DateTime.add(T0, { minutes }) };
-    const now = DateTime.toEpochMillis(T0) + elapsed * 60_000;
-    assert.equal(budget(seal, now).phase, phase);
-  }
+  await runPromise(
+    Effect.gen(function* testBudget() {
+      for (const [minutes, elapsed, phase] of cases) {
+        const window = Window.open(T0, minutes);
+        yield* TestClock.setTime(DateTime.toEpochMillis(T0) + elapsed * 60_000);
+        assert.equal((yield* budget(window)).phase, phase);
+      }
+    }).pipe(Effect.provide(TestClock.layer()))
+  );
+});
+
+test("render: one bulk disposition's note appears once, its files capped, and the Directive stays under the output limit", async () => {
+  const dir = repo();
+  write(dir, "src/math.ts", `${MATH}// x\n`);
+  const sealed = await local(dir);
+  const first = present(sealed.regions[0]);
+  const note = `Generated fixtures; skimmed for shape only. ${"x".repeat(600)}`;
+
+  const seal = Seal.make({
+    ...sealed,
+    regions: Array.from({ length: 200 }, (_, i) =>
+      Region.make({
+        ...first,
+        disposition: "skimmed",
+        file: `src/gen/f${i % 50}.ts`,
+        id: `r${i}`,
+        newEnd: 10 * i + 5,
+        newStart: 10 * i + 1,
+        note,
+      })
+    ),
+  });
+
+  const out = renderReport({
+    ledger: emptyLedger,
+    seal,
+    ...assess(seal, emptyLedger, {}, "normal"),
+  });
+
+  assert.equal(out.split(note).length, 2);
+  assert.match(
+    out,
+    /- skimmed only: Generated fixtures[^\n]*`src\/gen\/f0\.ts` lines 1-5, 501-505, 1001-1005, 1501-1505;[^\n]*; and 30 more files\n/u
+  );
+  assert.ok(Buffer.byteLength(out) < OUTPUT_MAX_BYTES);
+  assert.ok(out.split("\n").length < OUTPUT_MAX_LINES);
+  assert.match(out, /Export this review/u);
 });
 
 test("assess and render: skips make it partial; orphan duplicates count; refuted important candidates are listed", async () => {
@@ -2528,30 +2571,29 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
     note: "out of time",
   }));
 
-  const empty = { entries: [], notes: [] };
-  const a = assess(skipped, empty, {}, "normal");
+  const a = assess(skipped, emptyLedger, {}, "normal");
   assert.equal(a.status, "partial");
   assert.match(
-    renderReport({ ledger: empty, seal: skipped, ...a }),
+    renderReport({ ledger: emptyLedger, seal: skipped, ...a }),
     /<Provisional\/Incomplete> — No Confirmed Issues[\s\S]*skipped: out of time/u
   );
   const seal = regions(sealed, () => ({ ownerRead: true }));
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         brief: "Check `source`.\n\n- Keep the original scope.",
         severity: "important",
         status: "confirmed",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
             rationale: "r",
             severity: "blocking",
             verdict: "confirmed",
-          },
+          }),
         ],
       }),
       entry("F2"),
@@ -2559,39 +2601,39 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
         severity: "important",
         status: "refuted",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:1"],
             rationale: "guarded by caller",
             verdict: "refuted",
-          },
+          }),
         ],
       }),
       entry("F4", {
         status: "duplicate",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: lead,
             evidence: ["src/math.ts:2"],
-            of: "F3",
+            of: EntryIdSchema.make("F3"),
             rationale: "",
             verdict: "duplicate",
-          },
+          }),
         ],
       }),
       entry("F5", { severity: "important", status: "confirmed" }),
     ],
     notes: [
-      {
+      Note.make({
         at: T0,
         by: lead,
         kind: "unanswered",
         text: "security auditor timed out",
-      },
+      }),
     ],
-  };
+  });
 
   const b = assess(seal, ledger, {}, "normal");
   assert.match(b.reasons.join(","), /2 leads unverified/u);
@@ -2611,12 +2653,15 @@ test("assess and render: skips make it partial; orphan duplicates count; refuted
     md,
     /### Refuted blocking\/important candidates \(cleared by Compliance\)[\s\S]*title F3[\s\S]*guarded by caller/u
   );
-  assert.equal(assess(seal, empty, {}, "normal").status, "complete");
+  assert.equal(assess(seal, emptyLedger, {}, "normal").status, "complete");
   assert.equal(
-    assess(seal, empty, { unverified: "gh failed" }, "normal").status,
+    assess(seal, emptyLedger, { unverified: "gh failed" }, "normal").status,
     "partial"
   );
-  assert.equal(assess(seal, empty, { stale: ["a"] }, "normal").status, "stale");
+  assert.equal(
+    assess(seal, emptyLedger, { stale: ["a"] }, "normal").status,
+    "stale"
+  );
 });
 
 // ---------- sealed search and history ----------
@@ -2702,7 +2747,7 @@ test("paths mode: unchanged committed files render, read, and anchor; '.' and no
     );
 
     const keep = present(s.regions.find((r) => r.file === "src/keep.ts"));
-    const { text, shown } = await run(renderRegions(s, [keep]));
+    const { text, shown } = await run(renderRegions(s, [keep], leadOf(s)));
     assert.match(
       text,
       /1 export const keep = 1\n\s+2 export const two = 2/u,
@@ -2769,7 +2814,7 @@ test("secret filter: data files withheld, source files reviewed; a changed secre
     seal.regions.some((r) => r.file === "src/secrets.ts"),
     "source named 'secrets' is reviewed"
   );
-  const a = assess(seal, { entries: [], notes: [] }, {}, "normal");
+  const a = assess(seal, emptyLedger, {}, "normal");
   assert.equal(a.status, "partial");
   assert.match(a.reasons.join(","), /secret-like file was withheld/u);
   // Withheld under the lockfile reason, yet its old name is a secret: counted by path, not by the reason's wording.
@@ -2787,7 +2832,7 @@ test("secret filter: data files withheld, source files reviewed; a changed secre
     ]
   );
   assert.match(
-    assess(m, { entries: [], notes: [] }, {}, "normal").reasons.join(","),
+    assess(m, emptyLedger, {}, "normal").reasons.join(","),
     /1 changed secret-like file was withheld/u
   );
 });
@@ -2838,7 +2883,9 @@ test("mode-only change after the seal: refresh captures it as a metadata region"
   write(dir, "run.sh", "echo hello\n");
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   makeExecutable(dir, "run.sh");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(refreshSeal(seal, emptyLedger));
+
   assert.deepEqual(r.files, ["run.sh"]);
   assert.ok(r.newRegions.length >= 1, "the changed region is unread");
   assert.match(
@@ -2864,13 +2911,15 @@ test("typechange refresh: an exec-bit change unreads only the section whose head
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   assert.equal(seal.regions.filter((x) => x.file === "link").length, 2);
   makeExecutable(dir, "link");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(refreshSeal(seal, emptyLedger));
+
   assert.equal(
     r.newRegions.length,
     1,
     "the symlink deletion keeps its receipt"
   );
-  const shown = await run(renderRegions(r.seal, r.newRegions));
+  const shown = await run(renderRegions(r.seal, r.newRegions, leadOf(r.seal)));
   assert.match(shown.text, /new file mode 100755/u);
   assert.match(shown.text, /\+echo hi/u);
 });
@@ -2886,7 +2935,7 @@ test("refresh uses the captured generation to reopen dependent findings", async 
   const seal = await local(dir);
   write(dir, "src/math.ts", `${MATH}// second edit\n`);
 
-  const ledger = {
+  const ledger = Ledger.make({
     entries: [
       entry("F1", {
         anchor: at("src/caller.ts", 1),
@@ -2896,7 +2945,7 @@ test("refresh uses the captured generation to reopen dependent findings", async 
       }),
     ],
     notes: [],
-  };
+  });
 
   let attempt = 0;
 
@@ -2934,7 +2983,9 @@ test("worktree refresh rebuilds the full diff: removed lines anchor on the base;
   write(dir, "b.ts", "bee2\n");
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   write(dir, "a.ts", "const one = 1\nconst three = 3\nconst four = 4\n");
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(refreshSeal(seal, emptyLedger));
+
   assert.deepEqual(
     r.newRegions.map((x) => x.file),
     ["a.ts"],
@@ -2972,7 +3023,9 @@ test("refresh: changing the first hunk keeps receipts for unchanged later hunks 
   const seal = regions(await local(dir), () => ({ ownerRead: true }));
   assert.equal(seal.regions.length, 2, "two separated hunks");
   write(dir, "a.ts", edited("const earlier = 2"));
-  const r = await run(refreshSeal(seal, { entries: [], notes: [] }));
+
+  const r = await run(refreshSeal(seal, emptyLedger));
+
   assert.deepEqual(
     r.newRegions.map((x) => x.newStart),
     [present(seal.regions[0]).newStart],
@@ -2988,24 +3041,24 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
   const F1 = entry("F1", {
     status: "confirmed",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: lead,
         evidence: ["a:1"],
         rationale: "",
         severity: "minor",
         verdict: "confirmed",
-      },
+      }),
     ],
   });
 
   const F2 = entry("F2", { raisedBy: lead, severity: "blocking" });
-  const ledger: Ledger = { entries: [F1, F2], notes: [] };
+  const ledger: Ledger = Ledger.make({ entries: [F1, F2], notes: [] });
   assert.match(
     verdictError(
       F2,
       lead,
-      { evidence: ["a:1"], of: "F1", verdict: "duplicate" },
+      { evidence: ["a:1"], of: EntryIdSchema.make("F1"), verdict: "duplicate" },
       ledger
     ) ?? "",
     /hide the higher claim/u
@@ -3015,20 +3068,20 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
   const F4 = entry("F4", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
-        of: "F3",
+        of: EntryIdSchema.make("F3"),
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
   const r = decide(
-    { entries: [F3, F4], notes: [] },
-    { ...F3, status: "refuted" }
+    Ledger.make({ entries: [F3, F4], notes: [] }),
+    Entry.make({ ...F3, status: "refuted" })
   );
 
   assert.deepEqual(r.reopened, ["F4"]);
@@ -3037,10 +3090,52 @@ test("lead cannot launder severity through duplicates; refuting a target reopens
     ["refuted", "open"]
   );
   assert.deepEqual(
-    decide({ entries: [F3, F4], notes: [] }, { ...F3, status: "confirmed" })
-      .reopened,
+    decide(
+      Ledger.make({ entries: [F3, F4], notes: [] }),
+      Entry.make({ ...F3, status: "confirmed" })
+    ).reopened,
     [],
     "only a refutation reopens them"
+  );
+});
+
+const duplicateOf = (of: string) =>
+  Verdict.make({
+    at: T0,
+    by: refuter,
+    evidence: ["a:1"],
+    of: EntryIdSchema.make(of),
+    rationale: "",
+    verdict: "duplicate",
+  });
+
+test("refuting the end of a duplicate chain reopens every duplicate merged into it", () => {
+  const F1 = entry("F1");
+
+  const F2 = entry("F2", {
+    status: "duplicate",
+    verdicts: [duplicateOf("F1")],
+  });
+
+  const F3 = entry("F3", {
+    status: "duplicate",
+    verdicts: [duplicateOf("F2")],
+  });
+
+  const r = decide(
+    Ledger.make({ entries: [F1, F2, F3], notes: [] }),
+    Entry.make({ ...F1, status: "refuted" })
+  );
+
+  assert.deepEqual(r.reopened, ["F2", "F3"]);
+  assert.deepEqual(
+    r.ledger.entries.map((e) => e.status),
+    ["refuted", "open", "open"]
+  );
+  assert.deepEqual(
+    r.ledger.entries.slice(1).map((e) => e.history?.map((v) => v.of)),
+    [["F1"], ["F2"]],
+    "each keeps its duplicate verdict in its history"
   );
 });
 
@@ -3071,7 +3166,7 @@ test("interrupting a mutation releases its lock", async () => {
   await run(
     Effect.gen(function* interruptLock() {
       const locked = yield* Deferred.make<boolean>();
-      const st = yield* Store;
+      const st = yield* Records;
 
       const first = yield* st
         .withLock(
@@ -3160,8 +3255,8 @@ test("concurrent takeovers of an orphaned mutation lock admit one writer at a ti
 
   await run(
     Effect.gen(function* takeOvers() {
-      const st = yield* Store.pipe(
-        Effect.provide(Layer.fresh(Store.layer)),
+      const st = yield* Records.pipe(
+        Effect.provide(Layer.fresh(Records.layer)),
         Effect.provideService(FileSystem.FileSystem, yield* slowRenames)
       );
 
@@ -3194,9 +3289,9 @@ test("mutation lock excludes a separate process", async () => {
         "-e",
         `
     import { Effect } from "effect"
-    import { platformLayer } from "./src/platform.ts"
-    import { Store } from "./src/store.ts"
-    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Store), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
+    import { platformLayer } from "./src/index.ts"
+    import { Records } from "./src/records/records.ts"
+    console.log(await Effect.runPromise(Effect.flatMap(Effect.service(Records), (store) => store.${method}(process.argv[1], Effect.succeed("acquired"))).pipe(
       Effect.timeoutOrElse({ duration: ${ms}, orElse: () => Effect.succeed("waiting") }),
       Effect.provide(platformLayer),
     )))
@@ -3212,14 +3307,15 @@ test("mutation lock excludes a separate process", async () => {
 
   const excludes = async (method: "withLock" | "withShipLock", id: string) => {
     const result = await run(
-      store.pipe(
-        Effect.flatMap((st) =>
-          st[method](
-            id,
-            Effect.tryPromise(() => probe(method, id, 150))
-          )
-        )
-      )
+      Effect.gen(function* lockedProbe() {
+        const st = yield* store;
+
+        const held = Effect.tryPromise(() => probe(method, id, 150));
+
+        return yield* method === "withLock"
+          ? st.withLock(SealIdSchema.make(id), held)
+          : st.withShipLock(id, held);
+      })
     );
 
     assert.equal(result.stdout.trim(), "waiting", method);
@@ -3295,50 +3391,57 @@ test("PR freshness with a fake gh: unfetched base move is unverified; unfetched 
   const { md } = await runPr(
     finalize(
       await runPr(loadSeal(seal.id)),
-      { entries: [], notes: [] },
-      { cur: Result.succeed(cur) }
+      emptyLedger,
+      {},
+      Result.succeed(cur)
     )
   );
 
   assert.match(md, /status: \*\*stale\*\*/u);
 });
 
-test("budget lines are written for each role", () => {
+test("budget lines are written for each role", async () => {
   const now = Date.parse("2026-01-01T00:00:00Z");
 
-  const s = {
+  const s = Window.make({
     budgetMinutes: 10,
     createdAt: DateTime.makeUnsafe(now - 9 * 60_000),
     deadline: DateTime.makeUnsafe(now + 60_000),
-  };
+  });
 
-  assert.match(
-    budgetLine(s, now, "directorate_auditor"),
-    /file surviving candidates now and hand off/u
-  );
-  assert.match(
-    budgetLine(s, now, "directorate_compliance"),
-    /finish the entry in hand/u
-  );
-  assert.match(
-    budgetLine(s, now, "directorate_liaison"),
-    /call directorate_report/u
-  );
-  assert.doesNotMatch(
-    budgetLine(s, now, "directorate_auditor"),
-    /directorate_report/u
+  await runPromise(
+    Effect.gen(function* testBudgetLines() {
+      yield* TestClock.setTime(now);
+      assert.match(
+        yield* budgetLine(agentOf("directorate_auditor"), s),
+        /file surviving candidates now and hand off/u
+      );
+      assert.match(
+        yield* budgetLine(agentOf("directorate_compliance"), s),
+        /finish the entry in hand/u
+      );
+      assert.match(
+        yield* budgetLine(agentOf("directorate_liaison"), s),
+        /call directorate_report/u
+      );
+      assert.doesNotMatch(
+        yield* budgetLine(agentOf("directorate_auditor"), s),
+        /directorate_report/u
+      );
+    }).pipe(Effect.provide(TestClock.layer()))
   );
 });
 
 // ---------- re-checks ----------
-const confirmedBy = (by: Actor, evidence: string[]): Verdict => ({
-  at: T0,
-  by,
-  evidence,
-  rationale: "",
-  severity: "important",
-  verdict: "confirmed",
-});
+const confirmedBy = (by: Actor, evidence: string[]) =>
+  Verdict.make({
+    at: T0,
+    by,
+    evidence,
+    rationale: "",
+    severity: "important",
+    verdict: "confirmed",
+  });
 
 test("re-check: identical chunks carry only their own read receipts", async () => {
   const dir = repo();
@@ -3346,15 +3449,19 @@ test("re-check: identical chunks carry only their own read receipts", async () =
   const sealed = await local(dir);
   assert.equal(sealed.regions.length, 3);
 
-  const prior = {
+  const prior = Seal.make({
     ...regions(sealed, (_, i) =>
       i < 2 ? { ownerRead: true, readBy: ["owner"] } : {}
     ),
     reportedAt: T0,
-  };
+  });
 
   const next = await run(
-    recheckSeal({ ledger: { entries: [], notes: [] }, owner: lead, prior })
+    recheckSeal({
+      ledger: emptyLedger,
+      owner: lead,
+      prior,
+    })
   );
 
   assert.deepEqual(
@@ -3373,7 +3480,7 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
   write(dir, "src/other.ts", "export const other = 2\n");
   const sealed = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         severity: "important",
@@ -3393,31 +3500,31 @@ test("re-check: keeps the base and unchanged reads, carries verified findings an
       entry("F5", {
         status: "duplicate",
         verdicts: [
-          {
+          Verdict.make({
             at: T0,
             by: refuter,
             evidence: ["src/math.ts:2"],
-            of: "F1",
+            of: EntryIdSchema.make("F1"),
             rationale: "",
             verdict: "duplicate",
-          },
+          }),
         ],
       }),
     ],
     notes: [
-      {
+      Note.make({
         at: T0,
         by: lead,
         kind: "unanswered",
         text: "is div ever called with 0?",
-      },
+      }),
     ],
-  };
+  });
 
-  const prior = {
+  const prior = Seal.make({
     ...regions(sealed, () => ({ ownerRead: true, readBy: ["owner"] })),
     reportedAt: T0,
-  };
+  });
 
   await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
 
@@ -3498,7 +3605,7 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
   write(dir, "node_modules/lib/index.js", "module.exports = 1\n");
   const sealed = await local(dir);
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [
       entry("F1", {
         severity: "important",
@@ -3512,9 +3619,9 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
       }),
     ],
     notes: [],
-  };
+  });
 
-  const prior = { ...sealed, reportedAt: T0 };
+  const prior = Seal.make({ ...sealed, reportedAt: T0 });
   await run(store.pipe(Effect.flatMap((st) => st.saveBoth(prior, ledger))));
 
   // Only the installed dependency changes: Git sees nothing.
@@ -3532,24 +3639,33 @@ test("re-check: reopens a confirmed finding whose verdict cites an installed dep
 
 test("re-check verdicts: only carried entries resolve, only Compliance decides carried verified findings, nobody resolves their own", () => {
   const verified = entry("F1", {
-    carried: { id: "F7", status: "confirmed" },
+    carried: Carried.make({
+      id: EntryIdSchema.make("F7"),
+      status: "confirmed",
+    }),
   });
 
   const unverified = entry("F2", {
-    carried: { id: "F8", status: "unverified" },
+    carried: Carried.make({
+      id: EntryIdSchema.make("F8"),
+      status: "unverified",
+    }),
   });
 
   const own = entry("F3", {
-    carried: { id: "F9", status: "unverified" },
+    carried: Carried.make({
+      id: EntryIdSchema.make("F9"),
+      status: "unverified",
+    }),
     raisedBy: lead,
   });
 
   const fresh = entry("F4");
 
-  const ledger: Ledger = {
+  const ledger: Ledger = Ledger.make({
     entries: [verified, unverified, own, fresh],
     notes: [],
-  };
+  });
 
   const v = (
     e: Entry,
@@ -3591,25 +3707,30 @@ test("re-check verdicts: only carried entries resolve, only Compliance decides c
 });
 
 test("resolving an entry reopens its duplicates", () => {
-  const F1 = entry("F1", { carried: { id: "F1", status: "confirmed" } });
+  const F1 = entry("F1", {
+    carried: Carried.make({
+      id: EntryIdSchema.make("F1"),
+      status: "confirmed",
+    }),
+  });
 
   const F2 = entry("F2", {
     status: "duplicate",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["a:1"],
-        of: "F1",
+        of: EntryIdSchema.make("F1"),
         rationale: "",
         verdict: "duplicate",
-      },
+      }),
     ],
   });
 
   const { ledger, reopened } = decide(
-    { entries: [F1, F2], notes: [] },
-    { ...F1, status: "resolved" }
+    Ledger.make({ entries: [F1, F2], notes: [] }),
+    Entry.make({ ...F1, status: "resolved" })
   );
 
   assert.deepEqual(reopened, ["F2"]);
@@ -3617,35 +3738,20 @@ test("resolving an entry reopens its duplicates", () => {
 });
 
 test("re-check Directive: names the earlier seal, marks findings still present or new, and lists what was resolved", () => {
-  const earlier = "directorate-20260101000000-aaaaaa";
+  const earlier = SealIdSchema.make("directorate-20260101000000-aaaaaa");
 
-  const seal: Seal = {
-    baseSha: "base",
-    budgetMinutes: 10,
-    children: [],
+  const seal = bareSeal({
     createdAt: T0,
     deadline: T0,
-    deleted: [],
-    description: "d",
-    files: [],
-    fingerprint: "f",
-    gates: {},
-    gen: 0,
-    headSha: "head",
-    id: "directorate-20260101000000-bbbbbb",
-    mode: "default",
-    owner: lead.agent,
-    ownerSession: lead.session,
-    postImage: "commit",
+    id: SealIdSchema.make("directorate-20260101000000-bbbbbb"),
     recheckOf: earlier,
-    refreshes: 0,
-    regions: [],
-    repo: "/test",
-    target: { kind: "auto" },
-  };
+  });
 
   const still = entry("F1", {
-    carried: { id: "F3", status: "confirmed" },
+    carried: Carried.make({
+      id: EntryIdSchema.make("F3"),
+      status: "confirmed",
+    }),
     severity: "important",
     status: "confirmed",
     title: "still broken",
@@ -3656,22 +3762,28 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     status: "confirmed",
     title: "introduced by the fix",
     verdicts: [
-      { ...confirmedBy(refuter, ["src/math.ts:2"]), severity: "minor" },
+      Verdict.make({
+        ...confirmedBy(refuter, ["src/math.ts:2"]),
+        severity: "minor",
+      }),
     ],
   });
 
   const fixed = entry("F3", {
-    carried: { id: "F5", status: "confirmed" },
+    carried: Carried.make({
+      id: EntryIdSchema.make("F5"),
+      status: "confirmed",
+    }),
     status: "resolved",
     title: "was broken",
     verdicts: [
-      {
+      Verdict.make({
         at: T0,
         by: refuter,
         evidence: ["src/math.ts:1"],
         rationale: "guarded now",
         verdict: "resolved",
-      },
+      }),
     ],
   });
 
@@ -3679,7 +3791,12 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     entries: Entry[],
     status: Parameters<typeof renderReport>[0]["status"] = "complete"
   ) =>
-    renderReport({ ledger: { entries, notes: [] }, reasons: [], seal, status });
+    renderReport({
+      ledger: Ledger.make({ entries, notes: [] }),
+      reasons: [],
+      seal,
+      status,
+    });
 
   const md = render([still, fresh, fixed]);
   assert.match(md, new RegExp(`re-check of \`${earlier}\``, "u"));
@@ -3704,7 +3821,175 @@ test("re-check Directive: names the earlier seal, marks findings still present o
     /<Approved\/Tolerated> — Prior Findings Resolved/u
   );
   assert.match(
-    render([{ ...still, status: "open", verdicts: [] }], "partial"),
+    render([Entry.make({ ...still, status: "open", verdicts: [] })], "partial"),
     new RegExp(`verified as F3 in \`${earlier}\`, not re-checked`, "u")
   );
+});
+
+test("render: a failed Auditor on a missing Seat's model is still reported", async () => {
+  const dir = repo();
+  write(dir, "src/math.ts", `${MATH}// x\n`);
+  const sealed = await local(dir);
+
+  const seal = Seal.make({
+    ...sealed,
+    children: [
+      new Failed({
+        agent: "directorate_auditor",
+        call: CallIdSchema.make("a1"),
+        model: "other/gamma",
+        prompt: "seal: x\nquestion: is div ever called with 0?",
+        startedAt: T0,
+      }),
+    ],
+    panel: ["other/gamma"],
+  });
+
+  const md = renderReport({
+    ledger: emptyLedger,
+    seal,
+    ...assess(seal, emptyLedger, {}, "normal"),
+  });
+
+  assert.match(
+    md,
+    /- directorate_auditor did not complete: is div ever called with 0\?/u
+  );
+  assert.match(md, /- Directorate Seat gamma: never launched/u);
+});
+
+test("follow-up prefilter: a generated follow-up prompt passes, ordinary input does not", () => {
+  assert.ok(
+    mayBeFollowUp(
+      followUpPrompt({ call: CallIdSchema.make("c1"), prompt: "check F2" })
+    )
+  );
+  assert.ok(!mayBeFollowUp("check F2"));
+  assert.ok(!mayBeFollowUp("[Directorate follow-up: c1]"));
+});
+
+test("a staged-only change to an assume-unchanged file whose working copy is back at the base is not in the sealed diff", async () => {
+  const dir = repo({ "src/a.ts": "committed\n", "src/b.ts": "same\n" });
+  write(dir, "src/a.ts", "staged\n");
+  g(dir, "add", "src/a.ts");
+  write(dir, "src/a.ts", "committed\n");
+  g(dir, "update-index", "--assume-unchanged", "src/a.ts");
+  assert.match(g(dir, "diff", "HEAD"), /^\+staged$/mu, "git diffs the index");
+  const seal = await local(dir);
+  const patch = readFileSync(await run(diffFile(seal)), "utf-8");
+
+  assert.doesNotMatch(patch, /staged/u);
+  assert.ok(seal.files.every((f) => f.path !== "src/a.ts"));
+  assert.ok(seal.regions.every((r) => r.file !== "src/a.ts"));
+  const read = await run(readable(seal, "src/a.ts"));
+  assert.equal(read.content, "committed\n");
+  const current = await run(currentFingerprint(seal));
+  assert.equal(current.fingerprint, seal.fingerprint);
+});
+
+test("worktree signatures keep their stored form: deleted, withheld, and mode with the sha256 of the bytes", async () => {
+  const dir = repo({ "src/a.ts": "original\n", "src/b.ts": "same\n" });
+  write(dir, ".gitignore", "src/a.ts\n");
+  g(dir, "add", ".gitignore");
+  g(dir, "commit", "-qm", "ignore");
+  g(dir, "rm", "--cached", "-q", "src/a.ts");
+  write(dir, "src/b.ts", "edited\n");
+  write(dir, ".env", "TOKEN=1\n");
+  const seal = await local(dir);
+  const edited = createHash("sha256").update("edited\n").digest("hex");
+
+  assert.deepEqual(seal.sigs, {
+    ".env": "withheld",
+    "src/a.ts": "deleted",
+    "src/b.ts": `file:${edited}`,
+  });
+});
+
+/** The seal a fresh Sessions, as after a plugin reload, finds recorded on a session. */
+const recordedBy = (sessionID: SessionId) =>
+  Sessions.use((s) => s.recordedSeal(sessionID)).pipe(
+    Effect.provide(Layer.fresh(Sessions.layer))
+  );
+
+test("closing a reported seal keeps the record of a review its Liaison started while a child was being stopped", async () => {
+  // Host session ids, which the instruction entries validate.
+  const LEAD = SessionIdSchema.make("ses_lead");
+  const recorded = new Map<string, Map<string, string>>();
+  const stopping = Deferred.makeUnsafe<true>();
+  const release = Deferred.makeUnsafe<true>();
+
+  // SAFETY: Sessions' record and close touch only instruction entries and interrupts.
+  const host = Object.assign(Object.create(null) as Plugin.Context, {
+    session: {
+      instructions: {
+        entry: {
+          list: ({ sessionID }: { sessionID: string }) =>
+            Effect.sync(() =>
+              [...(recorded.get(sessionID) ?? [])].map(([key, value]) => ({
+                key,
+                value,
+              }))
+            ),
+          put: (e: { key: string; sessionID: string; value: string }) =>
+            Effect.sync(() => {
+              const map = recorded.get(e.sessionID) ?? new Map();
+              recorded.set(e.sessionID, map.set(e.key, e.value));
+            }),
+          remove: (e: { key: string; sessionID: string }) =>
+            Effect.sync(() => {
+              recorded.get(e.sessionID)?.delete(e.key);
+            }),
+        },
+      },
+      interrupt: () =>
+        Deferred.succeed(stopping, true).pipe(
+          Effect.andThen(Deferred.await(release))
+        ),
+    },
+  });
+
+  const reported = bareSeal({
+    children: [
+      new Running({
+        agent: "directorate_auditor",
+        call: CallIdSchema.make("a1"),
+        prompt: "question: q",
+        session: SessionIdSchema.make("ses_kid"),
+        startedAt: T0,
+      }),
+    ],
+    id: SealIdSchema.make("directorate-20260101000000-aaaaaa"),
+    ownerSession: LEAD,
+    reportedAt: T0,
+  });
+
+  const next = bareSeal({
+    id: SealIdSchema.make("directorate-20260101000100-bbbbbb"),
+    ownerSession: LEAD,
+  });
+
+  const [kept, cleared] = await run(
+    Effect.gen(function* closeRace() {
+      const sessions = yield* Sessions;
+      yield* sessions.record(LEAD, reported);
+      const closing = yield* Effect.forkChild(sessions.close(reported));
+      yield* Deferred.await(stopping);
+      yield* sessions.record(LEAD, next);
+      yield* Deferred.succeed(release, true);
+      yield* Fiber.join(closing);
+      const afterRace = yield* recordedBy(LEAD);
+
+      // Without a newer review, closing clears the record it names.
+      yield* sessions.record(LEAD, reported);
+      yield* sessions.close(reported);
+
+      return [afterRace, yield* recordedBy(LEAD)] as const;
+    }).pipe(
+      Effect.provide(Layer.fresh(Sessions.layer)),
+      Effect.provideService(Host, host)
+    )
+  );
+
+  assert.equal(kept, next.id, "a reloaded plugin still finds the new review");
+  assert.equal(cleared, undefined);
 });
