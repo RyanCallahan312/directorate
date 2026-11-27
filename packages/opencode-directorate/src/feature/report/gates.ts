@@ -16,7 +16,7 @@ import {
 import { currentSeverity, unresolved } from "../ledger/decide.ts";
 import type { Ledger } from "../ledger/entry.ts";
 import { GapGateSchema } from "./directive.ts";
-import type { GapGate } from "./directive.ts";
+import type { GapGate, Remembered } from "./directive.ts";
 
 /** A gap gate's finding: the gaps it sees now, under the key it remembers them by, and its protocol hold. */
 export class Hold extends Schema.Class<Hold, { readonly brand: unique symbol }>(
@@ -30,9 +30,13 @@ export class Hold extends Schema.Class<Hold, { readonly brand: unique symbol }>(
 const hold = (key: GapGate, ids: readonly string[], message: string) =>
   Hold.make({ ids, key, message });
 
-/** Coverage: every region is read or disposed. */
+/** Coverage: every region is read or disposed. Undefined when none is unread. */
 export const coverageGate = (seal: Seal) => {
   const cov = coverageSummary(seal);
+
+  if (!cov.unread.length) {
+    return;
+  }
 
   return hold(
     "coverage",
@@ -46,9 +50,13 @@ export const coverageGate = (seal: Seal) => {
   );
 };
 
-/** Seats: every Directorate Seat returned a review of every region. */
+/** Seats: every Directorate Seat returned a review of every region. Undefined when none is missing. */
 export const seatsGate = (seal: Seal, phase: Phase) => {
   const missing = missingSeats(seal);
+
+  if (!missing.length) {
+    return;
+  }
 
   return hold(
     "panel",
@@ -57,9 +65,13 @@ export const seatsGate = (seal: Seal, phase: Phase) => {
   );
 };
 
-/** Active Personnel: no Auditor, Seat, or Compliance run is still going. */
+/** Active Personnel: no Auditor, Seat, or Compliance run is still going. Undefined when none is. */
 export const personnelGate = (seal: Seal) => {
   const running = outstandingDispatches(seal);
+
+  if (!running.length) {
+    return;
+  }
 
   return hold(
     "children",
@@ -68,9 +80,13 @@ export const personnelGate = (seal: Seal) => {
   );
 };
 
-/** Unverified Dossier: every entry is decided. */
+/** Unverified Dossier: every entry is decided. Undefined when every entry is. */
 export const dossierGate = (ledger: Ledger) => {
   const open = unresolved(ledger);
+
+  if (!open.length) {
+    return;
+  }
 
   return hold(
     "open",
@@ -110,3 +126,48 @@ export const driftGate = (
   !isLocked(phase)
     ? `Protocol hold (Containment Drift): the artifact changed after sealing${unfetched ? ` (${unfetched})` : ""}. Call directorate_refresh to re-contain once, read the new regions, and re-verify reopened entries; then call directorate_report again.`
     : undefined;
+
+/** A gate that pushes back now: what the seal's gates remember from now on, and the protocol hold the Liaison reads. */
+const pushBack = (remembered: Remembered, message: string) => ({
+  message,
+  remembered,
+});
+
+/** The gap gate's push-back, or undefined when it holds nothing new. */
+const once = (seal: Seal, phase: Phase, gate: Hold | undefined) => {
+  const remembered = gate && pushesBack(seal, phase, gate);
+
+  return gate && remembered ? pushBack(remembered, gate.message) : undefined;
+};
+
+/** The target's fingerprint now, as the freshness check found it, and why the PR head was out of reach, if it was. */
+const FingerprintSchema = Schema.Struct({
+  fingerprint: Schema.String,
+  unfetched: Schema.optional(Schema.String),
+});
+
+/** The gates decided before the target's fingerprint is checked, in order: Coverage, Seats, Active Personnel. */
+export const heldBeforeFreshness = (seal: Seal, phase: Phase) =>
+  once(seal, phase, coverageGate(seal)) ??
+  once(seal, phase, seatsGate(seal, phase)) ??
+  once(seal, phase, personnelGate(seal));
+
+/**
+ * The gates decided after the fingerprint check, in order: Containment Drift (only when the check told the fingerprint),
+ * then the Unverified Dossier.
+ */
+export const heldAfterFreshness = (
+  seal: Seal,
+  ledger: Ledger,
+  phase: Phase,
+  current: typeof FingerprintSchema.Type | undefined
+) => {
+  const drift =
+    current && driftGate(seal, phase, current.fingerprint, current.unfetched);
+
+  if (current && drift) {
+    return pushBack({ freshness: current.fingerprint }, drift);
+  }
+
+  return once(seal, phase, dossierGate(ledger));
+};

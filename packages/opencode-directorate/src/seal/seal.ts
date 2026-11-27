@@ -3,7 +3,7 @@
 export {
   capture,
   changedBetween,
-  changedSinceSeal,
+  changesSinceSeal,
   repinned,
   settled,
 } from "./capture.ts";
@@ -33,7 +33,6 @@ export {
   ShipLink,
   Takeover,
   ToolCall,
-  Watchdog,
 } from "./sessions.ts";
 
 export { readTools } from "./tools.ts";

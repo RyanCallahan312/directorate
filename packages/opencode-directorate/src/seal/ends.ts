@@ -9,7 +9,6 @@ import type { Seal } from "./record.ts";
 import {
   isCommitImage,
   PostImageSchema,
-  ResolvedKindSchema,
   Target,
   TargetKindSchema,
 } from "./target.ts";
@@ -36,24 +35,38 @@ class Ends extends Schema.Class<Ends, { readonly brand: unique symbol }>(
   baseTip: opt(Schema.String),
   description: Schema.String,
   headSha: Schema.String,
-  kind: ResolvedKindSchema,
   postImage: PostImageSchema,
   scope: opt(Schema.Array(Schema.String)),
   target: Target,
 }) {}
 
+/** Two ends as a description names them: 10 characters of each commit, or the working tree when there is no head commit. */
+export const endsPair = (base: string, head?: string) =>
+  `${base.slice(0, 10)} → ${head === undefined ? "working tree" : head.slice(0, 10)}`;
+
+/** A description re-pinned to new ends: the commit pair endsPair wrote, at the end of a parenthesis, replaced. */
+export const repinDescription = (
+  description: string,
+  base: string,
+  head: string
+) =>
+  description.replace(
+    /\((?<prefix>[^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/u,
+    `($<prefix>${endsPair(base, head)})`
+  );
+
+/** `resolved` is HEAD's commit when the caller already has it. */
 const localEnds = Effect.fnUntraced(function* localEnds(
   repo: string,
-  target: Target
+  target: Target,
+  resolved?: string
 ) {
-  const git = yield* Git;
-  const head = yield* git.head(repo);
+  const head = resolved ?? (yield* (yield* Git).head(repo));
 
   return Ends.make({
     baseSha: head,
     description: `local changes (staged, unstaged, untracked) vs HEAD ${head.slice(0, 10)}`,
     headSha: head,
-    kind: "local",
     postImage: "worktree",
     scope: scopeOf(target.paths),
     target,
@@ -74,7 +87,7 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
       });
     }
 
-    return yield* localEnds(repo, Target.make({ kind: "local" }));
+    return yield* localEnds(repo, Target.make({ kind: "local" }), head);
   }
 
   // Without a known base, the branch's commits cannot be found: sealing local-only would silently drop them.
@@ -109,15 +122,14 @@ const autoEnds = Effect.fnUntraced(function* autoEnds(repo: string) {
   if (ahead) {
     return Ends.make({
       baseSha: mb,
-      description: `branch ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${def}${dirty ? " plus local changes" : ""} (merge-base ${mb.slice(0, 10)} → working tree)`,
+      description: `branch ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${def}${dirty ? " plus local changes" : ""} (merge-base ${endsPair(mb)})`,
       headSha: head,
-      kind: "local",
       postImage: "worktree",
       target: Target.make({ kind: "local" }),
     });
   }
 
-  return yield* localEnds(repo, Target.make({ kind: "local" }));
+  return yield* localEnds(repo, Target.make({ kind: "local" }), head);
 });
 
 const prMergeBase = (repo: string, m: PullRequest) =>
@@ -145,7 +157,6 @@ const pathsEnds = Effect.fnUntraced(function* pathsEnds(
     baseSha: head,
     description: `files under ${(scope ?? ["the whole repository"]).join(", ")} at HEAD ${head.slice(0, 10)} plus working-tree edits`,
     headSha: head,
-    kind: "paths",
     postImage: "worktree",
     scope,
     target,
@@ -164,7 +175,6 @@ const commitEnds = Effect.fnUntraced(function* commitEnds(
     baseSha: parent,
     description: `commit ${c.slice(0, 10)}`,
     headSha: c,
-    kind: "commit",
     postImage: "commit",
     target: Target.make({ ...target, commit: c }),
   });
@@ -196,9 +206,8 @@ const rangeEnds = Effect.fnUntraced(function* rangeEnds(
 
   return Ends.make({
     baseSha: mb,
-    description: `${base}...${target.head || "HEAD"} (merge-base ${mb.slice(0, 10)} → ${h.slice(0, 10)})`,
+    description: `${base}...${target.head || "HEAD"} (merge-base ${endsPair(mb, h)})`,
     headSha: h,
-    kind: "range",
     postImage: "commit",
     target: Target.make({ ...target, base }),
   });
@@ -233,16 +242,15 @@ const prEnds = Effect.fnUntraced(function* prEnds(
   return Ends.make({
     baseSha: mb,
     baseTip: m.baseRefOid,
-    description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${mb.slice(0, 10)} → ${m.headRefOid.slice(0, 10)}) ${m.url}`,
+    description: `PR #${m.number} "${m.title}" ${m.baseRefName}...${m.headRefName} (${endsPair(mb, m.headRefOid)}) ${m.url}`,
     headSha: m.headRefOid,
-    kind: "pr",
     postImage: "commit",
     target,
   });
 });
 
 export const resolveEnds = Effect.fn("Directorate.resolveEnds")(
-  function* resolveTarget(repo: string, target: Target) {
+  function* resolveEnds(repo: string, target: Target) {
     if (rejectsPaths(target)) {
       return yield* new InvalidTarget({
         message: `The ${target.kind} target does not support paths. Use local for scoped working-tree changes or paths for whole files.`,
@@ -283,7 +291,14 @@ export class Current extends Schema.Class<
   fingerprint: Schema.String,
   headSha: Schema.String,
   unfetched: opt(Schema.String),
-}) {}
+}) {
+  /** The seal's description pinned to these ends; a worktree's description does not name them. */
+  describing(seal: Seal) {
+    return seal.pinsCommit
+      ? repinDescription(seal.description, this.baseSha, this.headSha)
+      : seal.description;
+  }
+}
 
 /** Current ends for a sealed target (re-resolving moving refs) and its fingerprint. */
 const currentEnds = Effect.fn("Directorate.currentEnds")(function* currentEnds(

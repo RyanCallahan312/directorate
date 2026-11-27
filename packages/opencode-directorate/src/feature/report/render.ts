@@ -6,6 +6,7 @@ import { Seal } from "../../seal/record.ts";
 import { isBaseSide } from "../../seal/region.ts";
 import type { Region } from "../../seal/region.ts";
 import { Seat as SeatAgent } from "../agents/agent.ts";
+import type { Actor } from "../agents/agent.ts";
 import {
   actorName,
   failedDispatches,
@@ -31,7 +32,7 @@ import {
   Ledger,
   SeveritySchema,
 } from "../ledger/entry.ts";
-import type { Entry, Severity } from "../ledger/entry.ts";
+import type { Entry, EntryId, Severity, Verdict } from "../ledger/entry.ts";
 import { DirectiveStatusSchema, isComplete } from "./directive.ts";
 import type { DirectiveStatus } from "./directive.ts";
 
@@ -41,17 +42,36 @@ const SEV_LABEL = Schema.Record(SeveritySchema, Schema.String).make({
   minor: "Minor",
 });
 
+/**
+ * Each entry's root (itself, or the entry a duplicate finally points at; undefined for a cycle or a missing target), and
+ * each root's duplicates by the root's id, in ledger order.
+ */
+const rootsOf = (ledger: Ledger) => {
+  const root = new Map(
+    ledger.entries.map((e) => [e, resolvedTarget(ledger, e)] as const)
+  );
+
+  const duplicates = Map.groupBy(
+    ledger.entries.filter((e) => e.isDuplicate),
+    (d) => root.get(d)?.id
+  );
+
+  return { duplicates, root };
+};
+
+type Roots = ReturnType<typeof rootsOf>;
+
 /** For each confirmed entry, the panel seats that raised it or a duplicate of it. */
-const seatsRaising = (seal: Seal, ledger: Ledger) => {
+const seatsRaising = (seal: Seal, ledger: Ledger, roots: Roots) => {
   const seats = panelSeats(seal);
 
   const seatOf = (e: Entry) =>
     seats.find((s) => s.sessions.has(e.raisedBy.session))?.model;
 
-  const raised = new Map<string, Set<string>>();
+  const raised = new Map<EntryId, Set<string>>();
 
   for (const e of ledger.entries) {
-    const root = e.isDuplicate ? resolvedTarget(ledger, e) : e;
+    const root = roots.root.get(e);
     const seat = seatOf(e);
 
     if (root && seat) {
@@ -118,6 +138,23 @@ const group = (rs: readonly Region[]) =>
       ] as const
   );
 
+/** How many files one coverage line lists before the rest are counted. */
+const FILES_PER_NOTE = 20;
+
+/** One line per distinct note: a bulk disposition's note once, then the files and line ranges it covers. */
+const byNote = (label: string, rs: readonly Region[]) =>
+  [...Map.groupBy(rs, (r) => r.note ?? "")].map(([note, regions]) => {
+    const files = group(regions);
+
+    const listed = files
+      .slice(0, FILES_PER_NOTE)
+      .map(([f, ranges]) => `\`${f}\` lines ${ranges.join(", ")}`);
+
+    const more = files.length - listed.length;
+
+    return `- ${label}${note ? `: ${note}` : ""} — ${listed.join("; ")}${more ? `; and ${more} more files` : ""}`;
+  });
+
 const outsideContainment = (
   seal: Seal,
   ledger: Ledger,
@@ -129,17 +166,10 @@ const outsideContainment = (
     nr.push(`- \`${f}\` lines ${rs.join(", ")}: not read`);
   }
 
-  for (const r of cov.skimmed) {
-    nr.push(
-      `- \`${r.file}:${r.newStart}-${r.newEnd}\` skimmed only: ${r.note ?? ""}`
-    );
-  }
-
-  for (const r of cov.skipped) {
-    nr.push(
-      `- \`${r.file}:${r.newStart}-${r.newEnd}\` skipped: ${r.note ?? ""}`
-    );
-  }
+  nr.push(
+    ...byNote("skimmed only", cov.skimmed),
+    ...byNote("skipped", cov.skipped)
+  );
 
   for (const f of seal.files.filter(
     (file) => file.excluded && file.isChanged
@@ -154,7 +184,7 @@ const outsideContainment = (
     ...outstandingDispatches(seal),
     ...failedDispatches(seal, ledger),
   ]) {
-    if (!(c.model && seatless.some((s) => s.model === c.model))) {
+    if (!seatless.some((s) => s.runs.includes(c))) {
       nr.push(
         `- ${dispatchName(c)} did not ${isFailed(c) ? "complete" : "finish"}: ${dispatchQuestion(c)}`
       );
@@ -205,14 +235,21 @@ type Finding = ReturnType<typeof finding>;
 
 type Panel = ReturnType<typeof seatsRaising>;
 
+/** How the report names whoever raised or decided an entry. */
+type Who = (actor: Actor) => string;
+
+/** Who decided an entry and on what: "<who>: <rationale> <evidence>", or "?" for who when no verdict decided it. */
+const decision = (who: Who, v: Verdict | undefined) =>
+  `${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""}`.trimEnd();
+
 const renderFindings = (
   seal: Seal,
-  ledger: Ledger,
+  who: Who,
+  roots: Roots,
   confirmed: readonly Finding[],
   panel: Panel | undefined
 ) => {
   const out: string[] = [];
-  const who = (actor: Entry["raisedBy"]) => actorName(seal, actor);
 
   if (confirmed.length) {
     out.push("", "### Verified Findings");
@@ -225,9 +262,7 @@ const renderFindings = (
 
       const v = e.verdicts.findLast((x) => isConfirming(x.verdict));
 
-      const dupes = ledger.entries.filter(
-        (d) => d.isDuplicate && resolvedTarget(ledger, d)?.id === e.id
-      );
+      const dupes = roots.duplicates.get(e.id) ?? [];
 
       const higher = dupes.filter((d) => RANK[currentSeverity(d)] < RANK[sev]);
       const seats = panel?.raised.get(e.id);
@@ -269,9 +304,8 @@ const renderFindings = (
   return out;
 };
 
-const renderRefuted = (seal: Seal, refuted: readonly Entry[]) => {
+const renderRefuted = (who: Who, refuted: readonly Entry[]) => {
   const out: string[] = [];
-  const who = (actor: Entry["raisedBy"]) => actorName(seal, actor);
   const notable = refuted.filter((e) => !isMinor(currentSeverity(e)));
 
   if (notable.length) {
@@ -284,7 +318,7 @@ const renderRefuted = (seal: Seal, refuted: readonly Entry[]) => {
     for (const e of notable) {
       const v = e.verdicts.findLast((x) => isRefuting(x.verdict));
       out.push(
-        `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, raised by ${who(e.raisedBy)}; refuted by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""})`
+        `- ${e.title} — \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, raised by ${who(e.raisedBy)}; refuted by ${decision(who, v)})`
       );
     }
   }
@@ -294,11 +328,11 @@ const renderRefuted = (seal: Seal, refuted: readonly Entry[]) => {
 
 const renderCandidates = (
   seal: Seal,
+  who: Who,
   resolved: readonly Entry[],
   leads: readonly Entry[]
 ) => {
   const out: string[] = [];
-  const who = (actor: Entry["raisedBy"]) => actorName(seal, actor);
 
   if (resolved.length) {
     out.push("", `### Resolved Since \`${seal.recheckOf}\``);
@@ -306,7 +340,7 @@ const renderCandidates = (
     for (const e of resolved) {
       const v = e.verdicts.findLast((x) => isResolving(x.verdict));
       out.push(
-        `- ${e.title} — was \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${e.carried?.id}${e.carried && !e.carried.wasVerified ? ", previously unverified" : ""}); resolved by ${v ? who(v.by) : "?"}: ${v?.rationale ?? ""} ${v?.evidence.map((x) => `\`${x}\``).join(", ") ?? ""}`.trimEnd()
+        `- ${e.title} — was \`${e.anchor.path}:${e.anchor.line}\` (${currentSeverity(e)}, ${e.carried?.id}${e.carried && !e.carried.wasVerified ? ", previously unverified" : ""}); resolved by ${decision(who, v)}`
       );
     }
   }
@@ -410,7 +444,12 @@ export const renderReport = (input: typeof ReportSchema.Type): string => {
   const verdict = directiveVerdict(confirmed[0]?.sev, status, resolved.length);
 
   const cov = coverageSummary(seal);
-  const panel = seal.panel?.length ? seatsRaising(seal, ledger) : undefined;
+  const roots = rootsOf(ledger);
+  const who = (actor: Actor) => actorName(seal, actor);
+
+  const panel = seal.panel?.length
+    ? seatsRaising(seal, ledger, roots)
+    : undefined;
 
   const out = [
     `**Directorate Directive: ${verdict}** · status: **${status}** · mode: ${seal.mode}`,
@@ -440,9 +479,9 @@ export const renderReport = (input: typeof ReportSchema.Type): string => {
   }
 
   out.push(
-    ...renderFindings(seal, ledger, confirmed, panel),
-    ...renderCandidates(seal, resolved, leads),
-    ...renderRefuted(seal, refuted),
+    ...renderFindings(seal, who, roots, confirmed, panel),
+    ...renderCandidates(seal, who, resolved, leads),
+    ...renderRefuted(who, refuted),
     ...renderSeats(ledger, confirmed, panel)
   );
 

@@ -1,19 +1,20 @@
 {
   "boot": "boot-1",
   "chain": [
-    "directorate-a",
-    "directorate-b"
+    "directorate-20260101000000-aaaaaa",
+    "directorate-20260102000000-bbbbbb"
   ],
-  "id": "ship-1",
+  "id": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
   "inbox": {
-    "id": "inb_1"
+    "id": "msg_inb1"
   },
   "location": "/repo",
+  "pid": 4242,
   "reason": "User interrupted",
+  "recovery": "Resolve the blocker, then use /directorate-ship resume, or use /directorate-ship stop to clear it.",
   "request": "ship the feature",
   "reviewsAtResume": 1,
   "rounds": 2,
   "startedAt": 1767261600000,
-  "status": "paused",
-  "step": "fix"
+  "status": "paused"
 }

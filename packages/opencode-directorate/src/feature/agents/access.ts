@@ -23,9 +23,23 @@ import {
   dispatchableNamed,
   Liaison,
 } from "./agent.ts";
+import type { Agent } from "./agent.ts";
 
 /** Why another agent may not use the review harness: the Liaison runs the whole review, so callers dispatch it. */
 const LIAISON_ONLY = `Only ${Liaison.id} runs a Directorate review: it seals, reads, dispatches its own Auditors, Seats, and Compliance, and returns the Directive. Dispatch ${Liaison.id} with the target and focus, and relay its Directive verbatim. If you already dispatched one, send the follow-up to that session instead of starting another. To re-check after fixes, send that session a follow-up asking for a re-check, or dispatch a new Liaison with the seal id from the Directive's Containment line.`;
+
+/** Removes from the request's tools each one `drops` holds for. */
+const dropTools = <E, R>(
+  event: SessionContext,
+  drops: (name: string) => Effect.Effect<boolean, E, R>
+) =>
+  Effect.gen(function* dropEach() {
+    for (const name of Object.keys(event.tools ?? {})) {
+      if (yield* drops(name)) {
+        Reflect.deleteProperty(event.tools, name);
+      }
+    }
+  });
 
 /** True for a request of an agent outside The Directorate, whose tools then keep only those to configure and export. */
 export const withholdHarness = Effect.fnUntraced(function* withholdHarness(
@@ -38,11 +52,7 @@ export const withholdHarness = Effect.fnUntraced(function* withholdHarness(
   const catalog = yield* ToolCatalog;
 
   // Other agents can configure and export without getting the review harness.
-  for (const name of Object.keys(event.tools ?? {})) {
-    if (yield* catalog.harness(name)) {
-      Reflect.deleteProperty(event.tools, name);
-    }
-  }
+  yield* dropTools(event, catalog.harness);
 
   return true;
 });
@@ -66,12 +76,25 @@ export const lockdown = Effect.fnUntraced(function* lockdown(
     type: "text",
   });
 
-  for (const name of Object.keys(event.tools ?? {})) {
-    if (!(yield* catalog.keeps(event.agent, name))) {
-      Reflect.deleteProperty(event.tools, name);
-    }
-  }
+  yield* dropTools(event, (name) =>
+    Effect.map(catalog.keeps(event.agent, name), (keeps) => !keeps)
+  );
 });
+
+/**
+ * Whether `caller` is refused a review-harness tool or, when `child` is set, the dispatch of that Directorate subagent:
+ * any caller that does not resolve to a Directorate agent is, including one neither the request nor the session's
+ * record names, and so is a Directorate agent that does not dispatch `child`. Dispatching the Liaison and every
+ * non-harness tool are not asked here; the host's own rules decide them.
+ */
+export const refusesCaller = (
+  caller: string | undefined,
+  child: Agent | undefined
+) => {
+  const by = agentNamed(caller);
+
+  return child ? !by?.dispatches.includes(child.id) : !by;
+};
 
 /**
  * Only the Liaison dispatches Auditors, Seats, and Compliance, and only Directorate agents call the review tools. No new
@@ -81,7 +104,7 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
   const host = yield* Host;
   const sessions = yield* Sessions;
   const catalog = yield* ToolCatalog;
-  const { hook } = yield* adapter<Sessions>();
+  const { hook } = yield* adapter<never>();
 
   yield* host.permission.hook(
     "evaluate",
@@ -94,16 +117,13 @@ export const registerAccess = Effect.fnUntraced(function* registerAccess() {
         ? child !== undefined
         : yield* catalog.harness(event.action);
 
-      // A request that names no agent is the session's agent's, as the host resolves it.
-      const caller = covered
-        ? (event.agent ?? (yield* sessions.agent(event.sessionID)))
-        : undefined;
-
-      const by = agentNamed(caller);
-
+      // A request that names no agent is the session's agent's, as the host resolves it; with neither, it is refused.
       if (
-        caller !== undefined &&
-        (child ? !by?.dispatches.includes(child.id) : !by)
+        covered &&
+        refusesCaller(
+          event.agent ?? (yield* sessions.agent(event.sessionID)),
+          child
+        )
       ) {
         event.effect = "deny";
         event.message = LIAISON_ONLY;

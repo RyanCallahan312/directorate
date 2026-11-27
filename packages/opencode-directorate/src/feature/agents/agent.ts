@@ -2,6 +2,7 @@
 // (Window × Agent).
 import { Effect, Schema } from "effect";
 
+import { SessionIdSchema } from "../../platform/host-id.ts";
 import {
   budget,
   PHASE_HEADERS,
@@ -21,6 +22,15 @@ export const AgentIdSchema = Schema.Literals([
 ]);
 
 type AgentId = typeof AgentIdSchema.Type;
+
+const isAgentId = Schema.is(AgentIdSchema);
+
+/** The agents the Liaison dispatches: Auditors, Directorate Seats, and Compliance. */
+export const DispatchableIdSchema = AgentIdSchema.pick([
+  "directorate_auditor",
+  "directorate_seat",
+  "directorate_compliance",
+]);
 
 /** An agent of a kind: whom it dispatches, the phases it may be launched in, and its orders in each phase. */
 export class Agent extends Schema.Class<
@@ -44,14 +54,18 @@ export class Agent extends Schema.Class<
   orderFor(phase: Phase) {
     return this.orders[phase];
   }
+
+  /**
+   * Whether a host-supplied or stored agent name denotes this agent; false for any other or unknown name. The same
+   * answer as `agentNamed(name) === this`: the registry keys each agent by its id.
+   */
+  is(name: string | undefined) {
+    return isAgentId(name) && name === this.id;
+  }
 }
 
 export const Liaison = Agent.make({
-  dispatches: [
-    "directorate_auditor",
-    "directorate_seat",
-    "directorate_compliance",
-  ],
+  dispatches: DispatchableIdSchema.literals,
   id: "directorate_liaison",
   launchableIn: [],
   orders: {
@@ -111,8 +125,6 @@ const Agents = Schema.Record(AgentIdSchema, Agent).make({
 
 export const agentOf = (id: AgentId) => Agents[id];
 
-const isAgentId = Schema.is(AgentIdSchema);
-
 /** The Directorate agent a host-supplied name denotes, or undefined for any other agent. */
 export const agentNamed = (name: string | undefined) =>
   isAgentId(name) ? agentOf(name) : undefined;
@@ -126,14 +138,14 @@ export const dispatchableNamed = (name: string | undefined) => {
 
 /**
  * Who acted: the agent and session of a tool call, decoded once at the edge (platform's `actor`). Stored in ledger.json
- * entries, verdicts, and notes; the agent stays any string there, since other agents and older versions wrote them.
+ * entries, verdicts, and notes; the agent stays any string there, since any agent's tool call has an actor.
  */
 export class Actor extends Schema.Class<
   Actor,
   { readonly brand: unique symbol }
 >("directorate/Actor")({
   agent: Schema.String,
-  session: Schema.String,
+  session: SessionIdSchema,
 }) {
   /** The Directorate agent that acted, or undefined for any other agent. */
   get role() {

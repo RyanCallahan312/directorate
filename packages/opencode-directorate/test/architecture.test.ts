@@ -303,6 +303,25 @@ test("the checker rejects package-entry, placement, and export * mistakes", () =
   );
 });
 
+test("the scanner counts export type * and export type * as as export *", () => {
+  for (const line of [
+    'export type * from "./views.ts";',
+    'export type * as Views from "./views.ts";',
+  ]) {
+    const scanned = scanModule("seal/seal.ts", line);
+
+    assert.equal(scanned.exportsStar, true, line);
+    assert.deepEqual(
+      scanned.imports.map((i) => [i.target, i.typeOnly]),
+      [["seal/views.ts", true]],
+      line
+    );
+    assert.deepEqual(check(scanned, mod("seal/views.ts")), [
+      "seal/seal.ts: export * in a slice module; export selected names",
+    ]);
+  }
+});
+
 test("a module directly in src/ other than the root modules breaks no import rule but is reported", () => {
   assert.deepEqual(
     check(
@@ -442,11 +461,8 @@ for (const [entry, extras] of [
   ["tui.ts", TUI_ALLOWED],
   ["rpc.ts", RPC_ALLOWED],
 ] as const) {
-  test(`${entry} reaches only effect and ${extras.join(", ")}`, (t) => {
+  test(`${entry} reaches only effect and ${extras.join(", ")}`, () => {
     const closure = valueClosure(graph, entry);
-
-    t.diagnostic(`${entry} reaches modules: ${closure.modules.join(", ")}`);
-    t.diagnostic(`${entry} reaches packages: ${closure.specifiers.join(", ")}`);
 
     assert.deepEqual(
       closure.specifiers.filter((s) => !allowedBy(extras)(s)),
@@ -475,11 +491,10 @@ test("the built GUI bundle requires only effect and @opencode/plugin/{gui,rpc}",
     ),
   ].toSorted();
 
-  t.diagnostic(`dist/gui-experimental.cjs requires: ${required.join(", ")}`);
-
   assert.deepEqual(
     required.filter((s) => !allowedBy(GUI_ALLOWED)(s)),
-    []
+    [],
+    `dist/gui-experimental.cjs requires: ${required.join(", ")}`
   );
 });
 

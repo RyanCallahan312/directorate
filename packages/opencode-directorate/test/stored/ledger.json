@@ -9,7 +9,7 @@
       },
       "brief": "Off by one",
       "carried": {
-        "id": "E9",
+        "id": "F9",
         "status": "confirmed"
       },
       "consequence": "Wrong result",
@@ -28,13 +28,13 @@
           "evidence": [
             "src/a.ts:3"
           ],
-          "of": "E1",
+          "of": "F1",
           "rationale": "Ruled refuted",
           "severity": "minor",
           "verdict": "refuted"
         }
       ],
-      "id": "E1",
+      "id": "F1",
       "kind": "defect",
       "lens": "correctness",
       "quote": "return x",
@@ -45,7 +45,7 @@
       "severity": "blocking",
       "staleReason": "Region moved",
       "status": "confirmed",
-      "title": "Finding E1",
+      "title": "Finding F1",
       "trigger": "Call with empty input",
       "verdicts": [
         {
@@ -57,7 +57,7 @@
           "evidence": [
             "src/a.ts:3"
           ],
-          "of": "E1",
+          "of": "F1",
           "rationale": "Ruled confirmed",
           "severity": "important",
           "verdict": "confirmed"
@@ -72,7 +72,7 @@
         "side": "old"
       },
       "carried": {
-        "id": "E8",
+        "id": "F8",
         "status": "unverified"
       },
       "consequence": "Wrong result",
@@ -80,7 +80,7 @@
       "evidence": [
         "src/modified.ts:10"
       ],
-      "id": "E2",
+      "id": "F2",
       "kind": "test-gap",
       "lens": "correctness",
       "quote": "return x",
@@ -90,7 +90,7 @@
       },
       "severity": "important",
       "status": "open",
-      "title": "Finding E2",
+      "title": "Finding F2",
       "trigger": "Call with empty input",
       "verdicts": []
     },
@@ -106,7 +106,7 @@
       "evidence": [
         "src/modified.ts:10"
       ],
-      "id": "E3",
+      "id": "F3",
       "kind": "quality",
       "lens": "correctness",
       "quote": "return x",
@@ -116,7 +116,7 @@
       },
       "severity": "minor",
       "status": "refuted",
-      "title": "Finding E3",
+      "title": "Finding F3",
       "trigger": "Call with empty input",
       "verdicts": [
         {
@@ -145,7 +145,7 @@
       "evidence": [
         "src/modified.ts:10"
       ],
-      "id": "E4",
+      "id": "F4",
       "kind": "defect",
       "lens": "correctness",
       "quote": "return x",
@@ -155,7 +155,7 @@
       },
       "severity": "minor",
       "status": "duplicate",
-      "title": "Finding E4",
+      "title": "Finding F4",
       "trigger": "Call with empty input",
       "verdicts": [
         {
@@ -167,7 +167,7 @@
           "evidence": [
             "src/a.ts:3"
           ],
-          "of": "E1",
+          "of": "F1",
           "rationale": "Ruled duplicate",
           "verdict": "duplicate"
         }
@@ -185,7 +185,7 @@
       "evidence": [
         "src/modified.ts:10"
       ],
-      "id": "E5",
+      "id": "F5",
       "kind": "defect",
       "lens": "correctness",
       "quote": "return x",
@@ -195,7 +195,7 @@
       },
       "severity": "important",
       "status": "resolved",
-      "title": "Finding E5",
+      "title": "Finding F5",
       "trigger": "Call with empty input",
       "verdicts": [
         {

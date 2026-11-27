@@ -1,10 +1,11 @@
 // The Liaison's `[directorate settings]` system line: configured defaults on every turn, frozen per active seal so
 // mid-review edits to directorate.json never change the prompt prefix.
 import type { SessionContext } from "@opencode/plugin/effect/session";
-import { Effect } from "effect";
+import { Effect, Result } from "effect";
 
 import { Host } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
+import type { SealId } from "../../seal/seal-id.ts";
 import { Sessions } from "../../seal/seal.ts";
 import { agentNamed, Liaison } from "../agents/agent.ts";
 import { describe } from "./file.ts";
@@ -15,8 +16,11 @@ export const settingsLines = Effect.fnUntraced(function* settingsLines() {
   const sessions = yield* Sessions;
   const settings = yield* SettingsStore;
 
-  /** Frozen `[directorate settings]` system line per active seal, so mid-review file edits never bust the KV-cache prefix. */
-  const sealSettingsLine = new Map<string, string | undefined>();
+  /**
+   * Frozen `[directorate settings]` system line per active seal, so mid-review file edits never bust the KV-cache prefix.
+   * The freeze is memory-only: a plugin reload re-reads the file.
+   */
+  const sealSettingsLine = new Map<SealId, string | undefined>();
 
   /** The configured defaults for the session's directory, frozen for its seal if it has one. */
   const read = Effect.fnUntraced(function* read(
@@ -28,10 +32,14 @@ export const settingsLines = Effect.fnUntraced(function* settingsLines() {
       (yield* sessions.directory(event.sessionID)) ??
       host.location.directory;
 
-    const line = yield* settings.load(directory).pipe(
-      Effect.map((s) => describe(s.effective)),
-      Effect.catch((error) => Effect.succeed(`unreadable: ${error.message}`))
-    );
+    const loaded = yield* settings.load(directory).pipe(Effect.result);
+
+    // A read failure may be transient: shown for this request, but not frozen, so the next request reads again.
+    if (Result.isFailure(loaded)) {
+      return `unreadable: ${loaded.failure.message}`;
+    }
+
+    const line = describe(loaded.success.effective);
 
     if (seal) {
       sealSettingsLine.set(seal.id, line);
@@ -42,7 +50,7 @@ export const settingsLines = Effect.fnUntraced(function* settingsLines() {
 
   return {
     /** A reported seal's line is never read again. */
-    forget: (sealId: string) => {
+    forget: (sealId: SealId) => {
       sealSettingsLine.delete(sealId);
     },
     push: Effect.fnUntraced(function* push(

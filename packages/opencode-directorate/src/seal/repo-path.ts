@@ -1,31 +1,33 @@
-import * as NodePath from "@effect/platform-node/NodePath";
-import { Effect, Option, Path, Schema, SchemaTransformation } from "effect";
+import { Effect, Option, Schema, SchemaTransformation } from "effect";
 
 import { invalid } from "../platform/stored.ts";
 
-/** The repository-relative form of `input`, or none if it is absolute or climbs out; the root itself is "". */
-const inRepo = (input: string) =>
-  Path.Path.use((path) => {
-    const trimmed = input.trim();
-    const parts = trimmed.replaceAll(path.sep, "/").split("/");
+/**
+ * The repository-relative form of `input`, or none if it is absolute or climbs out; the root itself is "". POSIX only:
+ * "/" is the one separator, so a backslash is part of a name.
+ */
+const inRepo = (input: string) => {
+  const trimmed = input.trim();
+  const parts: string[] = [];
 
-    // Win32 stream names and trailing-dot aliases need validation beyond lexical containment.
-    if (
-      path.sep !== "/" &&
-      (trimmed.includes(":") ||
-        parts.some(
-          (part) => part !== "." && part !== ".." && /[. ]$/u.test(part)
-        ))
-    ) {
-      return Effect.succeed(Option.none<string>());
+  if (trimmed.startsWith("/")) {
+    return Option.none<string>();
+  }
+
+  for (const part of trimmed.split("/")) {
+    if (part === "..") {
+      if (parts.length === 0) {
+        return Option.none<string>();
+      }
+
+      parts.pop();
+    } else if (part !== "" && part !== ".") {
+      parts.push(part);
     }
+  }
 
-    return Effect.succeed(
-      Option.map(path.resolveWithin("/repo", trimmed), (absolute) =>
-        path.relative("/repo", absolute).split(path.sep).join("/")
-      )
-    );
-  }).pipe(Effect.provide(NodePath.layer));
+  return Option.some(parts.join("/"));
+};
 
 /** A directory scope in the repository, in git's form; "." (the whole repository) decodes to "". */
 export const RepoScope = Schema.String.pipe(
@@ -33,19 +35,15 @@ export const RepoScope = Schema.String.pipe(
     Schema.String,
     SchemaTransformation.transformEffect({
       decode: (input, options) =>
-        inRepo(input).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                invalid(
-                  input,
-                  options,
-                  `Path ${input} must be relative to the repository and stay inside it.`
-                ),
-              onSome: Effect.succeed,
-            })
-          )
-        ),
+        Option.match(inRepo(input), {
+          onNone: () =>
+            invalid(
+              input,
+              options,
+              `Path ${input} must be relative to the repository and stay inside it.`
+            ),
+          onSome: Effect.succeed,
+        }),
       encode: Effect.succeed,
     })
   )
@@ -85,26 +83,22 @@ export const LineRef = Schema.String.pipe(
           return invalid(input, options, "invalid line range");
         }
 
-        return inRepo(path).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () =>
-                invalid(
+        return Option.match(inRepo(path), {
+          onNone: () =>
+            invalid(
+              input,
+              options,
+              `Path ${m[1]} must be relative to the repository and stay inside it.`
+            ),
+          onSome: (relative) =>
+            relative
+              ? Effect.succeed({ end, path: relative, start })
+              : invalid(
                   input,
                   options,
-                  `Path ${m[1]} must be relative to the repository and stay inside it.`
+                  "Expected a file path, not the repository root."
                 ),
-              onSome: (relative) =>
-                relative
-                  ? Effect.succeed({ end, path: relative, start })
-                  : invalid(
-                      input,
-                      options,
-                      "Expected a file path, not the repository root."
-                    ),
-            })
-          )
-        );
+        });
       },
       encode: (r) =>
         Effect.succeed(

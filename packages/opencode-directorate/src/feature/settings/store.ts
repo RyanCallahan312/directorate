@@ -13,6 +13,7 @@ import {
 import type { PlatformError } from "effect/PlatformError";
 
 import { Git } from "../../platform/platform.ts";
+import { mutationLocks } from "../../records/records.ts";
 import {
   isGlobalScope,
   isUnset,
@@ -27,10 +28,24 @@ import type { Settings, SettingsScope as Scope } from "./file.ts";
 export class SettingsUnavailable extends Schema.TaggedError<
   SettingsUnavailable,
   { readonly brand: unique symbol }
->()("SettingsUnavailable", { message: Schema.String }) {}
+>()("SettingsUnavailable", {
+  cause: Schema.optionalKey(Schema.Defect()),
+  message: Schema.String,
+}) {}
 
-/** Another writer holds the settings lock. */
-class SettingsBusy extends Schema.TaggedError<
+/** `what` failed because of `error`, which is kept as the cause; `advice` says what to do about it. */
+export const settingsUnavailable = (
+  what: string,
+  error: Error,
+  advice?: string
+) =>
+  new SettingsUnavailable({
+    cause: error,
+    message: `${what}: ${error.message}${advice ? `. ${advice}` : ""}`,
+  });
+
+/** Another writer held the settings lock for as long as a save waits. */
+export class SettingsBusy extends Schema.TaggedError<
   SettingsBusy,
   { readonly brand: unique symbol }
 >()("SettingsBusy", { lock: Schema.String }) {
@@ -40,7 +55,7 @@ class SettingsBusy extends Schema.TaggedError<
 }
 
 /** The settings file changed since the dialog that edits it opened. */
-class SettingsChanged extends Schema.TaggedError<
+export class SettingsChanged extends Schema.TaggedError<
   SettingsChanged,
   { readonly brand: unique symbol }
 >()("SettingsChanged", { at: Schema.String }) {
@@ -57,6 +72,7 @@ const make = Effect.gen(function* make() {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const git = yield* Git;
+  const { locked, replace } = yield* mutationLocks;
   /**
    * DIRECTORATE_SETTINGS, else directorate.json in OpenCode's global config directory: OPENCODE_CONFIG_DIR, else
    * $XDG_CONFIG_HOME/opencode, else ~/.config/opencode. None without any of them.
@@ -102,9 +118,19 @@ const make = Effect.gen(function* make() {
       );
     }
 
-    const top = yield* git
-      .root(directory)
-      .pipe(Effect.orElseSucceed(() => directory));
+    const top = Option.getOrElse(
+      yield* git
+        .rootOption(directory)
+        .pipe(
+          Effect.mapError((error) =>
+            settingsUnavailable(
+              `Cannot find the repository of ${directory}`,
+              error
+            )
+          )
+        ),
+      () => directory
+    );
 
     const at = path.join(top, ".opencode", "directorate.json");
 
@@ -118,11 +144,7 @@ const make = Effect.gen(function* make() {
         "NotFound",
         () => Effect.undefined,
         (_, error) =>
-          Effect.fail(
-            new SettingsUnavailable({
-              message: `Cannot read ${at}: ${error.message}`,
-            })
-          )
+          Effect.fail(settingsUnavailable(`Cannot read ${at}`, error))
       )
     );
 
@@ -131,11 +153,12 @@ const make = Effect.gen(function* make() {
     }
 
     return yield* decodeSettings(text, STRICT).pipe(
-      Effect.mapError(
-        (error) =>
-          new SettingsUnavailable({
-            message: `${at} is not valid Directorate settings: ${error.message}. Fix it, or delete it and run /directorate-configure.`,
-          })
+      Effect.mapError((error) =>
+        settingsUnavailable(
+          `${at} is not valid Directorate settings`,
+          error,
+          "Fix it, or delete it and run /directorate-configure."
+        )
       )
     );
   });
@@ -144,9 +167,10 @@ const make = Effect.gen(function* make() {
   const load = Effect.fn("Settings.load")(function* load(directory: string) {
     const projectFile = yield* file("project", directory);
 
+    /** A file is absent when there is none to read or write: no global config directory, or no project file. */
     const files = {
-      global: globalFile ?? "(no global config directory)",
-      project: projectFile,
+      ...(globalFile && { global: globalFile }),
+      ...(projectFile && { project: projectFile }),
     };
 
     const global = globalFile ? yield* read(globalFile) : {};
@@ -182,55 +206,53 @@ const make = Effect.gen(function* make() {
       : merge(unchanged, settings);
 
     const fail = (e: PlatformError) =>
-      Effect.fail(
-        new SettingsUnavailable({ message: `Cannot write ${at}: ${e.message}` })
-      );
+      Effect.fail(settingsUnavailable(`Cannot write ${at}`, e));
+
+    const result = { effective, path: at, removed, settings };
+
+    // Removing a file that is not there changes nothing: no directory to create, no lock to take.
+    if (removed && !(yield* fs.exists(at).pipe(Effect.catch(fail)))) {
+      return result;
+    }
 
     yield* fs
       .makeDirectory(path.dirname(at), { recursive: true })
       .pipe(Effect.catch(fail));
     const lock = `${at}.lock`;
-    yield* Effect.acquireUseRelease(
-      fs.makeDirectory(lock).pipe(
-        Effect.catchReason(
-          "PlatformError",
-          "AlreadyExists",
-          () => Effect.fail(new SettingsBusy({ lock })),
-          (_, error) => fail(error)
-        )
-      ),
-      () =>
-        Effect.gen(function* replaceFile() {
-          if (previous && !sameSettings(previous, yield* read(at))) {
-            return yield* new SettingsChanged({ at });
-          }
+    yield* locked(
+      at,
+      lock,
+      Effect.gen(function* replaceFile() {
+        if (previous && !sameSettings(previous, yield* read(at))) {
+          return yield* new SettingsChanged({ at });
+        }
 
-          if (removed) {
-            return yield* fs
-              .remove(at, { force: true })
-              .pipe(Effect.catch(fail));
-          }
+        if (removed) {
+          return yield* fs.remove(at, { force: true }).pipe(Effect.catch(fail));
+        }
 
-          const text = yield* Schema.encodeEffect(SettingsJson)(settings).pipe(
-            Effect.orDie
-          );
+        const text = yield* Schema.encodeEffect(SettingsJson)(settings).pipe(
+          Effect.orDie
+        );
 
-          yield* Effect.scoped(
-            Effect.gen(function* atomicWrite() {
-              const tmp = yield* fs.makeTempFileScoped({
-                directory: path.dirname(at),
-                prefix: ".directorate-settings-",
-              });
-
-              yield* fs.writeFileString(tmp, `${text}\n`);
-              yield* fs.rename(tmp, at);
+        yield* replace(at, `${text}\n`, {
+          prefix: ".directorate-settings-",
+        }).pipe(Effect.catch(fail));
+      })
+    ).pipe(
+      Effect.catchTags({
+        LockBusy: () => Effect.fail(new SettingsBusy({ lock })),
+        LockFailed: (error) =>
+          Effect.fail(
+            new SettingsUnavailable({
+              cause: error,
+              message: `Cannot lock ${at}: ${error.reason}`,
             })
-          ).pipe(Effect.catch(fail));
-        }),
-      () => fs.remove(lock, { recursive: true }).pipe(Effect.orDie)
+          ),
+      })
     );
 
-    return { effective, path: at, removed, settings };
+    return result;
   });
 
   return { file, load, write };

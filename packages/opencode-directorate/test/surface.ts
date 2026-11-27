@@ -23,6 +23,8 @@ import {
 } from "effect";
 import type { Types } from "effect";
 
+import { runPromise } from "./logs.ts";
+
 const { default: plugin } = await import("../src/index.ts");
 
 type HostContext = Parameters<typeof plugin.effect>[0];
@@ -241,7 +243,7 @@ export const captureSurface = async () => {
   const host = Object.assign(Object.create(null) as HostContext, ctx);
 
   try {
-    await Effect.runPromise(
+    await runPromise(
       plugin.effect(host).pipe(
         Effect.provideService(Scope.Scope, scope),
         Effect.provide(
@@ -258,7 +260,7 @@ export const captureSurface = async () => {
     // Event consumers subscribe from fibers the load forks into its scope: let them start before the scope closes.
     await tick();
   } finally {
-    await Effect.runPromise(Scope.close(scope, Exit.void));
+    await runPromise(Scope.close(scope, Exit.void));
     rmSync(state, { force: true, recursive: true });
   }
 

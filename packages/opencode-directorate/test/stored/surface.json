@@ -401,7 +401,7 @@
   ],
   "tools": [
     {
-      "description": "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
+      "description": "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate. A reported seal records nothing: to page a long region of one, pass that region alone with from, the body line its continuation names.",
       "input": {
         "dialect": "draft-2020-12",
         "schema": {
@@ -409,6 +409,11 @@
           "properties": {
             "file": {
               "type": "string"
+            },
+            "from": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
             },
             "regions": {
               "type": "array",

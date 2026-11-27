@@ -462,6 +462,7 @@ directorate-20261124071813-5eecd7/
 ├── diff.patch         the sealed diff (diff.g1.patch after a refresh)
 ├── snapshot/          changed working-tree files as sealed (snapshot.g1/ after a refresh)
 ├── report.md          written once, when the seal is reported
+├── commit.json        present only between the steps of saving the ledger and seal together
 └── mutation.lock      present only while a writer holds the seal
 ```
 
@@ -471,7 +472,7 @@ Run `/directorate-export <seal id>` using the ID on the Directive's Containment 
 
 You can also ask in plain language, for example `/directorate-export everything in this project in the last month`. The agent lists retained reviews in the current project and its registered Git worktrees, picks the matching seals, and creates one ZIP per seal. Date ranges use when the Directive was filed (or when an open review started or last resumed); `in the last month` means the rolling last 30 days. Reviews already pruned cannot be recovered.
 
-The command writes a ZIP to `exports/` under the Directorate state directory on the OpenCode server. It includes the seal, ledger, saved Directive, all captured patch and snapshot generations, and the available transcripts and durable event logs of the Liaison and its review agents. `manifest.json` lists the included files and any missing data. Do this before the seal is pruned; the exported ZIP is kept separately and isn't pruned with the seal.
+The command writes a ZIP to `exports/` under the Directorate state directory on the OpenCode server. It includes the seal, ledger, saved Directive, every committed patch and snapshot generation, and the available transcripts and durable event logs of the Liaison and its review agents. `manifest.json` lists the included files and any missing data. Do this before the seal is pruned; the exported ZIP is kept separately and isn't pruned with the seal.
 
 The OpenCode server uses the `opencode` CLI on its `PATH` to read session traces. If the CLI can't access the sessions, the export still saves the review artifacts and lists unavailable traces. **Exports are always unredacted.** They can contain private source, prompts, and tool output. Inspect the ZIP before sharing it. The export is saved locally.
 

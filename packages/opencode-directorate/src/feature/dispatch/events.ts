@@ -4,7 +4,8 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { SessionMessage } from "@opencode/schema/session-message";
 import { DateTime, Effect, Match, Option, Schedule, Stream } from "effect";
 
-import { ignore, recover } from "../../platform/error.ts";
+import { ignore, orWarn, recover } from "../../platform/error.ts";
+import type { SessionId } from "../../platform/host-id.ts";
 import {
   activity,
   createdAt,
@@ -23,6 +24,7 @@ import type { Seal } from "../../seal/record.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
 import { halted } from "../../workflow/review/custody.ts";
 import { dispatchableNamed } from "../agents/agent.ts";
+import type { Launches } from "./launch.ts";
 import {
   claimed,
   Completed,
@@ -33,6 +35,7 @@ import {
   followUpRecovered,
   inboxSettled,
   isOutstanding,
+  mayBeFollowUp,
   outstandingDispatches,
   perSession,
   update,
@@ -42,7 +45,7 @@ import type { EndMarker } from "./lifecycle.ts";
 /** A promoted follow-up belongs to the first terminal marker after that exact input. */
 const recoverFollowUps = (
   seal: Seal,
-  session: string,
+  session: SessionId,
   messages: readonly SessionMessage.Info[]
 ) =>
   update(seal, (child) => {
@@ -164,7 +167,8 @@ export type SessionEvent = Stream.Success<ReturnType<typeof subscribe>>;
  */
 export const consumeSessionEvents = Effect.fnUntraced(
   function* consumeSessionEvents(
-    before: (event: SessionEvent) => Effect.Effect<void>
+    before: (event: SessionEvent) => Effect.Effect<void>,
+    launches: Launches
   ) {
     const host = yield* Host;
     const sessions = yield* Sessions;
@@ -173,8 +177,8 @@ export const consumeSessionEvents = Effect.fnUntraced(
     // Running: a child's session is created by the subagent tool before it runs; link it to its launch now, so every later
     // event for it finds the review.
     const claimChild = Effect.fn("Directorate.claimChild")(function* claimChild(
-      sessionID: string,
-      parentID: string,
+      sessionID: SessionId,
+      parentID: SessionId,
       agent: string,
       title: string | undefined
     ) {
@@ -186,14 +190,12 @@ export const consumeSessionEvents = Effect.fnUntraced(
 
       // Reported between launch and link, even if the Liaison has sealed another review since: stop the child, which no
       // review owns now.
-      for (const id of yield* sessions.launchesBy(parentID)) {
+      for (const id of yield* launches.launchesBy(parentID)) {
         if (id === seal?.id) {
           continue;
         }
 
-        const reported = yield* store
-          .load(id)
-          .pipe(Effect.orElseSucceed(() => null));
+        const reported = yield* store.find(id);
 
         if (
           reported?.reportedAt &&
@@ -209,18 +211,20 @@ export const consumeSessionEvents = Effect.fnUntraced(
         return;
       }
 
-      let linked = false;
-      yield* sessions
+      // Linked once the seal saved the claim, or if it already held the child.
+      const linked = yield* sessions
         .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           const next = claimed(s, sessionID, agent, title);
-          linked =
-            next !== undefined ||
-            s.children.some((c) => c.session === sessionID);
 
-          return Effect.succeed({ out: undefined, seal: next });
+          return Effect.succeed({
+            out:
+              next !== undefined ||
+              s.children.some((c) => c.session === sessionID),
+            seal: next,
+          });
         })
         .pipe(
-          ignore(`could not link ${agent} ${sessionID} to ${seal.id}`, "Warn")
+          orWarn(`could not link ${agent} ${sessionID} to ${seal.id}`, false)
         );
 
       if (linked) {
@@ -229,7 +233,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
     });
 
     const childEvent = Effect.fn("Directorate.childEvent")(function* childEvent(
-      sessionID: string,
+      sessionID: SessionId,
       change: (s: Seal) => Seal | undefined
     ) {
       const id =
@@ -311,10 +315,7 @@ export const consumeSessionEvents = Effect.fnUntraced(
           );
         },
         "session.inbox.enqueued": ({ data: { inboxID, item, sessionID } }) => {
-          if (
-            !isUserInput(item) ||
-            !item.payload.text.includes("\n\n[Directorate follow-up: ")
-          ) {
+          if (!isUserInput(item) || !mayBeFollowUp(item.payload.text)) {
             return Effect.void;
           }
 

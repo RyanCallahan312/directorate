@@ -10,6 +10,7 @@ import {
   strArr,
 } from "../platform/platform.ts";
 import type { DefineTool, Git } from "../platform/platform.ts";
+import { sealIdOf } from "../records/records.ts";
 import type { Records } from "../records/records.ts";
 import { NotInSeal } from "./content.ts";
 import {
@@ -18,13 +19,14 @@ import {
   markShown,
   nextRegions,
 } from "./coverage.ts";
-import { DispositionSchema, SideSchema } from "./region.ts";
+import { DispositionSchema, readerOf, SideSchema } from "./region.ts";
 import { RepoPath, RepoScope } from "./repo-path.ts";
 import { done, Sessions, ToolCall } from "./sessions.ts";
 import {
   grepSealed,
   history,
   HistoryKindSchema,
+  InvalidRead,
   listFiles,
   readLines,
   renderRegions,
@@ -35,29 +37,38 @@ export const readTools = (
 ) => {
   tool({
     description:
-      "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate.",
-    *execute(input, c) {
+      "Read sealed diff regions with old and new line numbers (or whole-file regions for paths targets). With only the seal, returns your next unread chunk; or pass region ids or a file. Long regions continue on the next call; the sealing session's complete reads count toward the coverage gate. A reported seal records nothing: to page a long region of one, pass that region alone with from, the body line its continuation names.",
+    *execute(input, c, name) {
       const a = actor(c);
 
       // A step that began before lockdown must not record reads after it; a reported seal stays readable.
       return yield* (yield* Sessions).mutate(
-        input.seal,
+        yield* sealIdOf(input.seal, "door"),
         ToolCall.make({
           actor: a,
           reported: "shown",
-          tool: "directorate_diff",
+          tool: name,
         }),
         ({ seal }) =>
           Effect.gen(function* execute() {
-            const owner = a.session === seal.ownerSession;
-            const reader = owner ? "owner" : a.session;
+            const reader = readerOf(a.session, seal.ownerSession);
 
-            const { picked, omitted } = nextRegions(seal, {
+            const { picked, omitted } = nextRegions(seal, reader, {
               file: input.file,
               ids: input.regions,
-              owner,
-              reader,
             });
+
+            // A reported seal saves no offsets, so its reader names where a long region continues.
+            if (
+              input.from !== undefined &&
+              !(seal.reportedAt && input.regions?.length === 1)
+            ) {
+              return yield* new InvalidRead({
+                message: seal.reportedAt
+                  ? "from continues one region: pass exactly one region id with it."
+                  : `${seal.id} is open, so directorate_diff continues long regions by itself: call it again without from.`,
+              });
+            }
 
             if (!picked.length) {
               return {
@@ -71,11 +82,16 @@ export const readTools = (
               };
             }
 
-            const { text, shown } = yield* renderRegions(seal, picked, reader);
+            const { text, shown } = yield* renderRegions(
+              seal,
+              picked,
+              reader,
+              input.from === undefined ? undefined : input.from - 1
+            );
 
             const read = seal.reportedAt
               ? seal
-              : markShown(seal, shown, { key: reader, owner });
+              : markShown(seal, shown, reader);
 
             const cov = coverageSummary(read);
 
@@ -87,7 +103,7 @@ export const readTools = (
             const head = `[seal ${seal.id} · base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree"} · columns: old line, new line]`;
 
             const tail = [
-              owner
+              reader.owner
                 ? `[coverage ${cov.read}/${cov.total}${
                     cov.unread.length
                       ? ` · next unread: ${cov.unread
@@ -121,6 +137,7 @@ export const readTools = (
     },
     input: Schema.Struct({
       file: optional(RepoPath),
+      from: optional(positiveInt),
       regions: optional(strArr),
       seal: str,
     }),
@@ -131,7 +148,10 @@ export const readTools = (
     description:
       "Read a file as sealed (new side = reviewed post-image, old side = base), with line numbers. Unchanged files come from the base; installed dependencies (gitignored node_modules, vendor, venv) from disk. Secret-like paths and .git are withheld.",
     *execute(input, c) {
-      const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
+      const seal = yield* (yield* Sessions).sealFor(
+        c.sessionID,
+        yield* sealIdOf(input.seal, "lookup")
+      );
 
       return yield* done(
         seal,
@@ -160,7 +180,10 @@ export const readTools = (
     description:
       "List file names at the seal (the head tree for commit, range, and PR seals; the base tree plus the changes captured at sealing for local and paths seals), optionally under one directory. Withheld files are marked. A dependency directory (node_modules, vendor, venv, …) with nothing sealed is listed one level from disk, with each link's resolved target: use it to find installed files for directorate_read instead of guessing paths.",
     *execute(input, c) {
-      const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
+      const seal = yield* (yield* Sessions).sealFor(
+        c.sessionID,
+        yield* sealIdOf(input.seal, "lookup")
+      );
 
       return yield* done(seal, yield* listFiles(seal, input.dir), actor(c));
     },
@@ -172,7 +195,10 @@ export const readTools = (
     description:
       "Search code with git grep (extended regex unless fixed; literal paths; no pager or shell). Commit, range, and PR seals search the sealed head; local and paths seals search the live tree, so confirm deciding lines with directorate_read.",
     *execute(input, c) {
-      const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
+      const seal = yield* (yield* Sessions).sealFor(
+        c.sessionID,
+        yield* sealIdOf(input.seal, "lookup")
+      );
 
       return yield* done(
         seal,
@@ -198,7 +224,10 @@ export const readTools = (
     description:
       "Git history with fixed arguments: log (commits, optionally for a path), blame (a file's lines), or show (a commit's message and file list; with a file path, that file's patch). Paths are literal; secret-like paths are withheld.",
     *execute(input, c) {
-      const seal = yield* (yield* Sessions).sealFor(c.sessionID, input.seal);
+      const seal = yield* (yield* Sessions).sealFor(
+        c.sessionID,
+        yield* sealIdOf(input.seal, "lookup")
+      );
 
       return yield* done(seal, yield* history(seal, input), actor(c));
     },
@@ -218,13 +247,13 @@ export const readTools = (
   tool({
     description:
       "Record a disposition with a reason for regions you did not read through directorate_diff: reviewed (an Auditor or Seat read it and you assessed it), skimmed, or skipped. Skimmed and skipped regions make the report partial and are listed under Outside Containment (Not Reviewed).",
-    *execute(input, c) {
+    *execute(input, c, name) {
       return yield* (yield* Sessions).mutate(
-        input.seal,
+        yield* sealIdOf(input.seal, "door"),
         ToolCall.make({
           actor: actor(c),
           callers: "owner",
-          tool: "directorate_coverage",
+          tool: name,
         }),
         ({ seal }) =>
           Effect.gen(function* execute() {

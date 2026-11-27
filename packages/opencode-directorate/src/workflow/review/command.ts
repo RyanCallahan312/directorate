@@ -4,21 +4,17 @@ import type { CommandDefinition } from "@opencode/plugin/effect/command";
 import { Effect } from "effect";
 
 import { Liaison } from "../../feature/agents/agent.ts";
-import { InvalidRequest, reviewRequest } from "./request.ts";
+import { InvalidRequest, recheckFlag, reviewRequest } from "./request.ts";
 
 export const reviewCommand = (host: Plugin.Context) =>
   ({
     description:
       "Start a Directorate review [request, --scope branch|local|repository, or --recheck <seal>]",
     execute: ({ delivery, prompt, sessionID }) => {
-      const again =
-        /^\s*--recheck(?=\s|=|$)(?:(?:=|\s+)(?<seal>directorate-\S+))?/u.exec(
-          prompt.text
-        );
+      const again = recheckFlag(prompt.text);
 
       if (again) {
-        const seal = again.groups?.seal;
-        const rest = prompt.text.slice(again[0].length).trim();
+        const { rest, seal } = again;
 
         if (rest.startsWith("=")) {
           return Effect.fail(

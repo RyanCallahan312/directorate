@@ -1,6 +1,12 @@
 // Directorate diff parsing: git's raw-and-patch output decoded into per-file pieces, assembled into the stored diff, and cut
 // into review regions.
-import { Effect, Schema, SchemaGetter, SchemaTransformation } from "effect";
+import {
+  Array as Arr,
+  Effect,
+  Schema,
+  SchemaGetter,
+  SchemaTransformation,
+} from "effect";
 
 import { exclusionReason } from "../exclusions.ts";
 import {
@@ -87,19 +93,20 @@ export const RawDiff = Schema.String.pipe(
             );
           }
 
-          let k = 0;
+          // Each record takes the next sectionsOf(code) sections.
+          const [, pieces] = Arr.mapAccum(records, 0, (k, r) => {
+            const next = k + sectionsOf(r.code);
 
-          return Effect.succeed(
-            records.map((r) => {
-              const from = sections[k];
-              k += sectionsOf(r.code);
-
-              return {
+            return [
+              next,
+              {
                 ...r,
-                lines: patch.slice(from, sections[k] ?? patch.length),
-              };
-            })
-          );
+                lines: patch.slice(sections[k], sections[next] ?? patch.length),
+              },
+            ];
+          });
+
+          return Effect.succeed(pieces);
         }
       ),
       encode: SchemaGetter.forbidden<string, readonly Piece[]>(
@@ -117,11 +124,54 @@ export const shown = (p: string) =>
     ? JSON.stringify(p)
     : p;
 
+/** A hunk header's line numbers: where its old and new sides start, or undefined when the line is not a hunk header. */
+export const hunkHeader = (line: string) => {
+  const groups = /^@@ -(?<old>\d+)(?:,\d+)? \+(?<new>\d+)(?:,\d+)? @@/u.exec(
+    line
+  )?.groups;
+
+  return groups
+    ? { newStart: Number(groups.new), oldStart: Number(groups.old) }
+    : undefined;
+};
+
+/** What a line inside a hunk is: an added, removed, or context line, or anything else (such as `\ No newline at end of file`). */
+const PatchLineSchema = Schema.Literals([
+  "added",
+  "removed",
+  "context",
+  "other",
+]);
+
+/** A hunk line's kind, by its first character. */
+export const patchLine = (line: string) => {
+  if (line.startsWith("+")) {
+    return PatchLineSchema.make("added");
+  }
+
+  if (line.startsWith("-")) {
+    return PatchLineSchema.make("removed");
+  }
+
+  return PatchLineSchema.make(line.startsWith(" ") ? "context" : "other");
+};
+
+/** A hunk line the new side has: added or context. */
+export const onNewSide = Schema.is(PatchLineSchema.pick(["added", "context"]));
+
+const isAdded = Schema.is(PatchLineSchema.pick(["added"]));
+
+const isRemoved = Schema.is(PatchLineSchema.pick(["removed"]));
+
+/** A hunk line the old side has: removed or context. */
+export const onOldSide = Schema.is(
+  PatchLineSchema.pick(["removed", "context"])
+);
+
 /** A hunk of the assembled diff: where its new-side lines start, and where it sits in the diff text. */
 class Hunk extends Schema.Class<Hunk, { readonly brand: unique symbol }>(
   "directorate/Hunk"
 )({
-  newLines: Count,
   newStart: Count,
   patchEnd: Count,
   patchStart: Count,
@@ -160,7 +210,6 @@ const isBinary = Schema.is(FileStatusSchema.pick(["binary"]));
 
 /** A hunk whose end is not known yet: where it starts, and the mark after its header, where the next one begins. */
 const OpenHunkSchema = Schema.Struct({
-  newLines: Count,
   newStart: Count,
   next: Count,
   patchStart: Count,
@@ -184,6 +233,7 @@ const patchStats = (lines: readonly string[]) => {
   let added = 0;
   let removed = 0;
   let binary = false;
+  let hunks = 0;
   let inHunk = false;
 
   for (const line of lines) {
@@ -191,9 +241,11 @@ const patchStats = (lines: readonly string[]) => {
       inHunk = false;
     } else if (line.startsWith("@@")) {
       inHunk = true;
+      hunks += 1;
     } else if (inHunk) {
-      added += Number(line.startsWith("+"));
-      removed += Number(line.startsWith("-"));
+      const kind = patchLine(line);
+      added += Number(isAdded(kind));
+      removed += Number(isRemoved(kind));
     } else if (
       line.startsWith("Binary files ") ||
       line === "GIT binary patch"
@@ -202,7 +254,7 @@ const patchStats = (lines: readonly string[]) => {
     }
   }
 
-  return { added, binary, removed };
+  return { added, binary, hunks, removed };
 };
 
 /** The stored diff text and its files, with line offsets: withheld and binary files as stubs, the rest verbatim. */
@@ -210,7 +262,13 @@ export const assemble = (pieces: readonly Piece[]) => {
   const out: string[] = [];
 
   const files = pieces.map((piece) => {
-    const { added, binary, removed } = patchStats(piece.lines);
+    // Counted on git's patch, not on what is kept: an excluded file keeps only a stub, but a content change is not a mode change.
+    const {
+      added,
+      binary,
+      hunks: changedHunks,
+      removed,
+    } = patchStats(piece.lines);
 
     const excluded =
       exclusionReason(piece.path) ??
@@ -245,14 +303,9 @@ export const assemble = (pieces: readonly Piece[]) => {
         sectionStart = n;
       }
 
-      const m = line.startsWith("@@")
-        ? /^@@ -\d+(?:,\d+)? \+(?<start>\d+)(?:,(?<count>\d+))? @@/u.exec(line)
-        : undefined;
-
       if (line.startsWith("@@")) {
         opened.push({
-          newLines: m && m[2] !== undefined ? Number(m[2]) : 1,
-          newStart: m ? Number(m[1]) : 0,
+          newStart: hunkHeader(line)?.newStart ?? 0,
           next: marks.length,
           patchStart: n,
           sectionStart,
@@ -277,7 +330,7 @@ export const assemble = (pieces: readonly Piece[]) => {
       patchStart,
       path: piece.path,
       removed,
-      status: isModified(status) && !hunks.length ? "mode" : status,
+      status: isModified(status) && !changedHunks ? "mode" : status,
     });
   });
 
@@ -327,7 +380,7 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
       }
 
       for (const h of f.hunks) {
-        const hunkHeader = lines[h.patchStart - 1] ?? "";
+        const hunkLine = lines[h.patchStart - 1] ?? "";
 
         // The section's prologue only, up to its first hunk: editing an earlier hunk leaves later hunks' keys alone.
         const first = f.hunks.find((x) => x.sectionStart === h.sectionStart);
@@ -337,7 +390,7 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
           first?.patchStart ?? h.patchStart
         );
 
-        let oldLine = Number(/^@@ -(?<old>\d+)/u.exec(hunkHeader)?.[1] ?? 0);
+        let oldLine = hunkHeader(hunkLine)?.oldStart ?? 0;
         let next = h.newStart;
 
         for (
@@ -349,20 +402,16 @@ export const buildRegions = Effect.fn("Directorate.buildRegions")(
           const body = lines.slice(Math.max(s, h.patchStart + 1) - 1, e);
 
           // New-side lines in this chunk (the @@ line is not one); a removal-only chunk anchors at the hunk start.
-          const count = body.filter(
-            (l) => l.startsWith("+") || l.startsWith(" ")
-          ).length;
-
-          const oldCount = body.filter(
-            (l) => l.startsWith("-") || l.startsWith(" ")
-          ).length;
+          const kinds = body.map(patchLine);
+          const count = kinds.filter(onNewSide).length;
+          const oldCount = kinds.filter(onOldSide).length;
 
           regions.push(
             Region.make({
               file: f.path,
               hunkStart: h.patchStart,
               id: `R${(k += 1)}`,
-              key: yield* key(header, s, e, hunkHeader),
+              key: yield* key(header, s, e, hunkLine),
               newEnd: count ? next + count - 1 : h.newStart,
               newLine: next,
               newStart: count ? next : h.newStart,

@@ -13,6 +13,12 @@ export const locationKey = (ref: Location.Ref) =>
 const timeOf = (time: DateTime.Utc | undefined) =>
   time && DateTime.toEpochMillis(time);
 
+/** What `activity` finds a session doing: settled, executing in this process, or left mid-turn by a restart. */
+const ActivityStateSchema = Schema.Literals(["idle", "running", "orphaned"]);
+
+// Each state on its own, so `activity`'s results keep `state` as their discriminant.
+const [IdleState, RunningState, OrphanedState] = ActivityStateSchema.members;
+
 /**
  * Whether the session is executing, settled, or was left mid-turn. The host's times are milliseconds, and a shutdown or
  * kill records no end: unless they show a turn that ended after it began, ask whether this process is executing it. A
@@ -26,7 +32,7 @@ export const activity = Effect.fnUntraced(function* activity(
   const busy = timeOf(session.time.busy);
 
   if (idle !== undefined && (busy === undefined || busy < idle)) {
-    return { at: idle, session, state: "idle" } as const;
+    return { at: idle, session, state: IdleState.make("idle") };
   }
 
   // Returns at once unless an execution is running here.
@@ -38,7 +44,7 @@ export const activity = Effect.fnUntraced(function* activity(
     );
 
   if (Option.isNone(quiet)) {
-    return { session, state: "running" } as const;
+    return { session, state: RunningState.make("running") };
   }
 
   // The execution may have settled during the wait. Use its new outcome, not the pre-wait snapshot.
@@ -52,19 +58,23 @@ export const activity = Effect.fnUntraced(function* activity(
       started < ended ||
       (started === ended && started === busy))
   ) {
-    return { at: ended, session: fresh, state: "idle" } as const;
+    return {
+      at: ended,
+      session: fresh,
+      state: IdleState.make("idle"),
+    };
   }
 
   return {
     session: fresh,
-    state: started === busy ? "orphaned" : "running",
-  } as const;
+    state:
+      started === busy
+        ? OrphanedState.make("orphaned")
+        : RunningState.make("running"),
+  };
 });
 
 export type Activity = Effect.Success<ReturnType<typeof activity>>;
-
-/** What `activity` finds a session doing: settled, executing in this process, or left mid-turn by a restart. */
-const ActivityStateSchema = Schema.Literals(["idle", "running", "orphaned"]);
 
 export const isIdle = Schema.is(ActivityStateSchema.pick(["idle"]));
 
@@ -107,14 +117,10 @@ export const isSynthetic = Schema.is(
  * Whether another live server process last drove this record. Servers can share one database, and each sees only its
  * own executions, so recovery leaves such a record to its process.
  */
-export const foreign = Effect.fnUntraced(function* foreign(
-  pid: number | undefined
-) {
+export const foreign = Effect.fnUntraced(function* foreign(pid: number) {
   const identity = yield* ProcessIdentity;
 
-  return (
-    pid !== undefined && pid !== identity.pid && (yield* identity.isAlive(pid))
-  );
+  return pid !== identity.pid && (yield* identity.isAlive(pid));
 });
 
 /** The message, if it marks a turn's end. */

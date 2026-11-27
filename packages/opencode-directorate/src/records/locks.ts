@@ -1,4 +1,5 @@
 // The cross-process mutation lock: a directory that appears with its holder record, reclaimed when its holder is gone.
+// Files a lock guards are replaced whole, through a renamed temporary sibling.
 import {
   Clock,
   Effect,
@@ -11,6 +12,7 @@ import {
   Schema,
 } from "effect";
 
+import { ignore } from "../platform/error.ts";
 import { ProcessIdentity } from "../platform/platform.ts";
 
 /** Another writer holds the lock at `path`. */
@@ -45,7 +47,16 @@ const LockHolder = Schema.fromJsonString(
 const decodeHolder = Schema.decodeUnknownOption(LockHolder);
 const encodeHolder = Schema.encodeSync(LockHolder);
 
-/** Locking with the store's filesystem and this process's identity. */
+/** Whether a busy lock is waited for (the default) or fails at once. */
+const LockWaitSchema = Schema.Struct({ wait: Schema.Boolean });
+
+/** How a locked file is replaced: its temporary sibling's name prefix, and the mode the text is written with. */
+const ReplaceSchema = Schema.Struct({
+  mode: Schema.optionalKey(Schema.Finite),
+  prefix: Schema.String,
+});
+
+/** Locking with the store's filesystem and this process's identity, and replacing the files a lock guards. */
 export const mutationLocks = Effect.gen(function* mutationLocks() {
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
@@ -54,10 +65,26 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
   const removeDir = (dir: string) =>
     fs.remove(dir, { force: true, recursive: true });
 
+  /** Replaces `path` whole: the text goes to a temporary sibling first, renamed over `path` once written. */
+  const replace = Effect.fnUntraced(function* replace(
+    path: string,
+    text: string,
+    options: typeof ReplaceSchema.Type
+  ) {
+    const tmp = yield* fs.makeTempFileScoped({
+      directory: paths.dirname(path),
+      prefix: options.prefix,
+    });
+
+    yield* fs.writeFileString(tmp, text, { mode: options.mode });
+    yield* fs.rename(tmp, path);
+  }, Effect.scoped);
+
   const locked = Effect.fnUntraced(function* locked<A, E, R>(
     id: string,
     path: string,
-    body: Effect.Effect<A, E, R>
+    body: Effect.Effect<A, E, R>,
+    options?: typeof LockWaitSchema.Type
   ) {
     const readHolder = () =>
       fs
@@ -109,12 +136,14 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
 
       // The orphan was reclaimed and a new lock taken between the check and the gate: leave the new lock alone.
       if ((yield* readHolder()) !== text) {
-        return yield* removeDir(gate).pipe(Effect.ignore);
+        return yield* removeDir(gate).pipe(
+          ignore(`removing the reclaim gate of ${path}`)
+        );
       }
 
       yield* drop("stale").pipe(
         Effect.catch(() => removeDir(gate)),
-        Effect.ignore
+        ignore(`reclaiming the orphaned lock ${path}`)
       );
     });
 
@@ -138,7 +167,9 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
             )
           );
 
-        const discard = removeDir(tmp).pipe(Effect.ignore);
+        const discard = removeDir(tmp).pipe(
+          ignore(`removing the unplaced lock ${tmp}`)
+        );
 
         yield* fs
           .writeFileString(paths.join(tmp, "holder"), holder)
@@ -183,7 +214,7 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
         acquire.pipe(
           Effect.retry({
             schedule: Schedule.spaced("50 millis"),
-            times: 800,
+            times: (options?.wait ?? true) ? 800 : 0,
             while: isLockBusy,
           })
         ),
@@ -192,5 +223,5 @@ export const mutationLocks = Effect.gen(function* mutationLocks() {
     );
   });
 
-  return { locked };
+  return { locked, replace };
 });

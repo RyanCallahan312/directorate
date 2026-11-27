@@ -1,11 +1,10 @@
 // Waiting: the Liaison stays in its turn while its subagents work. Ending the turn instead would hand a calling agent
 // an unfinished review, and leave that agent to finish it. Their handoffs arrive as messages at the next step.
 import { DateTime, Effect, Schedule, Schema } from "effect";
-import type { FileSystem, Path } from "effect";
 
 import { actor, str } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
-import { Records } from "../../records/records.ts";
+import { Records, sealIdOf } from "../../records/records.ts";
 import type { Seal } from "../../seal/record.ts";
 import { done, Sessions, ToolCall } from "../../seal/seal.ts";
 import { budget, isLocked } from "../../workflow/review/window.ts";
@@ -17,22 +16,20 @@ import {
 } from "./lifecycle.ts";
 import type { Dispatch } from "./lifecycle.ts";
 
-export const waitTool = (
-  tool: DefineTool<Sessions | Records | FileSystem.FileSystem | Path.Path>
-) => {
+export const waitTool = (tool: DefineTool<Sessions | Records>) => {
   tool({
     description:
       "Wait, without ending your turn, until one of this review's Auditor, Seat, or Compliance runs finishes or the budget phase changes. Returns who finished, the entries and verdicts each recorded, and who is still running; their handoffs follow as subagent messages. Call it whenever you would otherwise end your turn while they run.",
-    *execute(input, c) {
+    *execute(input, c, name) {
       const store = yield* Records;
 
       const start = yield* (yield* Sessions).read(
-        input.seal,
+        yield* sealIdOf(input.seal, "door"),
         ToolCall.make({
           actor: actor(c),
           callers: "owner",
           lockdown: "exempt",
-          tool: "directorate_wait",
+          tool: name,
         }),
         Effect.succeed
       );
@@ -63,8 +60,19 @@ export const waitTool = (
       };
 
       // The session events and the deadline watchdog write the seal; poll it until something the Liaison acts on changed.
+      // It is read again only when its modifiedAt changed (stat before read, so a write in between is read next tick);
+      // the phase is checked every tick.
+      let current = start;
+      let seenAt: number | undefined | null = null;
+
       const { seal, phaseNow } = yield* Effect.gen(function* poll() {
-        const current = yield* store.load(start.id);
+        const at = yield* store.modifiedAt(start.id);
+
+        if (at !== seenAt) {
+          current = yield* store.load(start.id);
+          seenAt = at;
+        }
+
         const next = yield* budget(current.window);
 
         return { phaseNow: next.phase, seal: current };

@@ -12,9 +12,12 @@ import {
 import { encodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import {
+  fromSecrets,
   inDependencyDir,
+  insideRoot,
   installed,
   isWithheld,
+  linesOf,
   NotInSeal,
   outsideWorktreeScope,
   readable,
@@ -22,9 +25,10 @@ import {
   Withheld,
 } from "./content.ts";
 import { Shown } from "./coverage.ts";
+import { onNewSide, onOldSide, patchLine } from "./diff.ts";
 import type { Seal } from "./record.ts";
 import { isBaseSide } from "./region.ts";
-import type { Region, Side } from "./region.ts";
+import type { Reader, Region, Side } from "./region.ts";
 
 /**
  * OpenCode cuts any tool result over 2,000 lines or 50 KiB and shows the model only a preview, so The Directorate pages its own
@@ -105,77 +109,37 @@ const regionTitle = (r: Region, isHunk: boolean): string => {
   return `### ${r.id} ${r.file}${suffix}`;
 };
 
-/** Numbers the region's hunk lines; regions without stored counters (older seals) count from the hunk's `@@` line. */
+/** Numbers the region's hunk lines from its stored old- and new-side counters. */
 const appendHunkLines = (
   body: string[],
   lines: readonly string[],
-  hunkHeader: string,
-  hunkAt: number,
   r: Region
 ) => {
-  const m = /^@@ -(?<old>\d+)(?:,\d+)? \+(?<new>\d+)/u.exec(hunkHeader);
-  let o = Number(m?.[1] ?? 0);
-  let n = Number(m?.[2] ?? 0);
-  let from = hunkAt;
+  let o = r.oldLine ?? 0;
+  let n = r.newLine ?? 0;
 
-  if (r.oldLine !== undefined && r.newLine !== undefined) {
-    o = r.oldLine;
-    n = r.newLine;
-    from = r.patchStart;
-  }
-
-  for (let p = from; p <= r.patchEnd; p += 1) {
+  for (let p = r.patchStart; p <= r.patchEnd; p += 1) {
     const l = lines[p - 1] ?? "";
-    const show = p >= r.patchStart;
 
     if (l.startsWith("@@")) {
-      if (show) {
-        body.push(l);
-      }
+      body.push(l);
 
       continue;
     }
 
-    if (l.startsWith("+")) {
-      if (show) {
-        body.push(...splitLong(`${pad("")} ${pad(n)} `, l));
-      }
+    const kind = patchLine(l);
+    const old = onOldSide(kind);
+    const now = onNewSide(kind);
 
-      n += 1;
-    } else if (l.startsWith(" ")) {
-      if (show) {
-        body.push(...splitLong(`${pad(o)} ${pad(n)} `, l));
-      }
+    body.push(
+      ...(old || now
+        ? splitLong(`${pad(old ? o : "")} ${pad(now ? n : "")} `, l)
+        : [`${pad("")} ${pad("")} ${l}`])
+    );
 
-      o += 1;
-      n += 1;
-    } else if (l.startsWith("-")) {
-      if (show) {
-        body.push(...splitLong(`${pad(o)} ${pad("")} `, l));
-      }
-
-      o += 1;
-    } else if (show) {
-      body.push(`${pad("")} ${pad("")} ${l}`);
-    }
+    o += Number(old);
+    n += Number(now);
   }
-};
-
-/** The lines of a chunk's section and hunk headers; older seals do not store them, so they are found by scanning back. */
-const chunkStart = (r: Region, lines: readonly string[]) => {
-  let hdr = r.sectionStart ?? r.patchStart;
-
-  while (hdr > 1 && !lines[hdr - 1]?.startsWith("diff --git ")) {
-    hdr -= 1;
-  }
-
-  let hunkAt = r.hunkStart ?? r.patchStart;
-
-  while (hunkAt > hdr && !lines[hunkAt - 1]?.startsWith("@@")) {
-    hunkAt -= 1;
-  }
-
-  return { hdr, hunkAt };
 };
 
 const regionBody = Effect.fnUntraced(function* regionBody(
@@ -200,9 +164,9 @@ const regionBody = Effect.fnUntraced(function* regionBody(
     };
   }
 
-  const { hdr, hunkAt } = chunkStart(r, lines);
-  const hunkHeader = lines[hunkAt - 1];
-  const isHunk = hunkHeader?.startsWith("@@") ?? false;
+  // A metadata-only chunk is its section: it stores no section or hunk header line of its own.
+  const hdr = r.sectionStart ?? r.patchStart;
+  const isHunk = r.hunkStart !== undefined;
   const title = regionTitle(r, isHunk);
   const body: string[] = [];
 
@@ -219,77 +183,127 @@ const regionBody = Effect.fnUntraced(function* regionBody(
   }
 
   if (isHunk) {
-    appendHunkLines(body, lines, hunkHeader ?? "", hunkAt, r);
+    appendHunkLines(body, lines, r);
   }
 
   return { body, title };
 });
 
-/** Renders regions from the reader's offset within one output page. A region is complete only when all of it was shown. */
+/** What a region that did not fit says: a reported seal saves no offset, so it names the line to pass back as from. */
+const continuation = (
+  reported: boolean,
+  id: string,
+  left: number,
+  next: number
+) =>
+  `[${id} continues: ${left} more lines; ${reported ? `call directorate_diff again with regions ["${id}"] and from ${next + 1}` : "call directorate_diff again"}]`;
+
+/** A region loaded for a page: its title and body lines, where its reader's last page ended, or missing at the seal. */
+const LoadedRegionSchema = Schema.Struct({
+  body: Schema.Array(Schema.String),
+  id: Schema.String,
+  missing: Schema.optional(Schema.Boolean),
+  offset: Schema.Finite,
+  title: Schema.String,
+});
+
+/**
+ * Fits loaded regions, in order, into one output page. The first region starts at body line `start` when given and
+ * shows at least one line; every other region starts at its offset, and paging stops before a region whose title or
+ * first line does not fit. A region is complete only when all of it was shown, and paging stops after one that is not.
+ * A reported seal saves no offsets, so its continuation names the line to pass back.
+ */
+export const pageRegions = (
+  regions: readonly (typeof LoadedRegionSchema.Type)[],
+  start: number | undefined,
+  reported: boolean
+) => {
+  const parts: string[] = [];
+  const shown = Array.of<Shown>();
+  const page = outputPage();
+
+  for (const r of regions) {
+    if (shown.length && page.room([r.title, ""]) < 2) {
+      break;
+    }
+
+    page.take(r.title);
+    page.take("");
+
+    if (r.missing) {
+      const note =
+        "[content unavailable at the seal; not counted as read. Record a directorate_coverage disposition.]";
+
+      page.take(note);
+      parts.push(`${r.title}\n${note}`);
+      shown.push(
+        Shown.make({ complete: false, id: r.id, missing: true, next: 0 })
+      );
+      continue;
+    }
+
+    const from = shown.length ? r.offset : (start ?? r.offset);
+    const out: string[] = [];
+    let i = from;
+
+    for (; i < r.body.length; i += 1) {
+      const line = r.body[i] ?? "";
+
+      if (!page.fits(line) && (shown.length || out.length)) {
+        break;
+      }
+
+      page.take(line);
+      out.push(line);
+    }
+
+    if (!out.length && shown.length) {
+      break;
+    }
+
+    const complete = i >= r.body.length;
+    parts.push(
+      `${r.title}${from ? ` (continued from body line ${from + 1})` : ""}\n${out.join("\n")}${complete ? "" : `\n${continuation(reported, r.id, r.body.length - i, i)}`}`
+    );
+    shown.push(Shown.make({ complete, id: r.id, next: complete ? 0 : i }));
+
+    if (!complete) {
+      break;
+    }
+  }
+
+  return { shown, text: parts.join("\n\n") };
+};
+
+/**
+ * Renders regions from the reader's offset (or, for the first region, from body offset `start`) within one output page
+ * (see pageRegions).
+ */
 export const renderRegions = Effect.fn("Directorate.renderRegions")(
   function* renderRegions(
     seal: Seal,
     regions: readonly Region[],
-    reader = "owner"
+    reader: Reader,
+    start?: number
   ) {
     const lines = (yield* (yield* Records).readDiff(seal)).split("\n");
-    const parts: string[] = [];
-    const shown = Array.of<Shown>();
-    const page = outputPage();
 
-    for (const r of regions) {
-      const { title, body, missing } = yield* regionBody(seal, r, lines);
+    const loaded = yield* Effect.forEach(
+      regions,
+      (r) =>
+        regionBody(seal, r, lines).pipe(
+          Effect.map(({ body, missing, title }) => ({
+            body,
+            id: r.id,
+            missing,
+            offset: r.offsets?.[reader.key] ?? 0,
+            title,
+          }))
+        ),
+      { concurrency: IO_CONCURRENCY }
+    );
 
-      if (shown.length && page.room([title, ""]) < 2) {
-        break;
-      }
-
-      page.take(title);
-      page.take("");
-
-      if (missing) {
-        const note =
-          "[content unavailable at the seal; not counted as read. Record a directorate_coverage disposition.]";
-
-        page.take(note);
-        parts.push(`${title}\n${note}`);
-        shown.push(
-          Shown.make({ complete: false, id: r.id, missing: true, next: 0 })
-        );
-        continue;
-      }
-
-      const from = r.offsets?.[reader] ?? 0;
-      const out: string[] = [];
-      let i = from;
-
-      for (; i < body.length; i += 1) {
-        const line = body[i] ?? "";
-
-        if (!page.fits(line) && (shown.length || out.length)) {
-          break;
-        }
-
-        page.take(line);
-        out.push(line);
-      }
-
-      if (!out.length && shown.length) {
-        break;
-      }
-
-      const complete = i >= body.length;
-      parts.push(
-        `${title}${from ? ` (continued from body line ${from + 1})` : ""}\n${out.join("\n")}${complete ? "" : `\n[${r.id} continues: ${body.length - i} more lines; call directorate_diff again]`}`
-      );
-      shown.push(Shown.make({ complete, id: r.id, next: complete ? 0 : i }));
-
-      if (!complete) {
-        break;
-      }
-    }
-
-    return { shown, text: parts.join("\n\n") };
+    return pageRegions(loaded, start, Boolean(seal.reportedAt));
   }
 );
 
@@ -326,7 +340,7 @@ export const readLines = Effect.fn("Directorate.readLines")(function* readLines(
   end?: number
 ) {
   const r = yield* readable(seal, path, side);
-  const all = r.content.split("\n");
+  const all = linesOf(r.content);
   const s = Math.max(1, start);
 
   const e0 = Math.min(
@@ -406,6 +420,7 @@ export const grepSealed = Effect.fn("Directorate.grepSealed")(
     ];
 
     const out = yield* (yield* Git).run(seal.repo, args, [0, 1]);
+    const copied = fromSecrets(seal);
 
     const rows = out
       .split("\n")
@@ -414,7 +429,7 @@ export const grepSealed = Effect.fn("Directorate.grepSealed")(
         const [name = "", line = "", ...text] = l.split("\0");
         const file = commit ? name.slice(seal.headSha.length + 1) : name;
 
-        return isWithheld(seal, file)
+        return isWithheld(seal, file, "new", copied)
           ? []
           : [clip(`${file}:${line}:${text.join("\0")}`, 300)];
       });
@@ -430,23 +445,16 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
   function* listInstalled(seal: Seal, dir: string) {
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* Path.Path;
-    const { abs, rel, missing } = yield* installed(seal, dir);
+    const { abs, rel, missing, root } = yield* installed(seal, dir);
 
-    const root = yield* fs
-      .realPath(seal.repo)
-      .pipe(
-        Effect.catchTag("PlatformError", () =>
-          Effect.fail(new NotInSeal({ message: missing }))
-        )
-      );
-
-    const names = (yield* fs
-      .readDirectory(abs)
-      .pipe(
-        Effect.catchTag("PlatformError", () =>
-          Effect.fail(new NotInSeal({ message: `${dir} is not a directory` }))
-        )
-      )).toSorted();
+    const names = (yield* fs.readDirectory(abs).pipe(
+      Effect.catchReason("PlatformError", "NotFound", () =>
+        Effect.fail(new NotInSeal({ message: missing }))
+      ),
+      Effect.catchReason("PlatformError", "BadResource", () =>
+        Effect.fail(new NotInSeal({ message: `${dir} is not a directory` }))
+      )
+    )).toSorted();
 
     const rows = yield* Effect.forEach(
       names,
@@ -475,22 +483,13 @@ const listInstalled = Effect.fn("Directorate.listInstalled")(
           yield* Effect.option(fs.realPath(entry))
         );
 
-        const relTarget =
-          target && paths.relative(root, target).split(paths.sep).join("/");
-
-        let linkTarget: string;
-
-        if (relTarget === undefined) {
-          linkTarget = "(broken link)";
-        } else if (
-          relTarget === ".." ||
-          relTarget.startsWith("../") ||
-          paths.isAbsolute(relTarget)
-        ) {
-          linkTarget = "(outside the repository)";
-        } else {
-          linkTarget = relTarget;
-        }
+        const linkTarget =
+          target === undefined
+            ? "(broken link)"
+            : Option.getOrElse(
+                insideRoot(paths, root, target),
+                () => "(outside the repository)"
+              );
 
         return `${shown} -> ${linkTarget}`;
       }),
@@ -548,8 +547,10 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
     return yield* listInstalled(seal, dir);
   }
 
+  const copied = fromSecrets(seal);
+
   const marked = names.map((p) =>
-    isWithheld(seal, p) ? `${p}  (withheld)` : p
+    isWithheld(seal, p, "new", copied) ? `${p}  (withheld)` : p
   );
 
   const shown = marked.slice(0, fitting(marked));
@@ -557,8 +558,8 @@ export const listFiles = Effect.fn("Directorate.listFiles")(function* listFiles(
   return `${names.length} files${scope.length ? ` under ${scope.join(", ")}` : ""} at the seal\n${shown.join("\n")}${marked.length > shown.length ? `\n… ${marked.length - shown.length} more; pass a directory` : ""}`;
 });
 
-/** A history request missing what its kind needs, or naming no such revision or file. */
-class InvalidRead extends Schema.TaggedError<
+/** A read request missing what it needs, asking for what it may not, or naming no such revision or file. */
+export class InvalidRead extends Schema.TaggedError<
   InvalidRead,
   { readonly brand: unique symbol }
 >()("InvalidRead", { message: Schema.String }) {}
@@ -567,6 +568,16 @@ class InvalidRead extends Schema.TaggedError<
 const isBlob = Schema.is(Schema.Literal("blob"));
 
 const REV = /^(?!-)[0-9A-Za-z._/~^@{}-]+$/u;
+
+/** A history command git refuses (a bad range, a path it does not know) is a bad request, told in git's own words. */
+const gitRefused = <A, R>(
+  self: Effect.Effect<A, Effect.Error<ReturnType<Git["Service"]["run"]>>, R>
+) =>
+  self.pipe(
+    Effect.catchTag("GitFailed", (e) =>
+      Effect.fail(new InvalidRead({ message: e.message }))
+    )
+  );
 
 const historyShow = Effect.fnUntraced(function* historyShow(
   repo: string,
@@ -593,9 +604,8 @@ const historyShow = Effect.fnUntraced(function* historyShow(
     }
   }
 
-  const out = yield* git.run(
-    repo,
-    [
+  const out = yield* git
+    .run(repo, [
       "show",
       "--no-color",
       "--no-ext-diff",
@@ -606,9 +616,8 @@ const historyShow = Effect.fnUntraced(function* historyShow(
       rev,
       "--",
       ...(path ? [path] : []),
-    ],
-    [0, 128]
-  );
+    ])
+    .pipe(gitRefused);
 
   if (path) {
     return out;
@@ -681,18 +690,15 @@ export const history = Effect.fn("Directorate.history")(function* history(
     const s = input.start ?? 1;
     const e = input.end ?? s + 80;
 
-    return git.run(
-      seal.repo,
-      ["blame", "--date=short", `-L${s},${e}`, rev, "--", path],
-      [0, 128]
-    );
+    return git
+      .run(seal.repo, ["blame", "--date=short", `-L${s},${e}`, rev, "--", path])
+      .pipe(gitRefused);
   };
 
   const out = yield* Match.value(input.kind).pipe(
     Match.when("log", () =>
-      git.run(
-        seal.repo,
-        [
+      git
+        .run(seal.repo, [
           "log",
           "--no-color",
           "--no-ext-diff",
@@ -702,9 +708,8 @@ export const history = Effect.fn("Directorate.history")(function* history(
           rev,
           "--",
           ...(path ? [path] : []),
-        ],
-        [0, 128]
-      )
+        ])
+        .pipe(gitRefused)
     ),
     Match.when("blame", blame),
     Match.when("show", () => historyShow(seal.repo, rev, input.rev, path)),

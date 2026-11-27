@@ -36,8 +36,9 @@ export type DefineTool<R> = <
   name: string;
   description: string;
   input: Input;
+  /** Runs a call; `name` is the name the tool registered under, for the ToolCall it hands the door. */
   execute: Body<
-    [input: Input["Type"], c: Tool.Context],
+    [input: Input["Type"], c: Tool.Context, name: string],
     typeof ToolReplySchema.Type,
     R
   >;
@@ -111,9 +112,7 @@ export const actor = (c: Tool.Context) =>
 const toolError = (error: Error) =>
   error instanceof Tool.Error
     ? error
-    : new Tool.Error({
-        message: error instanceof Error ? error.message : String(error),
-      });
+    : new Tool.Error({ message: error.message });
 
 /**
  * Binds tools and hooks to the plugin's services R (the composition root names them); tool and hook bodies never see
@@ -152,46 +151,53 @@ export const adapter = <R>() =>
           run(event).pipe(Effect.provideContext(services), recover(name));
       },
       /**
-       * Declares every tool `register` defines in the ToolCatalog now, and returns the host's tool transform, which may
-       * run any number of times. Every tool first checks role and permission on the seal its input names, if any; input
-       * the schema rejects never reaches a permission prompt.
+       * Runs `register` once: declares every tool it defines in the ToolCatalog now, and returns the host's tool
+       * transform, which may run any number of times and adds the same tools, in order, to each editor it is handed.
+       * Every tool first checks role and permission on the seal its input names, if any; input the schema rejects never
+       * reaches a permission prompt.
        */
       tools: Effect.fnUntraced(function* tools(
         register: (tool: DefineTool<R | Host>) => void
       ) {
         const catalog = yield* ToolCatalog;
         let declarations = HashMap.empty<string, ToolDeclaration>();
+        // Each adds a fresh definition: the editor's tools belong to the host, which may change them.
+        const additions: ((editor: Editor) => void)[] = [];
 
-        register(({ harness = true, lockdown = [], name }) => {
+        register((spec) => {
+          const {
+            description,
+            files = () => [],
+            harness = true,
+            input,
+            lockdown = [],
+            name,
+          } = spec;
+
           declarations = HashMap.set(
             declarations,
             name,
             ToolDeclaration.make({ harness, lockdown, name })
           );
-        });
-        yield* catalog.declare(declarations);
 
-        return (editor: Editor) =>
-          register((spec) => {
-            const { description, files = () => [], input, name } = spec;
+          const run = Effect.fn(name)(function* run(
+            value: typeof input.Type,
+            c: Tool.Context
+          ) {
+            yield* authorize(
+              name,
+              c,
+              Predicate.hasProperty(value, "seal") &&
+                Predicate.isString(value.seal)
+                ? value.seal
+                : undefined,
+              files(value).filter(Predicate.isString)
+            );
 
-            const run = Effect.fn(name)(function* run(
-              value: typeof input.Type,
-              c: Tool.Context
-            ) {
-              yield* authorize(
-                name,
-                c,
-                Predicate.hasProperty(value, "seal") &&
-                  Predicate.isString(value.seal)
-                  ? value.seal
-                  : undefined,
-                files(value).filter(Predicate.isString)
-              );
+            return yield* spec.execute(value, c, name);
+          });
 
-              return yield* spec.execute(value, c);
-            });
-
+          additions.push((editor) =>
             editor.add({
               description,
               execute: (value, c) =>
@@ -202,8 +208,16 @@ export const adapter = <R>() =>
               input,
               name,
               options: { codemode: false },
-            });
-          });
+            })
+          );
+        });
+        yield* catalog.declare(declarations);
+
+        return (editor: Editor) => {
+          for (const add of additions) {
+            add(editor);
+          }
+        };
       }),
     };
   });

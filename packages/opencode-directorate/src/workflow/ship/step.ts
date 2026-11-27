@@ -1,12 +1,12 @@
 // Pure next-step policy and prompts for the bounded /directorate-ship loop. It reads the saved Directive from the seal,
 // never the model's reply, and decides one step at a time.
-import { Result, Schema, Struct } from "effect";
+import { Equal, Result, Schema, Struct } from "effect";
 
 import { scopeOf } from "../../exclusions.ts";
 import { Liaison } from "../../feature/agents/agent.ts";
 import {
+  isCompletedSeat,
   panelSeats,
-  SeatStatusSchema,
 } from "../../feature/dispatch/lifecycle.ts";
 import {
   currentSeverity,
@@ -15,12 +15,22 @@ import {
 } from "../../feature/ledger/decide.ts";
 import { Ledger } from "../../feature/ledger/entry.ts";
 import type { Entry } from "../../feature/ledger/entry.ts";
-import { DirectiveStatusSchema } from "../../feature/report/directive.ts";
+import { isComplete as isCompleteDirective } from "../../feature/report/directive.ts";
 import { Count } from "../../platform/stored.ts";
 import { Seal } from "../../seal/record.ts";
 import { isBaseSide } from "../../seal/region.ts";
 import { parseRequest, requestText } from "../review/request.ts";
-import { ShipFieldsSchema } from "./state.ts";
+import type { ShipId } from "../review/ship-link.ts";
+import {
+  FinishStep,
+  FixStep,
+  RecheckStep,
+  ResumeStep,
+  ReviewStep,
+  ShipFieldsSchema,
+  StepSchema,
+} from "./state.ts";
+import type { Step } from "./state.ts";
 
 /** What the policy reads from the ship itself: its request, how far this run has gone, and the step it last took. */
 const ShipProgressSchema = ShipFieldsSchema.mapFields(
@@ -46,7 +56,7 @@ export class Proceed extends Schema.TaggedClass<
   { readonly brand: unique symbol }
 >()("Proceed", {
   reason: Schema.String,
-  step: Schema.String,
+  step: StepSchema,
   text: Schema.String,
 }) {}
 
@@ -67,47 +77,16 @@ export const ShipDecisionSchema = Schema.Union([Proceed, Pause, Conclude]).pipe(
   Schema.toTaggedUnion("_tag")
 );
 
-export type ShipDecision = typeof ShipDecisionSchema.Type;
-
 /** Reviews a run may start before the loop pauses for the user, counted from its start or last resume. */
 const REVIEW_LIMIT = 6;
 
 /** Steps a run may take before the loop pauses for the user. */
 const ROUND_LIMIT = 30;
 
-const isCompletedSeat = Schema.is(SeatStatusSchema.pick(["completed"]));
-
-const isCompleteDirective = Schema.is(DirectiveStatusSchema.pick(["complete"]));
-
-/**
- * The steps the policy takes that name no seal. The others name the seal they act on: `resume:<seal>`,
- * `fix:<seal>`, and `recheck:<seal>:<fingerprint>`. A ship stores its step as any string.
- */
-const PlainStepSchema = Schema.Literals(["review", "finish"]);
-
-/** The initial review, before any seal. */
-export const isReviewStep = Schema.is(PlainStepSchema.pick(["review"]));
-
-/** The re-check that finishes an incomplete review. */
-export const isFinishStep = Schema.is(PlainStepSchema.pick(["finish"]));
-
-const resumeStep = (seal: string) => `resume:${seal}`;
-
-const fixStep = (seal: string) => `fix:${seal}`;
-
-const recheckPrefix = (seal: string) => `recheck:${seal}:`;
-
-const recheckStep = (seal: string, fingerprint: string) =>
-  `${recheckPrefix(seal)}${fingerprint}`;
-
-/** Whether `step` re-checks seal `seal`, at any fingerprint. */
-export const rechecks = (step: string | undefined, seal: string) =>
-  step?.startsWith(recheckPrefix(seal)) ?? false;
-
 const GUARDRAILS =
   "Do not commit, push, approve, or merge. If blocked, tell the user what decision or action is needed and stop. End your turn after this one step and wait for the plugin to direct the next step.";
 
-export const shipKickoff = (reviewText: string, shipID: string) =>
+export const shipKickoff = (reviewText: string, shipID: ShipId) =>
   [
     `/directorate-ship runs review, fix, and re-check as separate turns until a fresh, complete Directive has no findings or unresolved leads, or the loop pauses. For this turn, only dispatch ${Liaison.id}, wait, and relay its final Directive verbatim. Do not fix or re-check yet.`,
     `In the dispatch prompt, explicitly tell the Liaison to pass \`ship: "${shipID}"\` to \`directorate_seal\` for the initial seal only. Do not pass ship when resuming or re-checking a seal.`,
@@ -214,7 +193,7 @@ export const decideShip = (
     });
 
   const next = (
-    step: string,
+    step: Step,
     why: string,
     text: string,
     startsReview = false
@@ -232,7 +211,7 @@ export const decideShip = (
       );
     }
 
-    if (state.step === step) {
+    if (Equal.equals(state.step, step)) {
       return pause(
         `the last step did not make enough progress to continue. ${why}`,
         [
@@ -269,7 +248,7 @@ export const decideShip = (
       onFailure: (message) => pause("the review request is invalid.", message),
       onSuccess: (request) =>
         next(
-          "review",
+          ReviewStep.make({}),
           "no review seal was created.",
           shipKickoff(requestText(request, "defaults"), state.id),
           true
@@ -289,7 +268,7 @@ export const decideShip = (
 
   if (!seal.reportedAt) {
     return next(
-      resumeStep(seal.id),
+      ResumeStep.make({ seal: seal.id }),
       "the Liaison has not reported its Directive.",
       resumeText(seal)
     );
@@ -320,7 +299,7 @@ export const decideShip = (
 
   if (fingerprint !== seal.fingerprint) {
     return next(
-      recheckStep(seal.id, fingerprint),
+      RecheckStep.make({ fingerprint, seal: seal.id }),
       "the target changed after the seal.",
       recheckText(),
       true
@@ -336,7 +315,7 @@ export const decideShip = (
     }
 
     return next(
-      fixStep(seal.id),
+      FixStep.make({ seal: seal.id }),
       `${confirmed.length} confirmed ${confirmed.length === 1 ? "finding remains" : "findings remain"}.`,
       fixText(seal, confirmed, leads, state.request)
     );
@@ -356,7 +335,7 @@ export const decideShip = (
   }
 
   return next(
-    "finish",
+    FinishStep.make({}),
     unfinishedReason(directive, leads.length),
     recheckText(),
     true

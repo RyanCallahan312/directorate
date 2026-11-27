@@ -3,11 +3,14 @@
 // exactly. A change here is a change for every user's prompt prefix, not a refactor.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 
 import { Schema } from "effect";
 
+import { verifyLogs } from "./logs.ts";
 import { captureSurface } from "./surface.ts";
+
+afterEach(verifyLogs);
 
 const Entries = Schema.Array(Schema.Json);
 

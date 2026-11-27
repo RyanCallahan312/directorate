@@ -5,13 +5,13 @@ import { DateTime } from "effect";
 import { createdAt, isInterrupted, turns } from "../../platform/platform.ts";
 import type { Seal } from "../../seal/record.ts";
 
-/** On resume, ignore old interruptions, not later ones. Older manually resumed seals lack the resume time. */
+/** On resume, ignore old interruptions, not later ones. */
 export const interruptedReview = (
   seal: Pick<Seal, "createdAt" | "halted" | "resumedAt">,
   messages: readonly SessionMessage.Info[]
 ) => {
-  if (seal.halted || (!seal.resumedAt && seal.halted === false)) {
-    return seal.halted === true;
+  if (seal.halted) {
+    return true;
   }
 
   const since = DateTime.toEpochMillis(seal.resumedAt ?? seal.createdAt);

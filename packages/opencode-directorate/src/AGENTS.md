@@ -158,7 +158,7 @@ export const budgetLine = Effect.fnUntraced(function* budgetLine(
 
 Derive values when time is the source of truth (`Window.phaseAt`). For genuinely stateful records, model the states as branded `Schema.TaggedClass` members of one tagged union, and keep I/O in the surrounding service. `Dispatch` (`feature/dispatch/lifecycle.ts`) and ship state (`workflow/ship/state.ts`) follow the same pattern:
 
-- **States share the stored field set.** A stored record keeps whatever any version wrote, and a round trip must be lossless, so every state carries every field. What a state actually sets is up to the transitions into it.
+- **States share the stored field set.** A round trip must be lossless whatever state a record is in, so every state carries every field. What a state actually sets is up to the transitions into it.
 - **The union decodes from the stored shape.** The record stores its state as a `status` field, not a `_tag`; `Schema.decodeTo` maps the stored struct to the union and back.
 - **Changes are named transitions** that build the next state through its class, branching with exhaustive `match`.
 - **A transition that does not apply returns no change.** Dispatch transitions return `undefined`, so callers write only real changes; ship transitions rebuild the same state. Neither raises an invalid-transition error.
@@ -168,11 +168,11 @@ Abridged from `feature/dispatch/lifecycle.ts`:
 ```ts
 /** What every run carries in every state. */
 const dispatchFields = {
-  agent: Schema.String, // as stored: older records may hold any name
-  call: Schema.String,
+  agent: DispatchableIdSchema, // an Auditor, Seat, or Compliance
+  call: CallIdSchema,
   endedAt: opt(Schema.DateTimeUtc),
   prompt: Schema.String,
-  session: opt(Schema.String),
+  session: opt(SessionIdSchema),
   startedAt: Schema.DateTimeUtc,
   // …
 };
@@ -235,7 +235,7 @@ export const update = (seal: Seal, step: (c: Dispatch) => Dispatch) => {
 };
 
 /** A completed run doing more work without a new launch is running again. */
-export const resumed = (seal: Seal, session: string) => {
+export const resumed = (seal: Seal, session: SessionId) => {
   const run = latest(seal, session);
 
   return update(seal, (c) =>
@@ -246,6 +246,7 @@ export const resumed = (seal: Seal, session: string) => {
 };
 ```
 
+- **Identifiers are branded schemas, converted once at the boundary**: seal, session, message, tool-call, ship, and ledger entry ids are `SealIdSchema`, `SessionIdSchema`, `MessageIdSchema`, `CallIdSchema`, `ShipIdSchema`, and `EntryIdSchema`, in stored fields and parameters alike, so swapping two ids fails to compile. A string becomes one only where it enters (a tool input through `sealIdOf`, `asShipId`, or `asEntryId`, hook metadata or a storage key through `asSessionId`); the host's own records already carry the mirrored types.
 - **Resolve names once**: decode agent names at the host boundary into an `Actor` (platform's `actor`), resolve them with `agentNamed` or `dispatchableNamed` (both through `agentOf`) or `Actor.role`, and pass `Agent` inward. Reject unknown names wherever authority or permissions are checked; allow a display fallback (e.g., Liaison copy) only at the presentation boundary.
 
 ## 4. Deep Modules, Vertical Slices & Ownership
@@ -270,7 +271,7 @@ export const resumed = (seal: Seal, session: string) => {
 
 ## Gotchas
 
-- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, ship state, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` (`since` in `platform/stored.ts`) or `Schema.decodeTo` (`orLegacyTrue`) plus a legacy fixture.
+- **Stored schemas are compatibility contracts**: `seal.json`, `ledger.json`, `directorate.json`, ship state, archives, agent names, and tool names outlive the code that wrote them. Never rename literals, tighten fields, or alter encoded shapes without `Schema.withDecodingDefaultKey` or `Schema.decodeTo` plus a legacy fixture.
 - **Fixtures guard the contracts**: a stored-contract or host-surface change needs fixtures under `test/stored/`. `test/contracts.test.ts` round-trips them byte for byte, `test/surface.test.ts` compares the registered surface with `test/stored/surface.json`, and `test/architecture.test.ts` checks imports and the Layout block in `ARCHITECTURE.md`.
 - **Tool input vs. domain vs. storage**: share field schemas, not whole codecs. Tool inputs passed to `DefineTool` are decoded by the host (do not re-decode) and must use `Schema.optionalKey` — `Schema.optional` emits `anyOf: [..., null]` in JSON Schema.
 - **Decoding functions**: use `Schema.decodeUnknownEffect` for `unknown`, `Schema.decodeUnknownOption` for best-effort hook metadata, and `Schema.decodeEffect` when input already matches `Encoded` (e.g., JSON strings into `Schema.fromJsonString`).
@@ -283,5 +284,6 @@ export const resumed = (seal: Seal, session: string) => {
 A change under `src/` is done when:
 
 1. `bun run check` passes.
-2. `tsc --noEmit` output contains no new Effect language-service suggestions (`effect(schemaNumber)`, `effect(schemaClassMissingBrand)` exit `0` — read the output).
+2. `tsc --noEmit` output contains no Effect language-service suggestions (`effect(schemaNumber)`, `effect(schemaClassMissingBrand)`); they fail its exit code (`ignoreEffectSuggestionsInTscExitCode: false`), but read the output too.
 3. Any persisted-schema change includes round-trip and legacy-fixture tests.
+4. Every command prints no diagnostic at all: no errors, warnings, hints, notices, or informational lines from lint, formatting, type checking (Effect language-service suggestions included, at any severity), the build, or tests. Tests print only the runner's results. Run effects through `test/logs.ts`'s runners and register `afterEach(verifyLogs)`, so an undeclared warning fails the test; a test that triggers a logged failure on purpose declares it with `expectWarnings`. Fix a diagnostic's cause. Never silence it with a disable comment, an ignore entry, or a relaxed config, and never leave it as "informational".

@@ -12,6 +12,7 @@ import {
   CarriedStatusSchema,
   isUnverifiedCarry,
   Ledger,
+  nthEntryId,
 } from "../../feature/ledger/entry.ts";
 import type { CarriedStatus, Entry } from "../../feature/ledger/entry.ts";
 import { driftCleared } from "../../feature/report/directive.ts";
@@ -22,9 +23,12 @@ import {
   ProcessIdentity,
 } from "../../platform/platform.ts";
 import { emptyLedger } from "../../records/records.ts";
-import { carryMarks } from "../../seal/coverage.ts";
+import { carryMarks, coverageSummary } from "../../seal/coverage.ts";
 import { Seal } from "../../seal/record.ts";
 import { isBaseSide, isSealedSide, Region } from "../../seal/region.ts";
+import type { Changes } from "../../seal/region.ts";
+import { SealIdSchema } from "../../seal/seal-id.ts";
+import type { SealId } from "../../seal/seal-id.ts";
 import {
   capture,
   changedBetween,
@@ -39,7 +43,6 @@ import {
   settled,
   ShipLink,
 } from "../../seal/seal.ts";
-import type { Current } from "../../seal/seal.ts";
 import { Target } from "../../seal/target.ts";
 import { started } from "./custody.ts";
 import {
@@ -49,6 +52,7 @@ import {
   recheckMinutes,
 } from "./request.ts";
 import { shipped } from "./ship-link.ts";
+import type { ShipId } from "./ship-link.ts";
 import { Window } from "./window.ts";
 
 /** What the review's state does not allow: a second active seal, re-checking an open review, resuming a reported one. */
@@ -64,24 +68,19 @@ class TargetUnresolved extends Schema.TaggedError<
 >()("TargetUnresolved", { message: Schema.String }) {}
 
 /** A new seal's id: its creation time, and a random suffix. */
-const sealId = Effect.fnUntraced(function* sealId(createdAt: DateTime.Utc) {
+export const sealId = Effect.fnUntraced(function* sealId(
+  createdAt: DateTime.Utc
+) {
   const suffix = Hex.encode(
     yield* (yield* SecureRandom.SecureRandom).randomBytes(3)
   );
 
-  return `directorate-${DateTime.formatIso(createdAt)
-    .replaceAll(/[-:TZ.]/gu, "")
-    .slice(0, 14)}-${suffix}`;
+  return SealIdSchema.make(
+    `directorate-${DateTime.formatIso(createdAt)
+      .replaceAll(/[-:TZ.]/gu, "")
+      .slice(0, 14)}-${suffix}`
+  );
 });
-
-/** A commit pair's description with the ends it moved to; a worktree's description does not name them. */
-const describedAt = (seal: Seal, cur: Pick<Current, "baseSha" | "headSha">) =>
-  seal.pinsCommit
-    ? seal.description.replace(
-        /\((?<prefix>[^()]*?)[0-9a-f]{10} → [0-9a-f]{10}\)/u,
-        `($1${cur.baseSha.slice(0, 10)} → ${cur.headSha.slice(0, 10)})`
-      )
-    : seal.description;
 
 /** The sealing OpenCode instance's directory, if sealed inside one. */
 const hostDirectory = Effect.serviceOption(Host).pipe(
@@ -159,7 +158,9 @@ export const createSeal = Effect.fn("Directorate.createSeal")(
 );
 
 /** What `next` changed in the files an entry rests on, judged against `before`; undefined when nothing it rests on moved. */
-const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
+const movedUnder = (before: Seal, next: Seal, changes: Changes) => {
+  const changed = new Set(changes.files);
+
   const inChange = new Set(
     next.files.filter((f) => f.isChanged).map((f) => f.path)
   );
@@ -172,7 +173,7 @@ const movedUnder = (before: Seal, next: Seal, changed: ReadonlySet<string>) => {
       before.files.some((f) => f.path === e.anchor.path && f.isChanged) &&
       !inChange.has(e.anchor.path);
 
-    const baseMoved = isBaseSide(e.anchor.side) && changed.has("(base moved)");
+    const baseMoved = isBaseSide(e.anchor.side) && changes.baseMoved;
 
     return hit.length || gone || baseMoved
       ? { files: hit.join(", ") || "base moved", gone, hit: hit.length > 0 }
@@ -231,7 +232,7 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
         repinned(seal, {
           baseSha: cur.baseSha,
           baseTip: cur.baseTip ?? seal.baseTip,
-          description: describedAt(seal, cur),
+          description: cur.describing(seal),
           headSha: cur.headSha,
         })
       ),
@@ -247,9 +248,9 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
       return unchanged;
     }
 
-    const changed = new Set(yield* changedBetween(seal, captured));
+    const changes = yield* changedBetween(seal, captured);
     const next = carryMarks(captured, seal);
-    const moved = movedUnder(seal, captured, changed);
+    const moved = movedUnder(seal, captured, changes);
 
     const entries = ledger.entries.map((e) => {
       const why = moved(e);
@@ -270,9 +271,9 @@ export const refreshSeal = Effect.fn("Directorate.refreshSeal")(
     });
 
     return RefreshSchema.make({
-      files: [...changed],
+      files: changes.listed,
       ledger: ledger.withEntries(entries.map((r) => r.entry)),
-      newRegions: next.regions.filter((r) => !r.ownerRead && !r.disposition),
+      newRegions: coverageSummary(next).unread,
       reopened: entries.flatMap((r) => (r.reopened ? [r.entry.id] : [])),
       seal: next,
     });
@@ -327,7 +328,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
       Effect.gen(function* attempt() {
         // A worktree seal keeps its base (committed fixes are not a new change) but records the HEAD it now sits on;
         // only commit pairs re-resolve both ends.
-        const cur = prior.pinsCommit
+        const pinned = prior.pinsCommit
           ? yield* currentFingerprint(prior).pipe(
               Effect.mapError(
                 (e) =>
@@ -345,19 +346,18 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
                   )
               )
             )
-          : {
-              baseSha: prior.baseSha,
-              baseTip: undefined,
-              headSha: yield* (yield* Git).head(prior.repo),
-            };
+          : undefined;
+
+        const headSha =
+          pinned?.headSha ?? (yield* (yield* Git).head(prior.repo));
 
         const captured = yield* capture(
           Seal.open(
             {
-              baseSha: cur.baseSha,
-              baseTip: cur.baseTip ?? prior.baseTip,
-              description: describedAt(prior, cur),
-              headSha: cur.headSha,
+              baseSha: pinned?.baseSha ?? prior.baseSha,
+              baseTip: pinned?.baseTip ?? prior.baseTip,
+              description: pinned?.describing(prior) ?? prior.description,
+              headSha,
               id,
               lensesOff: prior.lensesOff,
               mode: prior.mode,
@@ -374,11 +374,11 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
           beforeCapture
         );
 
-        const changed = new Set(yield* changedBetween(prior, captured));
+        const changes = yield* changedBetween(prior, captured);
 
         const seal = carryMarks(captured, prior, (r) => r.isRead);
 
-        const moved = movedUnder(prior, captured, changed);
+        const moved = movedUnder(prior, captured, changes);
         const open = new Set(unresolved(input.ledger));
 
         // Installed dependencies are read live from disk, outside any seal, so Git cannot say whether they changed:
@@ -439,7 +439,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
             return status ? [{ entry: e, status }] : [];
           })
           .map(({ entry, status }, i) => {
-            const next = entry.carriedAs(`F${i + 1}`, status);
+            const next = entry.carriedAs(nthEntryId(i + 1), status);
             const reason = reopenReason(entry, status);
 
             return reason === undefined
@@ -455,7 +455,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
         return {
           ledger,
           out: {
-            files: [...changed],
+            files: changes.listed,
             kept: carried.flatMap((c) => (c.kept ? [c.entry.id] : [])),
             ledger,
             reopened: carried.flatMap((c) => (c.kept ? [] : [c.entry.id])),
@@ -488,7 +488,7 @@ export const recheckSeal = Effect.fn("Directorate.recheckSeal")(
 export const shipStamp = Effect.gen(function* shipStamp() {
   const sessions = yield* Sessions;
 
-  return (sealID: string, shipID: string) =>
+  return (sealID: SealId, shipID: ShipId) =>
     sessions.mutate(sealID, ShipLink.make({}), (review) =>
       Effect.succeed({ out: undefined, seal: shipped(review.seal, shipID) })
     );

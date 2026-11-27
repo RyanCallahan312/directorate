@@ -17,11 +17,16 @@ export const isDraining = Schema.is(PhaseSchema.pick(["drain"]));
 /** Normal: before the budget drains. */
 export const isNormal = Schema.is(PhaseSchema.pick(["normal"]));
 
+/** The fewest and the most minutes a review may be given. */
+export const BUDGET_RANGE = { max: 240, min: 2 } as const;
+
 /** The minutes a request or directorate.json may give a review. */
 export const BudgetMinutesSchema = Schema.Finite.check(
-  Schema.isGreaterThanOrEqualTo(2),
-  Schema.isLessThanOrEqualTo(240)
+  Schema.isGreaterThanOrEqualTo(BUDGET_RANGE.min),
+  Schema.isLessThanOrEqualTo(BUDGET_RANGE.max)
 );
+
+export const isBudgetMinutes = Schema.is(BudgetMinutesSchema);
 
 /** How long after the deadline the watchdog waits for the Liaison's own report. */
 export const GRACE_MS = 120_000;

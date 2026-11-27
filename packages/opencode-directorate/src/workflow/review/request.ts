@@ -71,6 +71,29 @@ const BARE_START = Schema.Record(BareRequestSchema, Schema.String).make({
 
 const SCOPE_FLAG = /^\s*--scope(?=\s|=|$)(?:(?:=|\s+)(?<value>\S+))?/u;
 
+const RECHECK_FLAG =
+  /^\s*--recheck(?=\s|=|$)(?:(?:=|\s+)(?<seal>directorate-\S+))?/u;
+
+const RECHECK_START = /^\s*--recheck(?=\s|=|$)/iu;
+
+/**
+ * A leading --recheck flag: the seal it names (`--recheck <seal>` or `--recheck=<seal>`, a `directorate-…` id), if any,
+ * and the trimmed text after it. None when the text does not start with the flag.
+ */
+export const recheckFlag = (text: string) => {
+  const flag = RECHECK_FLAG.exec(text);
+
+  return flag
+    ? {
+        rest: text.slice(flag[0].length).trim(),
+        seal: flag.groups?.seal,
+      }
+    : undefined;
+};
+
+/** Whether the text starts with a --recheck flag, in any case. */
+export const startsWithRecheck = (text: string) => RECHECK_START.test(text);
+
 /** A review request the command or tool cannot act on, with how to ask instead. */
 export class InvalidRequest extends Schema.TaggedError<
   InvalidRequest,

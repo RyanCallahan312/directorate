@@ -1,24 +1,28 @@
 // Opening and refreshing a review: directorate_seal (started fresh, resumed from another session, a re-check, or restarted
 // by abandoning) and directorate_refresh, and what each tells the Liaison.
-import { DateTime, Effect, Schema, Semaphore } from "effect";
+import { DateTime, Effect, Option, Schema } from "effect";
 
 import { Compliance, Seat } from "../../feature/agents/agent.ts";
+import type { Actor } from "../../feature/agents/agent.ts";
 import { seatName } from "../../feature/dispatch/lifecycle.ts";
 import { ModelRef } from "../../feature/dispatch/seat.ts";
 import { currentSeverity, unresolved } from "../../feature/ledger/decide.ts";
+import type { EntryId } from "../../feature/ledger/entry.ts";
 import type { registerReport } from "../../feature/report/report.ts";
 import { resolve } from "../../feature/settings/file.ts";
 import { SettingsStore } from "../../feature/settings/settings.ts";
 import { ignore } from "../../platform/error.ts";
+import type { SessionId } from "../../platform/host-id.ts";
 import {
   actor,
   Host,
+  keyedLock,
   optional,
   ProcessIdentity,
   str,
 } from "../../platform/platform.ts";
 import type { DefineTool } from "../../platform/platform.ts";
-import { Records } from "../../records/records.ts";
+import { Records, sealIdOf } from "../../records/records.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
@@ -45,6 +49,8 @@ import {
   ReviewScopeSchema,
 } from "./request.ts";
 import type { ReviewScope } from "./request.ts";
+import { asShipId } from "./ship-link.ts";
+import type { ShipId } from "./ship-link.ts";
 import {
   budget,
   BudgetMinutesSchema,
@@ -65,6 +71,16 @@ const RECHECK_FIXED = [
   "repo",
 ] as const;
 
+/** A seal's pinned ends: its base, and its head commit or the snapshotted working tree. */
+const endsLine = (seal: Seal) =>
+  `base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"}`;
+
+/** The lenses directorate.json disabled for a seal, if any. */
+const lensesOffLine = (seal: Seal) =>
+  seal.lensesOff
+    ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
+    : undefined;
+
 /** What a new seal tells the Liaison: its ends, the changed files and their regions, and what to do next. */
 const sealSummary = (seal: Seal) => {
   const changedFiles = seal.files.filter((f) => f.isChanged);
@@ -84,10 +100,8 @@ const sealSummary = (seal: Seal) => {
 
   return [
     `Containment sealed \`${seal.id}\`: ${seal.description}.`,
-    `base ${seal.baseSha.slice(0, 12)} · head ${seal.pinsCommit ? seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
-    seal.lensesOff
-      ? `Lenses disabled by directorate.json: ${seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
-      : undefined,
+    `${endsLine(seal)} · ${seal.files.length} files · ${seal.regions.length} regions · budget ${seal.budgetMinutes} min.`,
+    lensesOffLine(seal),
     seal.panel && seal.regions.length
       ? `Directorate Seats (${seal.panel.length}): ${seal.panel.map(seatName).join(", ")}. Convene ${seal.panel.length} ${Seat.id} subagents now, in one turn, without a model: The Directorate assigns each launch the next open seat's model.`
       : undefined,
@@ -117,7 +131,7 @@ const recheckSummary = (
 ) => {
   const cov = coverageSummary(r.seal);
 
-  const carried = (ids: readonly string[]) =>
+  const carried = (ids: readonly EntryId[]) =>
     r.ledger.entries
       .filter((e) => ids.includes(e.id))
       .map(
@@ -128,13 +142,11 @@ const recheckSummary = (
 
   return [
     `Containment sealed \`${r.seal.id}\`, a re-check of \`${earlier.id}\` (${r.seal.mode}): ${r.seal.description}.`,
-    `base ${r.seal.baseSha.slice(0, 12)} · head ${r.seal.pinsCommit ? r.seal.headSha.slice(0, 12) : "working tree (snapshotted)"} · ${r.seal.regions.length} regions, ${cov.read} already read in the earlier review and unchanged · ${cov.unread.length} to read · budget ${r.seal.budgetMinutes} min.`,
+    `${endsLine(r.seal)} · ${r.seal.regions.length} regions, ${cov.read} already read in the earlier review and unchanged · ${cov.unread.length} to read · budget ${r.seal.budgetMinutes} min.`,
     earlier.panel
       ? "The earlier review had a panel; a re-check runs without Directorate Seats."
       : undefined,
-    r.seal.lensesOff
-      ? `Lenses disabled by directorate.json: ${r.seal.lensesOff.join(", ")}. Do not assign them; entries under them are rejected.`
-      : undefined,
+    lensesOffLine(r.seal),
     "",
     r.files.length
       ? `Changed since the earlier review: ${r.files.join(", ")}`
@@ -155,13 +167,87 @@ const recheckSummary = (
     .join("\n");
 };
 
+/** directorate_seal's input. */
+const SealInputSchema = Schema.Struct({
+  abandon: optional(
+    Schema.Boolean.annotate({
+      description:
+        "Close this session's unreported review (its partial report is saved) and seal a new one.",
+    })
+  ),
+  budget_minutes: optional(BudgetMinutesSchema),
+  mode: optional(
+    ModeSchema.annotate({
+      description:
+        "Omit to use the configured default (directorate.json), else default.",
+    })
+  ),
+  panel: optional(
+    Schema.Boolean.annotate({
+      description:
+        "Panel review: several models (Directorate Seats) each review the whole change independently. true when the user asks for a panel or several models, false when they ask for one model; omit to use the configured default.",
+    })
+  ),
+  panel_models: optional(
+    Schema.Array(ModelRef).annotate({
+      description:
+        "The panel's models, only when the user names them (implies panel).",
+    })
+  ),
+  question: optional(
+    str.annotate({
+      description: "The user's focus, if any; shown in the report.",
+    })
+  ),
+  recheck: optional(
+    str.annotate({
+      description:
+        "Seal id of a reported review to re-check after fixes: seals its target as it is now, keeps what was read in unchanged regions, and carries its findings for re-decision. Takes no target, scope, mode, or panel.",
+    })
+  ),
+  repo: optional(
+    str.annotate({
+      description: "Repository directory; defaults to the session's directory.",
+    })
+  ),
+  resume: optional(
+    str.annotate({
+      description:
+        "Seal id of an unreported review to take over instead of sealing a new one.",
+    })
+  ),
+  scope: optional(ReviewScopeSchema),
+  ship: optional(
+    str.annotate({
+      description:
+        "Only for an initial /directorate-ship review: copy the ship ID from the calling session. Omit on other reviews and re-checks.",
+    })
+  ),
+  target: optional(
+    Schema.Struct({
+      base: optional(str),
+      commit: optional(str),
+      head: optional(str),
+      kind: TargetKindSchema,
+      paths: optional(
+        Schema.Array(RepoScope).annotate({
+          description:
+            "Literal file or directory restrictions, supported only by local and paths targets.",
+        })
+      ),
+      pr: optional(str),
+    })
+  ),
+});
+
+type SealInput = typeof SealInputSchema.Type;
+
 /** Files a review without its Liaison: abandoned for a new one, or past its deadline. */
 export type AutoReporter = Effect.Success<
   ReturnType<typeof registerReport>
 >["autoReport"];
 
 type SealServices =
-  | Sessions
   | Effect.Services<ReturnType<typeof createSeal>>
   | Effect.Services<ReturnType<typeof recheckSeal>>
   | Effect.Services<ReturnType<typeof refreshSeal>>
@@ -172,9 +258,9 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
   autoReport: AutoReporter,
   sealed: (
     seal: Seal,
-    shipID?: string,
+    shipID?: ShipId,
     scope?: ReviewScope
-  ) => Effect.Effect<void, Error>
+  ) => Effect.Effect<void>
 ) {
   const host = yield* Host;
   const sessions = yield* Sessions;
@@ -183,14 +269,145 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
   const { pid } = yield* ProcessIdentity;
 
   /** One seal start at a time per session, so two starts can't both find no active seal and each seal one. */
-  const starting = new Map<string, Semaphore.Semaphore>();
+  const starting = yield* keyedLock;
 
-  const startLock = (session: string) => {
-    const lock = starting.get(session) ?? Semaphore.makeUnsafe(1);
-    starting.set(session, lock);
+  // Filed only once the new review is open, so a target that can't be sealed keeps the active review; before binding, as closing it clears this session's record.
+  const abandoning = (replaced: Seal | undefined, session: SessionId) =>
+    replaced
+      ? autoReport(replaced.id, "abandoned for a new review", session)
+      : Effect.void;
 
-    return lock;
-  };
+  type Abandon = ReturnType<typeof abandoning>;
+
+  /** A re-check of reported review `earlier`, sealed for `a`'s session. */
+  const startRecheck = Effect.fnUntraced(function* startRecheck(
+    input: SealInput,
+    a: Actor,
+    earlier: Seal,
+    abandonPrior: Abandon
+  ) {
+    const r = yield* recheckSeal({
+      budgetMinutes: input.budget_minutes,
+      ledger: yield* store.loadLedger(earlier.id),
+      owner: a,
+      prior: earlier,
+      question: input.question,
+    });
+
+    yield* abandonPrior;
+    yield* sessions.bind(a.session, r.seal.id);
+    yield* sessions.record(a.session, r.seal);
+    yield* sealed(r.seal);
+
+    return yield* done(r.seal, recheckSummary(earlier, r));
+  });
+
+  /** `a` resuming or taking over unreported review `resume`. */
+  const takeOverReview = Effect.fnUntraced(function* takeOverReview(
+    input: SealInput,
+    a: Actor,
+    resume: string,
+    abandonPrior: Abandon
+  ) {
+    const { seal, previousOwner } = yield* sessions.mutate(
+      yield* sealIdOf(resume, "door"),
+      Takeover.make({ actor: a }),
+      (review) =>
+        Effect.gen(function* openContainment() {
+          const s = review.seal;
+
+          if (s.reportedAt) {
+            return yield* new ReviewConflict({
+              message: `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`,
+            });
+          }
+
+          // A spent budget gets more time (Window.takeover), unless the caller names a budget.
+          const now = yield* DateTime.now;
+          const { window } = s;
+          const { phase } = yield* budget(window);
+
+          const takeover =
+            s.ownerSession === a.session || isNormal(phase)
+              ? undefined
+              : window.takeover(now);
+
+          const restart =
+            input.budget_minutes === undefined
+              ? takeover
+              : Window.open(now, input.budget_minutes);
+
+          const resumed = resumedBy(s, a, pid, now);
+
+          const updated =
+            restart === undefined ? resumed : restarted(resumed, restart);
+
+          return {
+            out: { previousOwner: s.ownerSession, seal: updated },
+            seal: updated,
+          };
+        })
+    );
+
+    yield* abandonPrior;
+    yield* sessions.takeOver(seal, previousOwner);
+    const cov = coverageSummary(seal);
+
+    return yield* done(
+      seal,
+      `Resumed containment \`${seal.id}\` (${seal.mode}): ${seal.description}. Observed ${cov.read}/${cov.total}; ${unresolved(yield* store.loadLedger(seal.id)).length} entries unresolved. Continue where it stopped: directorate_diff for unread regions, directorate_ledger_list for entries.`
+    );
+  });
+
+  /** A new review of the requested target, or the configured default scope, sealed for `a`'s session. */
+  const startFresh = Effect.fnUntraced(function* startFresh(
+    input: SealInput,
+    a: Actor,
+    abandonPrior: Abandon
+  ) {
+    const repo =
+      input.repo ||
+      (yield* sessions.directory(a.session)) ||
+      host.location.directory;
+
+    yield* store.gc().pipe(ignore("old seal cleanup failed", "Warn"));
+    const configured = (yield* settings.load(repo)).effective;
+
+    const { mode, panel, budgetMinutes, lensesOff } = resolve(configured, {
+      budgetMinutes: input.budget_minutes,
+      mode: input.mode,
+      panel: input.panel,
+      panelModels: input.panel_models,
+    });
+
+    const seal = yield* createSeal({
+      budgetMinutes,
+      lensesOff,
+      mode,
+      owner: a,
+      panel,
+      question: input.question,
+      repo,
+      target: input.target ?? {
+        kind: REVIEW_SCOPE_TARGET[
+          input.scope ?? configured.default_scope ?? DEFAULT_REVIEW_SCOPE
+        ],
+      },
+    });
+
+    yield* abandonPrior;
+    yield* sessions.bind(a.session, seal.id);
+    yield* sessions.record(a.session, seal);
+
+    // A ship id that is not one names no ship, so the new seal is no ship's.
+    const shipID = Option.getOrUndefined(asShipId(input.ship));
+
+    if (shipID) {
+      yield* sealed(seal, shipID, input.scope);
+    }
+
+    return yield* done(seal, sealSummary(seal));
+  });
 
   return (tool: DefineTool<SealServices>) => {
     // Sealed: one review per session, started fresh, resumed from another session, or restarted by abandoning.
@@ -216,11 +433,12 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
 
         const a = actor(c);
 
-        return yield* startLock(a.session).withPermit(
+        return yield* starting.withLock(
+          a.session,
           Effect.gen(function* start() {
             // Checked before abandoning, so a bad re-check target never files the active review.
             const earlier = input.recheck
-              ? yield* store.load(input.recheck)
+              ? yield* store.load(yield* sealIdOf(input.recheck, "lookup"))
               : undefined;
 
             if (earlier) {
@@ -244,202 +462,26 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
               }
             }
 
-            // Filed only once the new review is open, so a target that can't be sealed keeps the active review; before binding, as closing it clears this session's record.
-            const abandonPrior = replaced
-              ? autoReport(replaced.id, "abandoned for a new review", a.session)
-              : Effect.void;
+            const abandonPrior = abandoning(replaced, a.session);
 
             if (earlier) {
-              const r = yield* recheckSeal({
-                budgetMinutes: input.budget_minutes,
-                ledger: yield* store.loadLedger(earlier.id),
-                owner: a,
-                prior: earlier,
-                question: input.question,
-              });
-
-              yield* abandonPrior;
-              yield* sessions.bind(a.session, r.seal.id);
-              yield* sessions.record(a.session, r.seal);
-              yield* sealed(r.seal);
-
-              return yield* done(r.seal, recheckSummary(earlier, r));
+              return yield* startRecheck(input, a, earlier, abandonPrior);
             }
 
             if (input.resume) {
-              const { resume } = input;
-
-              const { seal, previousOwner } = yield* sessions.mutate(
-                resume,
-                Takeover.make({ actor: a }),
-                (review) =>
-                  Effect.gen(function* openContainment() {
-                    const s = review.seal;
-
-                    if (s.reportedAt) {
-                      return yield* new ReviewConflict({
-                        message: `${s.id} was already reported; directorate_report with this seal shows the saved directive. To re-check it after fixes, pass recheck: "${s.id}" instead.`,
-                      });
-                    }
-
-                    // A spent budget gets more time (Window.takeover), unless the caller names a budget.
-                    const now = yield* DateTime.now;
-                    const { window } = s;
-                    const { phase } = yield* budget(window);
-
-                    const takeover =
-                      s.ownerSession === a.session || isNormal(phase)
-                        ? undefined
-                        : window.takeover(now);
-
-                    const restart =
-                      input.budget_minutes === undefined
-                        ? takeover
-                        : Window.open(now, input.budget_minutes);
-
-                    const resumed = resumedBy(s, a, pid, now);
-
-                    const updated =
-                      restart === undefined
-                        ? resumed
-                        : restarted(resumed, restart);
-
-                    return {
-                      out: { previousOwner: s.ownerSession, seal: updated },
-                      seal: updated,
-                    };
-                  })
-              );
-
-              yield* abandonPrior;
-              yield* sessions.takeOver(seal, previousOwner);
-              const cov = coverageSummary(seal);
-
-              return yield* done(
-                seal,
-                `Resumed containment \`${seal.id}\` (${seal.mode}): ${seal.description}. Observed ${cov.read}/${cov.total}; ${unresolved(yield* store.loadLedger(seal.id)).length} entries unresolved. Continue where it stopped: directorate_diff for unread regions, directorate_ledger_list for entries.`
+              return yield* takeOverReview(
+                input,
+                a,
+                input.resume,
+                abandonPrior
               );
             }
 
-            const repo =
-              input.repo ||
-              (yield* sessions.directory(a.session)) ||
-              host.location.directory;
-
-            yield* store.gc().pipe(ignore("old seal cleanup failed", "Warn"));
-            const configured = (yield* settings.load(repo)).effective;
-
-            const { mode, panel, budgetMinutes, lensesOff } = resolve(
-              configured,
-              {
-                budgetMinutes: input.budget_minutes,
-                mode: input.mode,
-                panel: input.panel,
-                panelModels: input.panel_models,
-              }
-            );
-
-            const seal = yield* createSeal({
-              budgetMinutes,
-              lensesOff,
-              mode,
-              owner: a,
-              panel,
-              question: input.question,
-              repo,
-              target: input.target ?? {
-                kind: REVIEW_SCOPE_TARGET[
-                  input.scope ??
-                    configured.default_scope ??
-                    DEFAULT_REVIEW_SCOPE
-                ],
-              },
-            });
-
-            yield* abandonPrior;
-            yield* sessions.bind(a.session, seal.id);
-            yield* sessions.record(a.session, seal);
-
-            if (input.ship) {
-              yield* sealed(seal, input.ship, input.scope);
-            }
-
-            return yield* done(seal, sealSummary(seal));
+            return yield* startFresh(input, a, abandonPrior);
           })
         );
       },
-      input: Schema.Struct({
-        abandon: optional(
-          Schema.Boolean.annotate({
-            description:
-              "Close this session's unreported review (its partial report is saved) and seal a new one.",
-          })
-        ),
-        budget_minutes: optional(BudgetMinutesSchema),
-        mode: optional(
-          ModeSchema.annotate({
-            description:
-              "Omit to use the configured default (directorate.json), else default.",
-          })
-        ),
-        panel: optional(
-          Schema.Boolean.annotate({
-            description:
-              "Panel review: several models (Directorate Seats) each review the whole change independently. true when the user asks for a panel or several models, false when they ask for one model; omit to use the configured default.",
-          })
-        ),
-        panel_models: optional(
-          Schema.Array(ModelRef).annotate({
-            description:
-              "The panel's models, only when the user names them (implies panel).",
-          })
-        ),
-        question: optional(
-          str.annotate({
-            description: "The user's focus, if any; shown in the report.",
-          })
-        ),
-        recheck: optional(
-          str.annotate({
-            description:
-              "Seal id of a reported review to re-check after fixes: seals its target as it is now, keeps what was read in unchanged regions, and carries its findings for re-decision. Takes no target, scope, mode, or panel.",
-          })
-        ),
-        repo: optional(
-          str.annotate({
-            description:
-              "Repository directory; defaults to the session's directory.",
-          })
-        ),
-        resume: optional(
-          str.annotate({
-            description:
-              "Seal id of an unreported review to take over instead of sealing a new one.",
-          })
-        ),
-        scope: optional(ReviewScopeSchema),
-        ship: optional(
-          str.annotate({
-            description:
-              "Only for an initial /directorate-ship review: copy the ship ID from the calling session. Omit on other reviews and re-checks.",
-          })
-        ),
-        target: optional(
-          Schema.Struct({
-            base: optional(str),
-            commit: optional(str),
-            head: optional(str),
-            kind: TargetKindSchema,
-            paths: optional(
-              Schema.Array(RepoScope).annotate({
-                description:
-                  "Literal file or directory restrictions, supported only by local and paths targets.",
-              })
-            ),
-            pr: optional(str),
-          })
-        ),
-      }),
+      input: SealInputSchema,
       name: "directorate_seal",
     });
 
@@ -447,13 +489,13 @@ export const reviewTools = Effect.fnUntraced(function* reviewTools(
     tool({
       description:
         "After directorate_report's freshness gate (Containment Drift): re-pin the target once and re-capture it (diff, snapshot, regions); regions whose content is unchanged keep their read receipts, and entries whose anchor or evidence changed reopen for re-verification.",
-      *execute(input, c) {
+      *execute(input, c, name) {
         return yield* sessions.mutate(
-          input.seal,
+          yield* sealIdOf(input.seal, "door"),
           ToolCall.make({
             actor: actor(c),
             callers: "owner",
-            tool: "directorate_refresh",
+            tool: name,
           }),
           (review) =>
             Effect.gen(function* execute() {

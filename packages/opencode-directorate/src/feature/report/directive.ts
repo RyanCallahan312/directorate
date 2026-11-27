@@ -4,7 +4,7 @@ import { Schema } from "effect";
 import type { DateTime } from "effect";
 
 import { isSecret } from "../../exclusions.ts";
-import { orLegacyTrue, since, Time } from "../../platform/stored.ts";
+import { Time } from "../../platform/stored.ts";
 import { coverageSummary } from "../../seal/coverage.ts";
 import type { Seal } from "../../seal/record.ts";
 import { isLocked } from "../../workflow/review/window.ts";
@@ -32,11 +32,10 @@ export const GapGateSchema = Schema.Literals([
 export type GapGate = typeof GapGateSchema.Type;
 
 const gatesFields = {
-  children: opt(orLegacyTrue(list(Schema.String), [])),
-  coverage: opt(orLegacyTrue(list(Schema.String), [])),
-  // A legacy `true` matched no fingerprint, so it decodes to one that matches none.
-  freshness: opt(orLegacyTrue(Schema.String, "")),
-  open: opt(orLegacyTrue(list(Schema.String), [])),
+  children: opt(list(Schema.String)),
+  coverage: opt(list(Schema.String)),
+  freshness: opt(Schema.String),
+  open: opt(list(Schema.String)),
   panel: opt(list(Schema.String)),
 } satisfies Record<GapGate | "freshness", Schema.Top>;
 
@@ -77,10 +76,10 @@ export class Directive extends Schema.Class<
 /** The Protocol & Directive field group of seal.json. */
 export const Protocol = Schema.Struct({
   autoReported: opt(Schema.Boolean),
-  /** What the reported Directive stated, so a ship reads it from the seal; seals reported by older versions omit it. */
+  /** What the reported Directive stated, so a ship reads it from the seal; set when the seal is reported. */
   directive: opt(Directive),
   freshnessUnverified: opt(Schema.String),
-  gates: since(Gates, {}),
+  gates: Gates,
   reportedAt: opt(Time),
   staleFiles: opt(list(Schema.String)),
 });

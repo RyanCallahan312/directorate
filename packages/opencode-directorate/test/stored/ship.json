@@ -5,32 +5,32 @@
   },
   "boot": "boot-1",
   "chain": [
-    "directorate-a",
-    "directorate-b"
+    "directorate-20260101000000-aaaaaa",
+    "directorate-20260102000000-bbbbbb"
   ],
-  "id": "ship-1",
+  "id": "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
   "inbox": {
     "continuation": true,
     "deliveredAt": 1767261800000,
-    "id": "inb_1"
+    "id": "msg_inb1"
   },
   "lastHostFailure": "provider overloaded",
   "location": "/repo",
   "needsAttachments": true,
   "notices": {
-    "inb_2": "ses_child1"
+    "msg_inb2": "ses_child1"
   },
   "origin": "msg_1",
   "pid": 4242,
   "plan": {
     "checkpoint": "msg_cp",
-    "id": "plan_1",
+    "id": "msg_plan1",
     "origin": "msg_1",
     "rendered": true,
     "text": "1. Fix E1"
   },
   "reason": "Reviewing",
-  "recovery": "rec_1",
+  "recovery": "msg_rec1",
   "request": "ship the feature",
   "reviewsAtResume": 1,
   "rounds": 2,

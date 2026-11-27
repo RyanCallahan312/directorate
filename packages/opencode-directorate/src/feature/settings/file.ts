@@ -21,6 +21,21 @@ export const isGlobalScope = Schema.is(SettingsScopeSchema.pick(["global"]));
 
 export const isProjectScope = Schema.is(SettingsScopeSchema.pick(["project"]));
 
+/**
+ * Why a settings read or write failed: the file changed since it was read, another writer holds its lock, the settings
+ * name a model or thinking level OpenCode cannot run, or the file cannot be found, read, decoded, or written.
+ */
+export const SettingsFailureSchema = Schema.Literals([
+  "changed",
+  "busy",
+  "invalid",
+  "unavailable",
+]);
+
+export const isSettingsChanged = Schema.is(
+  SettingsFailureSchema.pick(["changed"])
+);
+
 /** directorate.json. Every key is optional; an absent key falls through to the global file, then to Directorate defaults. */
 export const SettingsSchema = Schema.Struct({
   budget_minutes: Schema.optionalKey(

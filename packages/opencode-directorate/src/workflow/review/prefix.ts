@@ -18,7 +18,7 @@ export const sessionPrefix = Effect.fnUntraced(function* sessionPrefix(
 ) {
   const host = yield* Host;
   const sessions = yield* Sessions;
-  const { hook } = yield* adapter<Sessions | ToolCatalog>();
+  const { hook } = yield* adapter<ToolCatalog>();
 
   // Session prefix & lockdown: keep event.system and event.tools invariant across normal and drain so KV-cache prefixes
   // stay intact (tool results already append [DIRECTORATE // EVACUATION] at the tail); strip tools and push a lockdown

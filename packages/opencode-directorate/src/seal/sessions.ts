@@ -1,10 +1,8 @@
 // Directorate sessions: which seal each OpenCode session works on, the host operations on those sessions, and the door
 // every write to a review (its seal and its ledger) goes through.
-import { Session } from "@opencode/schema/session";
 import {
   Context,
   Effect,
-  Function,
   HashMap,
   Layer,
   Option,
@@ -22,13 +20,15 @@ import {
 import { outstandingDispatches } from "../feature/dispatch/lifecycle.ts";
 import { Ledger } from "../feature/ledger/entry.ts";
 import { ignore } from "../platform/error.ts";
-import { Host, ToolCatalog } from "../platform/platform.ts";
+import type { SessionId } from "../platform/host-id.ts";
+import { Host, keyedLock, ToolCatalog } from "../platform/platform.ts";
 import { ActiveSeal, Records } from "../records/records.ts";
 import { budget, isLocked } from "../workflow/review/window.ts";
 import { Seal } from "./record.ts";
+import { SealIdSchema, sealIdIn } from "./seal-id.ts";
+import type { SealId } from "./seal-id.ts";
 
 const SEAL_ENTRY = "directorate-seal";
-const SEAL_IN_ENTRY = /\bdirectorate-\d{14}-[0-9a-f]{6}\b/u;
 
 /** A reported seal accepts no changes. */
 class SealReported extends Schema.TaggedError<
@@ -36,7 +36,7 @@ class SealReported extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("SealReported", {
   autoReported: Schema.Boolean,
-  seal: Schema.String,
+  seal: SealIdSchema,
 }) {
   override get message() {
     return `${this.seal} was already reported${this.autoReported ? " (filed automatically)" : ""}; containment is closed and accepts no further changes. Open a new seal for new work.`;
@@ -48,7 +48,7 @@ class NotOwner extends Schema.TaggedError<
   NotOwner,
   { readonly brand: unique symbol }
 >()("NotOwner", {
-  seal: Schema.String,
+  seal: SealIdSchema,
   tool: Schema.String,
 }) {
   override get message() {
@@ -62,11 +62,11 @@ class Lockdown extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("Lockdown", {
   agent: Schema.String,
-  seal: Schema.String,
+  seal: SealIdSchema,
   tool: Schema.String,
 }) {
   override get message() {
-    return `Directorate lockdown: the budget for ${this.seal} is locked, so ${this.tool} no longer runs. ${this.agent === Liaison.id ? "Call directorate_report now." : "Hand off what you hold now."}`;
+    return `Directorate lockdown: the budget for ${this.seal} is locked, so ${this.tool} no longer runs. ${Liaison.is(this.agent) ? "Call directorate_report now." : "Hand off what you hold now."}`;
   }
 }
 
@@ -102,13 +102,19 @@ export class ToolCall extends Schema.TaggedClass<
 >()("ToolCall", {
   actor: Actor,
   callers: CallersSchema.pipe(
-    Schema.withConstructorDefault(Effect.succeed("participants" as const))
+    Schema.withConstructorDefault(
+      Effect.succeed(CallersSchema.make("participants"))
+    )
   ),
   lockdown: LockdownCheckSchema.pipe(
-    Schema.withConstructorDefault(Effect.succeed("catalog" as const))
+    Schema.withConstructorDefault(
+      Effect.succeed(LockdownCheckSchema.make("catalog"))
+    )
   ),
   reported: ReportedSchema.pipe(
-    Schema.withConstructorDefault(Effect.succeed("refused" as const))
+    Schema.withConstructorDefault(
+      Effect.succeed(ReportedSchema.make("refused"))
+    )
   ),
   tool: Schema.String,
 }) {
@@ -133,12 +139,6 @@ export class HostEvent extends Schema.TaggedClass<
   HostEvent,
   { readonly brand: unique symbol }
 >()("HostEvent", {}) {}
-
-/** The watchdog's sweep, stamping a ship on an older seal: a reported seal is left alone, silently. */
-export class Watchdog extends Schema.TaggedClass<
-  Watchdog,
-  { readonly brand: unique symbol }
->()("Watchdog", {}) {}
 
 /**
  * The watchdog waking a stalled Liaison: a reported seal is left alone, silently, and once the seal is loaded nothing
@@ -170,7 +170,6 @@ export class Takeover extends Schema.TaggedClass<
 const WriterSchema = Schema.Union([
   ToolCall,
   HostEvent,
-  Watchdog,
   RecoveryWake,
   ShipLink,
   AutoReport,
@@ -179,8 +178,12 @@ const WriterSchema = Schema.Union([
 
 type Writer = typeof WriterSchema.Type;
 
+const isToolCall = WriterSchema.isAnyOf(["ToolCall"]);
+
+const isRecoveryWake = WriterSchema.isAnyOf(["RecoveryWake"]);
+
 /** Writers that leave a reported seal alone: the door returns nothing for them then. */
-type Quiet = HostEvent | Watchdog | RecoveryWake | AutoReport;
+type Quiet = HostEvent | RecoveryWake | AutoReport;
 
 /** What a transition changed: the seal and ledger it rebuilt (absent: unchanged, nothing written). */
 const RevisedSchema = Schema.Struct({
@@ -211,20 +214,11 @@ const writes = Schema.is(AdmissionSchema.pick(["write"]));
 
 const skips = Schema.is(AdmissionSchema.pick(["skip"]));
 
-/** The seal and Liaison session a subagent call was launched for. */
-const LaunchSchema = Schema.Struct({
-  parent: Schema.String,
-  seal: Schema.String,
-});
-
 /** How a writer that leaves a reported seal alone is admitted. */
 const quietly = (seal: Seal) =>
-  Effect.succeed(seal.reportedAt ? ("skip" as const) : ("write" as const));
+  Effect.succeed(AdmissionSchema.make(seal.reportedAt ? "skip" : "write"));
 
-/** A host session id, or none for anything else (hook events are typed loosely). */
-const asSessionID = Schema.decodeUnknownOption(Session.ID);
-
-const participant = (s: Seal, sessionID: string) =>
+const participant = (s: Seal, sessionID: SessionId) =>
   s.ownerSession === sessionID ||
   s.children.some((ch) => ch.session === sessionID);
 
@@ -236,74 +230,57 @@ const make = Effect.gen(function* make() {
    * session -> seal id, for the Liaison and the Auditors/Seats/Compliance it dispatched. A cache: the Liaison's
    * `directorate-seal` instruction entry is the durable record, and a child reaches it through its parent session.
    */
-  const bindings = yield* Ref.make(HashMap.empty<string, string>());
+  const bindings = yield* Ref.make(HashMap.empty<SessionId, SealId>());
+  /** Per session: writing, comparing, and removing its `directorate-seal` entry happen one at a time. */
+  const markers = yield* keyedLock;
 
-  const boundTo = (sessionID: string) =>
+  const boundTo = (sessionID: SessionId) =>
     Ref.get(bindings).pipe(
       Effect.map((m) => Option.getOrUndefined(HashMap.get(m, sessionID)))
     );
 
-  const bind = (sessionID: string, sealId: string) =>
+  const bind = (sessionID: SessionId, sealId: SealId) =>
     Ref.update(bindings, HashMap.set(sessionID, sealId));
 
-  /**
-   * Subagent call -> the seal and Liaison session it was launched for, until the subagent tool returns. A report can
-   * close the seal before the launch links to its child session; the late child is stopped, not left running unowned.
-   */
-  const launches = yield* Ref.make(
-    HashMap.empty<string, typeof LaunchSchema.Type>()
-  );
-
-  const interrupt = (sessionID: string) =>
+  const interrupt = (sessionID: SessionId) =>
     host.session
-      .interrupt({ resume: false, sessionID: Session.ID.make(sessionID) })
+      .interrupt({ resume: false, sessionID })
       .pipe(ignore(`could not interrupt ${sessionID}`));
 
-  const info = Effect.fnUntraced(function* info(sessionID: string) {
-    const id = Option.getOrUndefined(asSessionID(sessionID));
-
-    return id
-      ? Option.getOrUndefined(
-          yield* host.session.get({ sessionID: id }).pipe(Effect.option)
-        )
-      : undefined;
+  const info = Effect.fnUntraced(function* info(sessionID: SessionId) {
+    return Option.getOrUndefined(
+      yield* host.session.get({ sessionID }).pipe(Effect.option)
+    );
   });
 
   /** The seal id in a session's `directorate-seal` instruction entry (written by `record`), if any. */
   const recordedSeal = Effect.fnUntraced(function* recordedSeal(
-    sessionID: string
+    sessionID: SessionId
   ) {
-    const id = Option.getOrUndefined(asSessionID(sessionID));
-
-    if (!id) {
-      return;
-    }
-
     const entries = yield* host.session.instructions.entry
-      .list({ sessionID: id })
+      .list({ sessionID })
       .pipe(Effect.orElseSucceed(() => []));
 
     const value = entries.find((e) => e.key === SEAL_ENTRY)?.value;
 
-    return Predicate.isString(value)
-      ? SEAL_IN_ENTRY.exec(value)?.[0]
-      : undefined;
+    return Predicate.isString(value) ? sealIdIn(value) : undefined;
   });
 
   /** The unreported seal this session belongs to, recovered from persisted records after reload. */
   const active = Effect.fn("Sessions.active")(function* active(
-    sessionID: string
+    sessionID: SessionId
   ) {
     const cached = yield* boundTo(sessionID);
 
-    const loadActive = (id: string | undefined) =>
+    const loadActive = (id: SealId | undefined) =>
       id
-        ? store.load(id).pipe(
-            Effect.orElseSucceed(Function.constUndefined),
-            Effect.map((s) =>
-              s && !s.reportedAt && participant(s, sessionID) ? s : undefined
+        ? store
+            .find(id)
+            .pipe(
+              Effect.map((s) =>
+                s && !s.reportedAt && participant(s, sessionID) ? s : undefined
+              )
             )
-          )
         : Effect.undefined;
 
     const bound = yield* loadActive(cached);
@@ -348,8 +325,8 @@ const make = Effect.gen(function* make() {
 
   /** The seal, with a participating session bound to it. */
   const sealFor = Effect.fn("Sessions.sealFor")(function* sealFor(
-    sessionID: string,
-    sealId: string
+    sessionID: SessionId,
+    sealId: SealId
   ) {
     const seal = yield* store.load(sealId);
 
@@ -361,19 +338,32 @@ const make = Effect.gen(function* make() {
   });
 
   /** Records the Liaison's review on its session: the model reads it, and `active` finds the seal by it after a reload. */
-  const record = (sessionID: string, seal: Seal) =>
-    host.session.instructions.entry
-      .put({
-        key: SEAL_ENTRY,
-        sessionID: Session.ID.make(sessionID),
-        value: `Active Directorate containment seal ${seal.id} (${seal.mode}): ${seal.description}. Pass this seal id to every directorate_* tool and assignment.`,
-      })
-      .pipe(ignore("could not set seal instructions", "Warn"));
+  const record = (sessionID: SessionId, seal: Seal) =>
+    markers.withLock(
+      sessionID,
+      host.session.instructions.entry
+        .put({
+          key: SEAL_ENTRY,
+          sessionID,
+          value: `Active Directorate containment seal ${seal.id} (${seal.mode}): ${seal.description}. Pass this seal id to every directorate_* tool and assignment.`,
+        })
+        .pipe(ignore("could not set seal instructions", "Warn"))
+    );
 
-  const forget = (sessionID: string) =>
-    host.session.instructions.entry
-      .remove({ key: SEAL_ENTRY, sessionID: Session.ID.make(sessionID) })
-      .pipe(ignore("could not clear seal instructions"));
+  /** Removes a session's entry if it still records `sealId`: a review recorded since then keeps its entry. */
+  const forget = (sessionID: SessionId, sealId: SealId) =>
+    markers.withLock(
+      sessionID,
+      Effect.gen(function* forgetLocked() {
+        if ((yield* recordedSeal(sessionID)) !== sealId) {
+          return;
+        }
+
+        yield* host.session.instructions.entry
+          .remove({ key: SEAL_ENTRY, sessionID })
+          .pipe(ignore("could not clear seal instructions"));
+      })
+    );
 
   // ---------- the door ----------
 
@@ -384,7 +374,7 @@ const make = Effect.gen(function* make() {
   ) {
     if (seal.reportedAt) {
       if (call.showsReported) {
-        return "read" as const;
+        return AdmissionSchema.make("read");
       }
 
       return yield* new SealReported({
@@ -411,7 +401,7 @@ const make = Effect.gen(function* make() {
       });
     }
 
-    return "write" as const;
+    return AdmissionSchema.make("write");
   });
 
   /**
@@ -423,17 +413,16 @@ const make = Effect.gen(function* make() {
       AutoReport: () => quietly(seal),
       HostEvent: () => quietly(seal),
       RecoveryWake: () => quietly(seal),
-      ShipLink: () => Effect.succeed("write" as const),
+      ShipLink: () => Effect.succeed(AdmissionSchema.make("write")),
       Takeover: () =>
         Effect.succeed(
-          seal.reportedAt ? ("read" as const) : ("write" as const)
+          AdmissionSchema.make(seal.reportedAt ? "read" : "write")
         ),
       ToolCall: (call) => called(seal, call),
-      Watchdog: () => quietly(seal),
     });
 
   /** Writes what a revision changed: the report with its seal, the ledger before the seal, or either alone. */
-  const persist = (sealId: string, revision: Revision<unknown>) => {
+  const persist = (sealId: SealId, revision: Revision<unknown>) => {
     if (revision.report !== undefined) {
       return store.publish(revision.seal, revision.report);
     }
@@ -450,8 +439,8 @@ const make = Effect.gen(function* make() {
   };
 
   /** The seal under its lock: a tool caller that participates in it is bound to it on the way. */
-  const loaded = (sealId: string, writer: Writer) =>
-    WriterSchema.isAnyOf(["ToolCall"])(writer)
+  const loaded = (sealId: SealId, writer: Writer) =>
+    isToolCall(writer)
       ? sealFor(writer.actor.session, sealId)
       : store.load(sealId);
 
@@ -483,17 +472,17 @@ const make = Effect.gen(function* make() {
    * nothing back from one.
    */
   function mutate<T extends Revision<unknown>, E, R>(
-    sealId: string,
+    sealId: SealId,
     writer: Quiet,
     transition: (review: Review) => Effect.Effect<T, E, R>
   ): Effect.Effect<T["out"] | undefined, DoorError | E, R>;
   function mutate<T extends Revision<unknown>, E, R>(
-    sealId: string,
+    sealId: SealId,
     writer: Writer,
     transition: (review: Review) => Effect.Effect<T, E, R>
   ): Effect.Effect<T["out"], DoorError | E, R>;
   function mutate<T extends Revision<unknown>, E, R>(
-    sealId: string,
+    sealId: SealId,
     writer: Writer,
     transition: (review: Review) => Effect.Effect<T, E, R>
   ) {
@@ -516,32 +505,24 @@ const make = Effect.gen(function* make() {
 
     return store.withLock(
       sealId,
-      WriterSchema.isAnyOf(["RecoveryWake"])(writer)
-        ? Effect.uninterruptible(body)
-        : body
+      isRecoveryWake(writer) ? Effect.uninterruptible(body) : body
     );
   }
 
-  /** Runs `read` on the seal under its lock, after the guards `call` is subject to; it writes nothing. */
+  /** Runs `body` on the seal through the door, after the guards `call` is subject to; it hands back no change, so nothing is written. */
   const read = <A, E, R>(
-    sealId: string,
+    sealId: SealId,
     call: ToolCall,
     body: (seal: Seal) => Effect.Effect<A, E, R>
   ) =>
-    store.withLock(
-      sealId,
-      Effect.gen(function* readLocked() {
-        const seal = yield* sealFor(call.actor.session, sealId);
-        yield* called(seal, call);
-
-        return yield* body(seal);
-      })
+    mutate(sealId, call, ({ seal }) =>
+      Effect.map(body(seal), (out) => ({ out }))
     );
 
   return {
     active,
     /** The session's agent, as the host falls back to when a permission request names none. */
-    agent: (sessionID: string) =>
+    agent: (sessionID: SessionId) =>
       info(sessionID).pipe(Effect.map((i) => i?.agent)),
     bind,
     /** Seal ids some session is bound to. */
@@ -562,44 +543,24 @@ const make = Effect.gen(function* make() {
         bindings,
         HashMap.filter((id) => id !== seal.id)
       );
-      yield* forget(seal.ownerSession);
+
+      if (seal.ownerSession) {
+        yield* forget(seal.ownerSession, seal.id);
+      }
     }),
-    directory: (sessionID: string) =>
+    directory: (sessionID: SessionId) =>
       info(sessionID).pipe(Effect.map((i) => i?.location.directory)),
     /** The host's record of a session, or none if it is gone or was never one. */
     info,
     interrupt,
-    /** A subagent call the Liaison of `parent` made for `seal`, open until `launchSettled`. */
-    launch: (call: string, seal: string, parent: string) =>
-      Ref.update(launches, HashMap.set(call, { parent, seal })),
-    launchSettled: (call: string) => Ref.update(launches, HashMap.remove(call)),
-    /** The seal a subagent call was launched for, if it has not settled. */
-    launchedFor: (call: string) =>
-      Ref.get(launches).pipe(
-        Effect.map((m) => Option.getOrUndefined(HashMap.get(m, call))?.seal)
-      ),
-    /** Seal ids of the unsettled subagent calls `parent` made. */
-    launchesBy: (parent: string) =>
-      Ref.get(launches).pipe(
-        Effect.map(
-          (m) =>
-            new Set(
-              [...HashMap.values(m)].flatMap((l) =>
-                l.parent === parent ? [l.seal] : []
-              )
-            )
-        )
-      ),
     mutate,
     /** Tells the seal's owner session something without starting a turn. */
     notify: (seal: Seal, text: string) =>
-      host.session
-        .synthetic({
-          resume: false,
-          sessionID: Session.ID.make(seal.ownerSession),
-          text,
-        })
-        .pipe(ignore(`could not notify the owner of ${seal.id}`, "Warn")),
+      seal.ownerSession
+        ? host.session
+            .synthetic({ resume: false, sessionID: seal.ownerSession, text })
+            .pipe(ignore(`could not notify the owner of ${seal.id}`, "Warn"))
+        : Effect.void,
     read,
     record,
     recordedSeal,
@@ -607,21 +568,27 @@ const make = Effect.gen(function* make() {
     /** A resumed seal's new owner session takes it over from the previous one. */
     takeOver: Effect.fn("Sessions.takeOver")(function* takeOver(
       seal: Seal,
-      previousOwner: string
+      previousOwner: SessionId | undefined
     ) {
+      const owner = seal.ownerSession;
+
+      if (!owner) {
+        return;
+      }
+
       yield* Ref.update(bindings, (m) =>
         HashMap.set(
-          HashMap.remove(m, previousOwner),
-          seal.ownerSession,
+          previousOwner ? HashMap.remove(m, previousOwner) : m,
+          owner,
           seal.id
         )
       );
 
-      if (previousOwner && previousOwner !== seal.ownerSession) {
-        yield* forget(previousOwner);
+      if (previousOwner && previousOwner !== owner) {
+        yield* forget(previousOwner, seal.id);
       }
 
-      yield* record(seal.ownerSession, seal);
+      yield* record(owner, seal);
     }),
   };
 });
@@ -663,7 +630,7 @@ const OpenedSchema = Schema.Struct({ ledger: Ledger, seal: Seal });
  * It needs no host session, so a review opens wherever capture runs.
  */
 export const openReview = <A, E, R>(
-  id: string,
+  id: SealId,
   attempt: Effect.Effect<typeof OpenedSchema.Type & { readonly out: A }, E, R>
 ) =>
   Effect.flatMap(Effect.service(Records), (store) =>

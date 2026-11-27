@@ -7,15 +7,18 @@ import { Schema } from "effect";
 import { DispatchFromStored } from "../feature/dispatch/lifecycle.ts";
 import type { Dispatch } from "../feature/dispatch/lifecycle.ts";
 import { Gates, Protocol } from "../feature/report/directive.ts";
-import { Count, since, sortedFields } from "../platform/stored.ts";
+import { Count, sortedFields } from "../platform/stored.ts";
 import { Custody } from "../workflow/review/custody.ts";
 import { ModeSchema } from "../workflow/review/request.ts";
+import { ShipIdSchema } from "../workflow/review/ship-link.ts";
+import type { ShipId } from "../workflow/review/ship-link.ts";
 import {
   StoredWindow,
   Window,
   windowCheck,
 } from "../workflow/review/window.ts";
 import { FileEntry, Region } from "./region.ts";
+import { SealIdSchema } from "./seal-id.ts";
 import { isCommitImage, PostImageSchema, Target } from "./target.ts";
 
 const list = Schema.Array;
@@ -27,7 +30,7 @@ const Pins = Schema.Struct({
   baseTip: opt(Schema.String),
   description: Schema.String,
   headSha: Schema.String,
-  id: Schema.String,
+  id: SealIdSchema,
   /** Lenses the settings turned off for this review. */
   lensesOff: opt(list(Schema.String)),
   mode: ModeSchema,
@@ -36,27 +39,27 @@ const Pins = Schema.Struct({
   postImage: PostImageSchema,
   question: opt(Schema.String),
   /** A re-check: the reported seal it follows, whose findings it carries and re-decides. */
-  recheckOf: opt(Schema.String),
+  recheckOf: opt(SealIdSchema),
   repo: Schema.String,
   target: Target,
 });
 
 /** What capture writes; a new review starts with none of it. */
 const Captured = Schema.Struct({
-  deleted: since(list(Schema.String), []),
-  files: since(list(FileEntry), []),
+  deleted: list(Schema.String),
+  files: list(FileEntry),
   fingerprint: Schema.String,
-  regions: since(list(Region), []),
+  regions: list(Region),
   sigs: opt(Schema.Record(Schema.String, Schema.String)),
 });
 
 /** The Containment field group of seal.json: the pins, what capture wrote, and how often it was re-contained. */
-export const Containment = Schema.Struct(
+const Containment = Schema.Struct(
   sortedFields({
     ...Pins.fields,
     ...Captured.fields,
-    gen: since(Count, 0),
-    refreshes: since(Count, 0),
+    gen: Count,
+    refreshes: Count,
   })
 );
 
@@ -70,9 +73,9 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
       ...StoredWindow.fields,
       ...Custody.fields,
       ...Protocol.fields,
-      children: since(list(DispatchFromStored), []),
+      children: list(DispatchFromStored),
       /** The ship whose loop this review belongs to. Only that ship continues it, even after the ship is stopped. */
-      ship: opt(Schema.String),
+      ship: opt(ShipIdSchema),
     })
     // Spreading StoredWindow's fields drops its check; the root re-applies it.
   ).check(windowCheck)
@@ -148,7 +151,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
   }
 
   /** The Ship link: stamped by workflow/review with the id the ship hands it. */
-  withShip(ship: string) {
+  withShip(ship: ShipId) {
     return new Seal({ ...this, ship });
   }
 }

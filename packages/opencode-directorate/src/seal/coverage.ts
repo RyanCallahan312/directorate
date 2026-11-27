@@ -3,7 +3,7 @@ import { Schema } from "effect";
 
 import { Count } from "../platform/stored.ts";
 import type { Seal } from "./record.ts";
-import { DispositionSchema, isReviewed, ReaderSchema } from "./region.ts";
+import { DispositionSchema, isReviewed } from "./region.ts";
 import type { Disposition, Reader, Region } from "./region.ts";
 
 const CHUNK_MAX_LINES = 600;
@@ -29,6 +29,9 @@ const regionSize = (r: Region) =>
     ? r.newEnd - r.newStart + 1
     : r.patchEnd - r.patchStart + 1;
 
+/** Neither read by the lead nor disposed of: the region still needs the Liaison's attention. */
+const awaitsOwner = (r: Region) => !r.disposition && !r.ownerRead;
+
 export const coverageSummary = (seal: Seal) => {
   const total = seal.regions.length;
   const skipped = seal.regions.filter((r) => isSkipped(r.disposition));
@@ -39,7 +42,7 @@ export const coverageSummary = (seal: Seal) => {
   );
 
   const read = seal.regions.filter((r) => r.isRead);
-  const unread = seal.regions.filter((r) => !r.disposition && !r.ownerRead);
+  const unread = seal.regions.filter(awaitsOwner);
 
   return {
     assessed: assessed.length,
@@ -55,19 +58,15 @@ export const coverageSummary = (seal: Seal) => {
 const RegionRequestSchema = Schema.Struct({
   file: Schema.optional(Schema.String),
   ids: Schema.optional(Schema.Array(Schema.String)),
-  owner: ReaderSchema.fields.owner,
-  reader: ReaderSchema.fields.key,
 });
 
-/**
- * The next chunk for a reader (its session, or "owner" for the lead): the requested regions, else what that reader has
- * not read, within CHUNK_MAX_LINES.
- */
+/** The next chunk for `reader`: the requested regions, else what that reader has not read, within CHUNK_MAX_LINES. */
 export const nextRegions = (
   seal: Seal,
-  opts: typeof RegionRequestSchema.Type
+  reader: Reader,
+  request: typeof RegionRequestSchema.Type
 ) => {
-  const { ids, file, owner, reader } = opts;
+  const { ids, file } = request;
   const explicit = Boolean(ids?.length || file);
 
   const pool = seal.regions.filter((r) => {
@@ -79,7 +78,7 @@ export const nextRegions = (
       return r.file === file;
     }
 
-    return owner ? !r.ownerRead && !r.disposition : !r.readBy.includes(reader);
+    return reader.owner ? awaitsOwner(r) : !r.readBy.includes(reader.key);
   });
 
   const picked: Region[] = [];

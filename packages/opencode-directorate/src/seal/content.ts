@@ -1,9 +1,10 @@
 // Directorate sealed content: a file as the seal pinned it, and the checks that tie quotes and evidence to that content.
-import { Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Effect, FileSystem, Option, Path, Result, Schema } from "effect";
+import type { PlatformError } from "effect/PlatformError";
 
 import { DEPENDENCY_DIRS, inScope, isSecret, scopeOf } from "../exclusions.ts";
 import type { Entry } from "../feature/ledger/entry.ts";
-import { Git, IO_CONCURRENCY } from "../platform/platform.ts";
+import { Git, IO_CONCURRENCY, UnreadableFile } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
 import type { Seal } from "./record.ts";
@@ -16,13 +17,24 @@ const isUrl = (ref: string) => /^https?:\/\//u.test(ref.trim());
 export const outsideWorktreeScope = (seal: Seal, path: string) =>
   !seal.pinsCommit && !inScope(path, scopeOf(seal.target.paths));
 
-/** Content withheld from every tool: a secret-like path, or on the sealed side a file renamed or copied from one. */
-export const isWithheld = (seal: Seal, p: string, side: Side = "new") =>
-  isSecret(p) ||
-  (isSealedSide(side) &&
-    seal.files.some(
-      (f) => f.path === p && f.oldPath !== undefined && isSecret(f.oldPath)
-    ));
+/** The sealed files renamed or copied from a secret-like path: their content came from there. */
+export const fromSecrets = (seal: Seal) =>
+  new Set(
+    seal.files.flatMap((f) =>
+      f.oldPath !== undefined && isSecret(f.oldPath) ? [f.path] : []
+    )
+  );
+
+/**
+ * Content withheld from every tool: a secret-like path, or on the sealed side a file renamed or copied from one. Pass
+ * `fromSecrets(seal)` as `copied` when checking many paths.
+ */
+export const isWithheld = (
+  seal: Seal,
+  p: string,
+  side: Side = "new",
+  copied: ReadonlySet<string> = fromSecrets(seal)
+) => isSecret(p) || (isSealedSide(side) && copied.has(p));
 
 /** A path's bytes on one side of the seal. Paths arrive in repository form, checked by RepoPath at the tool boundary. */
 const sealedBytes = Effect.fnUntraced(function* sealedBytes(
@@ -62,6 +74,10 @@ const sealedBytes = Effect.fnUntraced(function* sealedBytes(
   return yield* git.blob(seal.repo, seal.baseSha, p);
 });
 
+/** A file's lines: a final newline ends the last line rather than starting another. */
+export const linesOf = (content: string) =>
+  content.replace(/\n$/u, "").split("\n");
+
 export const sealedFile = (seal: Seal, path: string, side: Side = "new") =>
   sealedBytes(seal, path, side).pipe(
     Effect.map((bytes) => bytes && decodeUtf8(bytes))
@@ -76,7 +92,7 @@ export class NotInSeal extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("NotInSeal", { message: Schema.String }) {}
 
-/** A secret-like path, or one renamed or copied from one: never shown. */
+/** A secret-like path, or one renamed or copied from one: never shown. An installed file too large or binary to read. */
 export class Withheld extends Schema.TaggedError<
   Withheld,
   { readonly brand: unique symbol }
@@ -98,6 +114,35 @@ class EvidenceRejected extends Schema.TaggedError<
   }
 }
 
+/** A path missing on disk is not in the seal; any other filesystem error (permissions, I/O) leaves `path` unreadable. */
+const orNotInSeal =
+  (message: string, path: string) =>
+  <A, R>(self: Effect.Effect<A, PlatformError, R>) =>
+    self.pipe(
+      Effect.catchReason("PlatformError", "NotFound", () =>
+        Effect.fail(new NotInSeal({ message }))
+      ),
+      Effect.catchTag("PlatformError", (e) =>
+        Effect.fail(new UnreadableFile({ path, reason: e.message }))
+      )
+    );
+
+/** Whether bytes look binary, as git judges it: a NUL byte in the first 8,000. */
+export const looksBinary = (buf: Uint8Array) =>
+  buf.subarray(0, 8000).includes(0);
+
+/** The largest installed dependency file read from disk: 4 MiB. */
+const LIVE_READ_MAX_BYTES = 4 * 1024 * 1024;
+
+/** The repository form of `abs`, relative to `root`, or none when it lies outside `root`. */
+export const insideRoot = (paths: Path.Path, root: string, abs: string) => {
+  const rel = paths.relative(root, abs).split(paths.sep).join("/");
+
+  return rel === ".." || rel.startsWith("../") || paths.isAbsolute(rel)
+    ? Option.none()
+    : Option.some(rel);
+};
+
 /**
  * An installed dependency file or directory on disk, which is outside the seal: allowed only when its resolved path is in
  * the repository, in a gitignored dependency directory, and not secret-like. It is resolved before git sees it: package
@@ -118,19 +163,17 @@ export const installed = Effect.fn("Directorate.installed")(function* installed(
   const [root, abs] = yield* Effect.all(
     [fs.realPath(seal.repo), fs.realPath(paths.join(seal.repo, p))],
     { concurrency: 2 }
-  ).pipe(
-    Effect.catchTag("PlatformError", () =>
-      Effect.fail(new NotInSeal({ message: missing }))
-    )
-  );
+  ).pipe(orNotInSeal(missing, p));
 
-  const rel = paths.relative(root, abs).split(paths.sep).join("/");
+  const inside = insideRoot(paths, root, abs);
 
-  if (rel === ".." || rel.startsWith("../") || paths.isAbsolute(rel)) {
+  if (Option.isNone(inside)) {
     return yield* new NotInSeal({
       message: `${p} resolves outside the repository`,
     });
   }
+
+  const rel = inside.value;
 
   if (isSecret(rel) || !inDependencyDir(rel)) {
     return yield* new Withheld({ message: `${p} resolves to a withheld path` });
@@ -140,7 +183,7 @@ export const installed = Effect.fn("Directorate.installed")(function* installed(
     return yield* new NotInSeal({ message: `${p} not found at the seal` });
   }
 
-  return { abs, missing, rel };
+  return { abs, missing, rel, root };
 });
 
 /** Sealed content, else an installed dependency on disk (see installed). Secrets are withheld. */
@@ -176,17 +219,22 @@ export const readable = Effect.fn("Directorate.readable")(function* readable(
   }
 
   const dep = yield* installed(seal, p);
+  const onDisk = orNotInSeal(dep.missing, p);
+  const { size } = yield* fs.stat(dep.abs).pipe(onDisk);
 
-  return {
-    content: yield* fs
-      .readFileString(dep.abs)
-      .pipe(
-        Effect.catchTag("PlatformError", () =>
-          Effect.fail(new NotInSeal({ message: dep.missing }))
-        )
-      ),
-    live: true,
-  };
+  if (Number(size) > LIVE_READ_MAX_BYTES) {
+    return yield* new Withheld({
+      message: `${p} is ${Number(size)} bytes; installed files over 4 MiB are not read`,
+    });
+  }
+
+  const bytes = yield* fs.readFile(dep.abs).pipe(onDisk);
+
+  if (looksBinary(bytes)) {
+    return yield* new Withheld({ message: `${p} is a binary file` });
+  }
+
+  return { content: decodeUtf8(bytes), live: true };
 });
 
 const norm = (s: string) => s.replaceAll(/\s+/gu, " ").trim();
@@ -205,16 +253,19 @@ export const checkQuote = Effect.fn("Directorate.checkQuote")(
       });
     }
 
+    const rejected = (e: NotInSeal | Withheld) =>
+      Effect.fail(
+        new AnchorRejected({
+          message: `${e.message}. Use side:"old" for removed code.`,
+        })
+      );
+
+    // Only a file the side lacks or withholds rejects the anchor; a file that could not be read is a failure of its own.
     const { content } = yield* readable(seal, anchor.path, anchor.side).pipe(
-      Effect.mapError(
-        (e) =>
-          new AnchorRejected({
-            message: `${e.message}. Use side:"old" for removed code.`,
-          })
-      )
+      Effect.catchTags({ NotInSeal: rejected, Withheld: rejected })
     );
 
-    const lines = content.split("\n");
+    const lines = linesOf(content);
 
     if (anchor.line < 1 || anchor.line > lines.length) {
       return yield* new AnchorRejected({
@@ -314,14 +365,18 @@ const encodeLineRef = Schema.encodeEffect(LineRef);
  */
 export const checkEvidence = Effect.fn("Directorate.checkEvidence")(
   function* checkEvidence(seal: Seal, refs: readonly string[]) {
-    return yield* Effect.validate(
+    // Each ref passes or is rejected with its reason; a file that could not be read fails the whole check instead.
+    const checked = yield* Effect.forEach(
       refs,
       (raw) => {
         const ref = raw.trim();
 
         if (isUrl(ref)) {
-          return Effect.succeed(ref);
+          return Effect.succeed(Result.succeed(ref));
         }
+
+        const rejected = (e: Schema.SchemaError | NotInSeal | Withheld) =>
+          Effect.succeed(Result.fail(`${ref}: ${e.message}`));
 
         return Effect.gen(function* checkReference() {
           const r = yield* decodeLineRef(ref);
@@ -329,7 +384,7 @@ export const checkEvidence = Effect.fn("Directorate.checkEvidence")(
           const fits = (side: Side) =>
             readable(seal, r.path, side).pipe(
               Effect.flatMap(({ content }) => {
-                const n = content.split("\n").length;
+                const n = linesOf(content).length;
 
                 return r.end <= n
                   ? Effect.void
@@ -342,17 +397,39 @@ export const checkEvidence = Effect.fn("Directorate.checkEvidence")(
             );
 
           // When neither side fits, the sealed side's reason is the one to report.
+          const orBase = (error: NotInSeal | Withheld) =>
+            fits("old").pipe(
+              Effect.catchTags({
+                NotInSeal: () => Effect.fail(error),
+                Withheld: () => Effect.fail(error),
+              })
+            );
+
           yield* fits("new").pipe(
-            Effect.catch((error) =>
-              fits("old").pipe(Effect.mapError(() => error))
-            )
+            Effect.catchTags({ NotInSeal: orBase, Withheld: orBase })
           );
 
-          return yield* encodeLineRef(r).pipe(Effect.orDie);
-        }).pipe(Effect.mapError((e) => `${ref}: ${e.message}`));
+          return Result.succeed(yield* encodeLineRef(r).pipe(Effect.orDie));
+        }).pipe(
+          Effect.catchTags({
+            NotInSeal: rejected,
+            SchemaError: rejected,
+            Withheld: rejected,
+          })
+        );
       },
       { concurrency: IO_CONCURRENCY }
-    ).pipe(Effect.mapError((bad) => new EvidenceRejected({ problems: bad })));
+    );
+
+    const problems = checked.flatMap((r) =>
+      Result.isFailure(r) ? [r.failure] : []
+    );
+
+    if (problems.length) {
+      return yield* new EvidenceRejected({ problems });
+    }
+
+    return checked.flatMap((r) => (Result.isSuccess(r) ? [r.success] : []));
   }
 );
 

@@ -49,9 +49,9 @@ const EntryModeSchema = Schema.Literals([
   "gitlink",
 ]);
 
-export type EntryMode = typeof EntryModeSchema.Type;
-
 const isGitlink = Schema.is(EntryModeSchema.pick(["gitlink"]));
+
+const isLinkMode = Schema.is(EntryModeSchema.pick(["link"]));
 
 /** The git file mode of each kind of entry; an absent path diffs as a plain file. */
 const GIT_MODES = Schema.Record(EntryModeSchema, Schema.String).make({
@@ -61,6 +61,10 @@ const GIT_MODES = Schema.Record(EntryModeSchema, Schema.String).make({
   gitlink: "160000",
   link: "120000",
 });
+
+/** How a link's bytes read in a diff: its target, between this prefix and a final newline. */
+const LINK_PREFIX = encodeUtf8("symlink -> ");
+const LINK_END = encodeUtf8("\n");
 
 /** A working-tree path as captured: its bytes (a symlink as its link text, a submodule as its commit) and mode, or absent. */
 export class LiveEntry extends Schema.Class<
@@ -79,7 +83,25 @@ export class LiveEntry extends Schema.Class<
   get isSubmodule() {
     return isGitlink(this.mode);
   }
+
+  /** A symbolic link, recorded as its link text. */
+  get isLink() {
+    return isLinkMode(this.mode);
+  }
+
+  /** A link's bare target, as git stores a symlink's blob; undefined for any other entry. */
+  get linkTarget() {
+    return this.isLink && this.buf !== undefined
+      ? this.buf.subarray(LINK_PREFIX.byteLength, -LINK_END.byteLength)
+      : undefined;
+  }
 }
+
+const linkEntry = (target: Uint8Array) =>
+  LiveEntry.make({
+    buf: Bytes.concat([LINK_PREFIX, target, LINK_END]),
+    mode: "link",
+  });
 
 const absent = LiveEntry.make({ mode: "absent" });
 
@@ -168,12 +190,7 @@ const make = Effect.gen(function* make() {
       if (isSymbolicLink(st?.type)) {
         const link = yield* orMissing(fs.readLink(abs));
 
-        return link === undefined
-          ? absent
-          : LiveEntry.make({
-              buf: encodeUtf8(`symlink -> ${link}\n`),
-              mode: "link",
-            });
+        return link === undefined ? absent : linkEntry(encodeUtf8(link));
       }
 
       if (!isFile(st?.type)) {
@@ -190,18 +207,15 @@ const make = Effect.gen(function* make() {
       const indexed =
         paths.sep === "\\" ? yield* git.indexMode(repo, path) : undefined;
 
-      if (indexed === "120000") {
-        return LiveEntry.make({
-          buf: Bytes.concat([encodeUtf8("symlink -> "), buf, encodeUtf8("\n")]),
-          mode: "link",
-        });
+      if (indexed === GIT_MODES.link) {
+        return linkEntry(buf);
       }
 
       // Each of the last three octal digits is odd when its execute bit is set.
       const executable =
         indexed === undefined
           ? /[1357]/u.test(st.mode.toString(8).slice(-3))
-          : indexed === "100755";
+          : indexed === GIT_MODES.exec;
 
       return LiveEntry.make({ buf, mode: executable ? "exec" : "file" });
     },
@@ -226,9 +240,28 @@ const make = Effect.gen(function* make() {
     );
 
   /**
-   * Signature of every changed path in the post-image; a secret-like one by name and status only, and one gone from the
-   * post-image as deleted whatever working copy remains.
+   * A changed path's signature in the post-image, with its entry only when its bytes were read: deleted when `gone` from the
+   * post-image whatever working copy remains, a secret-like one by presence only, and any other by its mode and bytes.
    */
+  const signature = Effect.fnUntraced(function* signature(
+    repo: string,
+    path: string,
+    gone: ReadonlySet<string>
+  ) {
+    if (gone.has(path)) {
+      return { sig: "deleted" };
+    }
+
+    if (isSecret(path)) {
+      return { sig: yield* signWithheld(repo, path) };
+    }
+
+    const read = yield* entry(repo, path);
+
+    return { entry: read, sig: yield* sign(read) };
+  });
+
+  /** Signature of every changed path in the post-image (see signature). */
   const sigs = Effect.fn("Worktree.sigs")(function* sigs(
     repo: string,
     base: string,
@@ -236,19 +269,12 @@ const make = Effect.gen(function* make() {
   ) {
     const { gone, names } = yield* git.changes(repo, base, scope);
 
-    const signature = (f: string) => {
-      if (gone.has(f)) {
-        return Effect.succeed("deleted");
-      }
-
-      return isSecret(f)
-        ? signWithheld(repo, f)
-        : entry(repo, f).pipe(Effect.flatMap(sign));
-    };
-
     const signed = yield* Effect.forEach(
       names,
-      (f) => signature(f).pipe(Effect.map((s) => [f, s] as const)),
+      (f) =>
+        signature(repo, f, gone).pipe(
+          Effect.map(({ sig }) => [f, sig] as const)
+        ),
       { concurrency: IO_CONCURRENCY }
     );
 
@@ -275,8 +301,7 @@ const make = Effect.gen(function* make() {
       ),
     fingerprintOf,
     present,
-    sign,
-    signWithheld,
+    signature,
     sigs,
   };
 });

@@ -4,8 +4,10 @@ import { DateTime, Schema } from "effect";
 
 import { Liaison } from "../../feature/agents/agent.ts";
 import type { Actor } from "../../feature/agents/agent.ts";
+import { MessageIdSchema, SessionIdSchema } from "../../platform/host-id.ts";
 import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
+import { SealIdSchema } from "../../seal/seal-id.ts";
 
 const list = Schema.Array;
 const opt = Schema.optional;
@@ -14,7 +16,7 @@ const opt = Schema.optional;
 export class AbandonRefused extends Schema.TaggedError<
   AbandonRefused,
   { readonly brand: unique symbol }
->()("AbandonRefused", { seal: Schema.String }) {
+>()("AbandonRefused", { seal: SealIdSchema }) {
   override get message() {
     return `Only the owner of ${this.seal} can abandon it.`;
   }
@@ -27,8 +29,8 @@ export class Recovery extends Schema.Class<
 >("directorate/Recovery")({
   admitted: opt(Schema.Boolean),
   admittedAt: opt(Time),
-  id: Schema.String,
-  ownerSession: Schema.String,
+  id: MessageIdSchema,
+  ownerSession: SessionIdSchema,
 }) {
   /** The same wake, admitted by the host at `at`. */
   admittedAs(at: DateTime.Utc) {
@@ -54,11 +56,12 @@ export const Custody = Schema.Struct({
   /** The directory of the OpenCode instance that sealed it, whose watchdog reports it if the Liaison does not. */
   host: opt(Schema.String),
   owner: Schema.String,
-  ownerSession: Schema.String,
+  /** The session that holds the review; none for a review sealed outside a session. */
+  ownerSession: opt(SessionIdSchema),
   /** The server process that sealed, took over, or recovered the review: while it lives, no other process recovers it. */
-  pid: opt(Schema.Finite),
+  pid: Schema.Finite,
   /** Liaison sessions that owned this seal before a takeover, for full exports. */
-  previousOwnerSessions: opt(list(Schema.String)),
+  previousOwnerSessions: opt(list(SessionIdSchema)),
   /** The last recovery wake. Until admitted, the same ID is submitted again. */
   recovery: opt(Recovery),
   /** History before an explicit resume or takeover must not halt the resumed review. */
@@ -74,7 +77,7 @@ export const started = (
   Custody.make({
     host,
     owner: owner?.agent ?? Liaison.id,
-    ownerSession: owner?.session ?? "",
+    ownerSession: owner?.session,
     pid,
   });
 

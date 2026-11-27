@@ -2,7 +2,7 @@
 // tells whether the sealed code moved since.
 import { Bytes, Effect, FileSystem, Path, Predicate, Schema } from "effect";
 
-import { exclusionReason, isSecret, scopeOf } from "../exclusions.ts";
+import { exclusionReason, scopeOf } from "../exclusions.ts";
 import {
   Git,
   IO_CONCURRENCY,
@@ -15,12 +15,13 @@ import {
 import type { LiveEntry } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { Records } from "../records/records.ts";
+import { linesOf, looksBinary } from "./content.ts";
 import { assemble, buildRegions, RawDiff, shown } from "./diff.ts";
 import type { Piece } from "./diff.ts";
 import { endsFingerprint } from "./ends.ts";
 import type { Current } from "./ends.ts";
 import type { Seal } from "./record.ts";
-import { FileEntry, Region } from "./region.ts";
+import { Changes, FileEntry, Region } from "./region.ts";
 
 const FILE_REGION_LINES = 300;
 
@@ -39,11 +40,11 @@ const RAW_DIFF = [
 
 const decodeRawDiff = Schema.decodeEffect(RawDiff);
 
-/** An edit landed while capturing; the capture is retried. */
-class CaptureDrift extends Schema.TaggedError<
+/** An edit landed while capturing, or so it seemed for the reason given; the capture is retried. */
+export class CaptureDrift extends Schema.TaggedError<
   CaptureDrift,
   { readonly brand: unique symbol }
->()("CaptureDrift", {}) {}
+>()("CaptureDrift", { reason: Schema.String }) {}
 
 const isCaptureDrift = Schema.is(CaptureDrift);
 
@@ -53,7 +54,7 @@ class CaptureFailed extends Schema.TaggedError<
   { readonly brand: unique symbol }
 >()("CaptureFailed", { message: Schema.String }) {}
 
-/** Retries a capture twice when files change mid-capture, then fails with `message`. */
+/** Retries a capture twice when files change mid-capture, then fails with `message` and the last attempt's reason. */
 export const settled =
   (message: string) =>
   <A, E, R>(self: Effect.Effect<A, E | CaptureDrift, R>) =>
@@ -62,12 +63,14 @@ export const settled =
         times: 2,
         while: isCaptureDrift,
       }),
-      Effect.catchTag("CaptureDrift", () =>
-        Effect.fail(new CaptureFailed({ message }))
+      Effect.catchIf(isCaptureDrift, (drift) =>
+        Effect.fail(
+          new CaptureFailed({
+            message: `${message} Last attempt: ${drift.reason}.`,
+          })
+        )
       )
     );
-
-const binary = (buf: Uint8Array) => buf.subarray(0, 8000).includes(0);
 
 const rewriteDiffHeader = (line: string, from: string, to: string): string => {
   if (line.startsWith("--- ")) {
@@ -102,20 +105,19 @@ const diffModeLines = (
     : [`old mode ${oldMode}`, `new mode ${newMode}`];
 };
 
-/** A path's bytes and git mode on one side of a change. */
+/** A path's bytes and git mode on one side of a change; a captured symlink also keeps its bare link target. */
 class Version extends Schema.Class<Version, { readonly brand: unique symbol }>(
   "directorate/Version"
-)({ buf: Schema.Uint8Array, mode: Schema.String }) {
-  /** Whether `now` matches this base version; a base symlink's blob is its bare link text. */
+)({
+  buf: Schema.Uint8Array,
+  linkTarget: Schema.optional(Schema.Uint8Array),
+  mode: Schema.String,
+}) {
+  /** Whether `now` matches this base version; a base symlink's blob is its bare link target. */
   matches(now: Version) {
     return (
       this.mode === now.mode &&
-      Bytes.Equivalence(
-        this.buf,
-        this.mode === "120000"
-          ? now.buf.subarray("symlink -> ".length, -1)
-          : now.buf
-      )
+      Bytes.Equivalence(this.buf, now.linkTarget ?? now.buf)
     );
   }
 }
@@ -246,7 +248,7 @@ const versionPatch = Effect.fn("Directorate.versionPatch")(
 const liveVersion = (e: LiveEntry) =>
   e.buf === undefined
     ? undefined
-    : Version.make({ buf: e.buf, mode: e.gitMode });
+    : Version.make({ buf: e.buf, linkTarget: e.linkTarget, mode: e.gitMode });
 
 /** An untracked file as an addition or a net diff when it replaces a staged deletion. */
 const untrackedPiece = Effect.fn("Directorate.untrackedPiece")(
@@ -388,7 +390,7 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
           return deleted;
         }
 
-        if (live.isSubmodule || binary(buf)) {
+        if (live.isSubmodule || looksBinary(buf)) {
           return {
             file: FileEntry.make({
               added: 0,
@@ -402,8 +404,8 @@ const capturePaths = Effect.fn("Directorate.capturePaths")(
         }
 
         const text = decodeUtf8(buf);
-        const lines = text.split("\n");
-        const n = text.replace(/\n$/u, "").split("\n").length;
+        const lines = linesOf(text);
+        const n = lines.length;
 
         // Numbered once every file's chunks are in, in path order.
         const regions = yield* Effect.forEach(
@@ -477,7 +479,9 @@ const captureDiff = Effect.fn("Directorate.captureDiff")(function* captureDiff(
     // A worktree can change between git's two passes; a commit pair cannot, so a mismatch there is git's, and final.
     Effect.mapError((e) =>
       worktree
-        ? new CaptureDrift()
+        ? new CaptureDrift({
+            reason: `git listed different files than it diffed: ${e.message}`,
+          })
         : new CaptureFailed({
             message: `git listed different files than it diffed for ${seal.description}: ${e.message}`,
           })
@@ -575,26 +579,17 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
     ? yield* (yield* Git).changes(top, seal.baseSha, scope)
     : { gone: new Set<string>(), hidden: [], names: [] };
 
-  // Sign every changed path, snapshotting those not withheld by name; a secret-like path is signed by presence, never read.
-  // A path gone from the post-image is deleted, as the diff has it, whatever working copy remains.
+  // Sign every changed path (see Worktree.signature), snapshotting the bytes read for those not excluded from the diff.
   const signed = yield* Effect.forEach(
     changed,
     Effect.fnUntraced(function* signed(f) {
-      if (gone.has(f)) {
-        return [f, "deleted"] as const;
+      const { entry, sig } = yield* wt.signature(top, f, gone);
+
+      if (entry?.buf !== undefined && !exclusionReason(f)) {
+        yield* store.writeSnapshot(seal, f, entry.buf);
       }
 
-      if (isSecret(f)) {
-        return [f, yield* wt.signWithheld(top, f)] as const;
-      }
-
-      const e = yield* wt.entry(top, f);
-
-      if (e.buf !== undefined && !exclusionReason(f)) {
-        yield* store.writeSnapshot(seal, f, e.buf);
-      }
-
-      return [f, yield* wt.sign(e)] as const;
+      return [f, sig] as const;
     }),
     { concurrency: IO_CONCURRENCY }
   );
@@ -634,7 +629,9 @@ export const capture = Effect.fn("Directorate.capture")(function* capture(
   });
 
   if (sigs && (yield* wt.fingerprintOf(seal.baseSha, sigs)) !== fingerprint) {
-    return yield* new CaptureDrift();
+    return yield* new CaptureDrift({
+      reason: "files changed between signing and the closing fingerprint",
+    });
   }
 
   return seal.withContainment({ deleted, files, fingerprint, regions, sigs });
@@ -648,25 +645,32 @@ const changedSignatures = (
     .filter((path) => before[path] !== after[path])
     .toSorted();
 
-/** Files that differ between the seal and `cur`; for commit pairs, "(base moved)" when the base did. */
-export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
-  function* changedSinceSeal(
+/** What differs between the seal and `cur`: the files, and for commit pairs whether the base moved. */
+export const changesSinceSeal = Effect.fn("Directorate.changesSinceSeal")(
+  function* changesSinceSeal(
     seal: Seal,
     cur: Pick<Current, "baseSha" | "headSha" | "unfetched">
   ) {
     if (cur.unfetched) {
-      return [`(${cur.unfetched})`];
+      return Changes.make({
+        baseMoved: false,
+        files: [],
+        unfetched: cur.unfetched,
+      });
     }
 
     if (!seal.pinsCommit) {
-      return changedSignatures(
-        seal.sigs ?? {},
-        yield* (yield* Worktree).sigs(
-          seal.repo,
-          seal.baseSha,
-          scopeOf(seal.target.paths)
-        )
-      );
+      return Changes.make({
+        baseMoved: false,
+        files: changedSignatures(
+          seal.sigs ?? {},
+          yield* (yield* Worktree).sigs(
+            seal.repo,
+            seal.baseSha,
+            scopeOf(seal.target.paths)
+          )
+        ),
+      });
     }
 
     const git = yield* Git;
@@ -679,18 +683,20 @@ export const changedSinceSeal = Effect.fn("Directorate.changedSinceSeal")(
       { concurrency: 2 }
     );
 
-    const files = new Set([...heads, ...bases]);
-
-    if (cur.baseSha !== seal.baseSha) {
-      files.add("(base moved)");
-    }
-
-    return [...files].toSorted();
+    return Changes.make({
+      baseMoved: cur.baseSha !== seal.baseSha,
+      files: [...new Set([...heads, ...bases])].toSorted(),
+    });
   }
 );
 
-/** Files that differ between a seal and a later capture of the same target. */
+/** What differs between a seal and a later capture of the same target. */
 export const changedBetween = (seal: Seal, captured: Seal) =>
   seal.pinsCommit
-    ? changedSinceSeal(seal, captured)
-    : Effect.succeed(changedSignatures(seal.sigs ?? {}, captured.sigs ?? {}));
+    ? changesSinceSeal(seal, captured)
+    : Effect.succeed(
+        Changes.make({
+          baseMoved: false,
+          files: changedSignatures(seal.sigs ?? {}, captured.sigs ?? {}),
+        })
+      );

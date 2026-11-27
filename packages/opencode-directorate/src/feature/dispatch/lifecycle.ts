@@ -3,16 +3,22 @@
 // running again. Each transition returns the new seal, or undefined if nothing changed, so callers write only changes.
 import { DateTime, Match, Schema, SchemaGetter } from "effect";
 
+import {
+  CallIdSchema,
+  MessageIdSchema,
+  SessionIdSchema,
+} from "../../platform/host-id.ts";
+import type { CallId, MessageId, SessionId } from "../../platform/host-id.ts";
 import { Time } from "../../platform/stored.ts";
 import type { Seal } from "../../seal/record.ts";
 import {
   Auditor,
-  dispatchableNamed,
   Compliance,
+  DispatchableIdSchema,
   Seat as SeatAgent,
 } from "../agents/agent.ts";
 import type { Actor } from "../agents/agent.ts";
-import { isAnswered } from "../ledger/entry.ts";
+import { entryIdsIn, isAnswered } from "../ledger/entry.ts";
 import type { Ledger } from "../ledger/entry.ts";
 
 const opt = Schema.optional;
@@ -20,30 +26,27 @@ const opt = Schema.optional;
 /** A follow-up's prompt as it moves through the child session's inbox: queued as `inbox`, then delivered. */
 const FollowUpSchema = Schema.Struct({
   delivered: opt(Schema.Boolean),
-  inbox: opt(Schema.String),
+  inbox: opt(MessageIdSchema),
 });
 
 /**
- * What every run carries in every state. Seals hold whatever any version wrote, so a run keeps each field it was stored
- * with in any state: a run that never linked its session can still complete, and a follow-up keeps its inbox record.
+ * What every run carries in every state, so a stored run round-trips whatever state it is in: a run that never linked its
+ * session can still complete, and a follow-up keeps its inbox record.
  */
 const dispatchFields = {
-  /** The agent it runs, as stored: an Auditor, Seat, or Compliance id for every launch today (see `dispatchedAgent`). */
-  agent: Schema.String,
-  call: Schema.String,
+  /** The agent it runs: an Auditor, Seat, or Compliance. */
+  agent: DispatchableIdSchema,
+  call: CallIdSchema,
   /** The human-readable part of the OpenCode child session's title. */
   description: opt(Schema.String),
-  /**
-   * When it ended. Every transition to completed or failed sets it, and none to launching or running keeps it, but seals
-   * may hold either combination; it is carried as stored.
-   */
+  /** When it ended: every transition to completed or failed sets it, and none to launching or running keeps it. */
   endedAt: opt(Schema.DateTimeUtc),
   /** A follow-up to an existing child session: a new run of it, or joined to its running one. */
   followUp: opt(FollowUpSchema),
   /** The model the launch named, which for a Directorate Seat is its seat. */
   model: opt(Schema.String),
   prompt: Schema.String,
-  session: opt(Schema.String),
+  session: opt(SessionIdSchema),
   startedAt: Schema.DateTimeUtc,
 };
 
@@ -123,18 +126,13 @@ const settlesDelivered = Schema.is(
 /** An end read from the host's record after a reload. */
 const isRecordEnd = Schema.is(EndMarkerSchema.pick(["record"]));
 
-/** A dispatch in seal.json's children: its state is a `status` field, not a tag. */
+/**
+ * A dispatch in seal.json's children: every run field, with its times stored as Time, and its state as a `status` field,
+ * not a tag. The overrides keep each field's place in the stored key order.
+ */
 const StoredDispatch = Schema.Struct({
-  agent: Schema.String,
-  call: Schema.String,
-  /** The human-readable part of the OpenCode child session's title. */
-  description: opt(Schema.String),
+  ...dispatchFields,
   endedAt: opt(Time),
-  followUp: opt(FollowUpSchema),
-  /** The model the launch named, which for a Directorate Seat is its seat. */
-  model: opt(Schema.String),
-  prompt: Schema.String,
-  session: opt(Schema.String),
   startedAt: Time,
   status: DispatchStatusSchema,
 });
@@ -173,7 +171,7 @@ const fieldsOf = (d: Dispatch) => DispatchFieldsSchema.make(d);
 const rebuilt = (d: Dispatch, change: Partial<DispatchFields>) =>
   new (stateOf(d))({ ...fieldsOf(d), ...change });
 
-/** A dispatch as seal.json stores it, every field it was stored with kept. */
+/** A dispatch as seal.json stores it. */
 export const DispatchFromStored = StoredDispatch.pipe(
   Schema.decodeTo(Schema.toType(DispatchSchema), {
     decode: SchemaGetter.transform(
@@ -186,10 +184,6 @@ export const DispatchFromStored = StoredDispatch.pipe(
     })),
   })
 );
-
-/** The agent a dispatch runs, or undefined for a name no Directorate version dispatches today. */
-const dispatchedAgent = (d: Pick<Dispatch, "agent">) =>
-  dispatchableNamed(d.agent);
 
 export const outstandingDispatches = (seal: Seal) =>
   seal.children.filter(isOutstanding);
@@ -211,7 +205,7 @@ export const seatName = (model: string) => model.slice(model.indexOf("/") + 1);
 
 /** A dispatch as readers see it: a Seat by its model, anyone else by role. */
 export const dispatchName = (c: Pick<Dispatch, "agent" | "model">) =>
-  dispatchedAgent(c) === SeatAgent && c.model ? seatName(c.model) : c.agent;
+  SeatAgent.is(c.agent) && c.model ? seatName(c.model) : c.agent;
 
 /** Whoever raised or decided something, named as `dispatchName` names them. */
 export const actorName = (seal: Seal, a: Actor) => {
@@ -221,7 +215,7 @@ export const actorName = (seal: Seal, a: Actor) => {
 };
 
 /** A panel seat's status as the report shows it: a dispatch's, partial, or not launched. */
-export const SeatStatusSchema = Schema.Literals([
+const SeatStatusSchema = Schema.Literals([
   ...DispatchStatusSchema.literals,
   "partial",
   "not launched",
@@ -231,6 +225,9 @@ type SeatStatus = typeof SeatStatusSchema.Type;
 
 /** A seat whose completed run did not read every region. */
 export const isPartialSeat = Schema.is(SeatStatusSchema.pick(["partial"]));
+
+/** A seat one of whose finished runs read every region. */
+export const isCompletedSeat = Schema.is(SeatStatusSchema.pick(["completed"]));
 
 /** A seat's status as the report shows it: completed, partial (a run completed but did not read everything), or its latest run's. */
 const seatStatus = (
@@ -256,7 +253,7 @@ const seatStatus = (
 export const panelSeats = (seal: Seal) =>
   (seal.panel ?? []).map((model) => {
     const runs = seal.children.filter(
-      (c) => dispatchedAgent(c) === SeatAgent && c.model === model
+      (c) => SeatAgent.is(c.agent) && c.model === model
     );
 
     const completed = runs.filter(isCompleted);
@@ -301,11 +298,11 @@ const dispatchKey = (c: Dispatch) =>
 
 /** A Compliance run is answered once every entry on its entries line is decided, whichever run decided it. */
 const decided = (c: Dispatch, ledger: Ledger) => {
-  if (dispatchedAgent(c) !== Compliance || !/^entries:/imu.test(c.prompt)) {
+  if (!Compliance.is(c.agent) || !/^entries:/imu.test(c.prompt)) {
     return false;
   }
 
-  const ids = dispatchQuestion(c).match(/\bF\d+\b/gu) ?? [];
+  const ids = entryIdsIn(dispatchQuestion(c));
 
   return (
     ids.length > 0 &&
@@ -319,7 +316,7 @@ export const questionText = (text: string) =>
 
 /** An Auditor run whose question the Liaison recorded as answered itself. */
 const answered = (c: Dispatch, ledger: Ledger) =>
-  dispatchedAgent(c) === Auditor &&
+  Auditor.is(c.agent) &&
   ledger.notes.some(
     (n) => isAnswered(n.kind) && questionText(n.text) === dispatchQuestion(c)
   );
@@ -348,13 +345,20 @@ export const failedDispatches = (seal: Seal, ledger: Ledger) => {
     .toReversed();
 };
 
+/** The questions the Auditor runs among `runs` asked. */
+const auditorQuestions = (runs: readonly Dispatch[]) =>
+  runs.flatMap((c) => (Auditor.is(c.agent) ? [dispatchQuestion(c)] : []));
+
+/** The questions of failed Auditor runs no later run completed and the Liaison has not answered. */
+export const failedAuditorQuestions = (seal: Seal, ledger: Ledger) =>
+  auditorQuestions(failedDispatches(seal, ledger));
+
 /** Auditor questions a review left unanswered: still running when it closed, or failed and never answered. */
 export const unansweredQuestions = (seal: Seal, ledger: Ledger) => [
-  ...new Set(
-    [...outstandingDispatches(seal), ...failedDispatches(seal, ledger)].flatMap(
-      (c) => (dispatchedAgent(c) === Auditor ? [dispatchQuestion(c)] : [])
-    )
-  ),
+  ...new Set([
+    ...auditorQuestions(outstandingDispatches(seal)),
+    ...failedAuditorQuestions(seal, ledger),
+  ]),
 ];
 
 export const update = (seal: Seal, step: (c: Dispatch) => Dispatch) => {
@@ -380,7 +384,7 @@ export const launchTitle = (
 /** Claim only the launch whose correlation suffix was sent to OpenCode. */
 export const claimed = (
   seal: Seal,
-  session: string,
+  session: SessionId,
   agent: string,
   title: string | undefined
 ) => {
@@ -405,17 +409,22 @@ export const claimed = (
 };
 
 /** A session's latest run; follow-ups can register before older events are consumed. */
-const latest = (seal: Seal, session: string) =>
+const latest = (seal: Seal, session: SessionId) =>
   seal.children.findLast((c) => c.session === session);
+
+const FOLLOW_UP_MARKER = "\n\n[Directorate follow-up: ";
 
 /** OpenCode's subagent tool forwards the prompt text, but not the parent tool call ID. */
 export const followUpPrompt = (c: Pick<Dispatch, "call" | "prompt">) =>
-  `${c.prompt}\n\n[Directorate follow-up: ${c.call}]`;
+  `${c.prompt}${FOLLOW_UP_MARKER}${c.call}]`;
+
+/** A cheap prefilter: only text carrying the follow-up marker can match a run in `enqueued`. */
+export const mayBeFollowUp = (text: string) => text.includes(FOLLOW_UP_MARKER);
 
 export const enqueued = (
   seal: Seal,
-  session: string,
-  inbox: string,
+  session: SessionId,
+  inbox: MessageId,
   text: string
 ) =>
   update(seal, (c) =>
@@ -429,8 +438,8 @@ export const enqueued = (
 
 export const inboxSettled = (
   seal: Seal,
-  session: string,
-  inbox: string,
+  session: SessionId,
+  inbox: MessageId,
   delivered: boolean,
   at: DateTime.Utc
 ) =>
@@ -455,7 +464,7 @@ export const inboxSettled = (
  */
 export const followUpRecovered = (
   c: Dispatch,
-  inbox: string,
+  inbox: MessageId,
   ended?: RunEnd
 ) => {
   const fields = { ...fieldsOf(c), followUp: { delivered: true, inbox } };
@@ -468,7 +477,7 @@ export const followUpRecovered = (
 /** An execution can drain several delivered prompts, but never settles one still in the inbox. */
 export const finished = (
   seal: Seal,
-  session: string,
+  session: SessionId,
   ending: typeof Completed | typeof Failed,
   endedAt: DateTime.Utc,
   marker: EndMarker
@@ -499,7 +508,7 @@ export const finished = (
 };
 
 /** A completed run doing more work without a new launch is running again. */
-export const resumed = (seal: Seal, session: string) => {
+export const resumed = (seal: Seal, session: SessionId) => {
   const run = latest(seal, session);
 
   return update(seal, (c) =>
@@ -515,8 +524,8 @@ export const resumed = (seal: Seal, session: string) => {
  */
 export const returned = (
   seal: Seal,
-  call: string,
-  session: string | undefined,
+  call: CallId,
+  session: SessionId | undefined,
   outcome: typeof Running | typeof Completed | typeof Failed,
   endedAt: DateTime.Utc
 ) =>

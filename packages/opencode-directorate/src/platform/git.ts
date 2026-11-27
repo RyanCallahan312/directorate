@@ -1,7 +1,15 @@
 // Directorate git and GitHub CLI access. Plugins get no process service from OpenCode, and ctx.vcs is bound to the plugin's own
 // location: it cannot diff a pinned commit pair, detect renames, or read blobs, grep, log, or blame, and it empties
 // patches past its size budget. Every call goes through the bounded command adapter.
-import { Context, Effect, Layer, Predicate, Result, Schema } from "effect";
+import {
+  Context,
+  Effect,
+  Layer,
+  Option,
+  Predicate,
+  Result,
+  Schema,
+} from "effect";
 import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 
 import { command } from "./command.ts";
@@ -136,6 +144,13 @@ const make = Effect.gen(function* make() {
     return decodeUtf8(output);
   });
 
+  /** `run` with extra environment for git, succeeding only on exit 0. */
+  const runWithEnv = (
+    repo: string,
+    args: readonly string[],
+    env: Record<string, string>
+  ) => run(repo, args, [0], env);
+
   /** A file's bytes at a revision, or undefined when the revision has no such file (git exits 128). Anything else fails. */
   const blob = (repo: string, rev: string, path: string) =>
     exec("git", ["-C", repo, "cat-file", "blob", `${rev}:${path}`], {
@@ -171,7 +186,7 @@ const make = Effect.gen(function* make() {
 
   const isIgnored = (repo: string, p: string) =>
     // check-ignore checks a pathname and rejects Git's literal pathspec flag.
-    run(repo, ["check-ignore", "-q", "--", p], [0], {
+    runWithEnv(repo, ["check-ignore", "-q", "--", p], {
       GIT_LITERAL_PATHSPECS: "0",
     }).pipe(
       Effect.as(true),
@@ -191,6 +206,27 @@ const make = Effect.gen(function* make() {
     );
 
   /**
+   * The top of the work tree holding `dir`, or none when git says `dir` is not in a repository (exit 128, read in the C
+   * locale). Anything else, such as a timeout, a missing git, or an unreadable directory, fails as `root` does.
+   */
+  const rootOption = (dir: string) =>
+    exec("git", ["-C", dir, "rev-parse", "--show-toplevel"], {
+      env: GIT_ENV({ LC_ALL: "C" }),
+      timeout: 120_000,
+    }).pipe(
+      Effect.map((out) => Option.some(decodeUtf8(out).trim())),
+      Effect.catchIf(
+        (error) =>
+          error.code === 128 && error.message.includes("not a git repository"),
+        () => Effect.succeed(Option.none<string>())
+      ),
+      Effect.mapError(
+        (cause) =>
+          new GitFailed({ message: `git rev-parse failed: ${cause.message}` })
+      )
+    );
+
+  /**
    * The empty tree in this repository's object format (its id differs between SHA-1 and SHA-256 repositories). It is the
    * base of a root commit, and stands in for HEAD before the first commit.
    */
@@ -200,7 +236,7 @@ const make = Effect.gen(function* make() {
     );
 
   const worktrees = (repo: string) =>
-    run(repo, ["worktree", "list", "--porcelain", "-z"], [0], {
+    runWithEnv(repo, ["worktree", "list", "--porcelain", "-z"], {
       LC_ALL: "C",
     }).pipe(
       Effect.map((out) => out.split("\0")),
@@ -346,19 +382,22 @@ const make = Effect.gen(function* make() {
     ]).pipe(Effect.map((out) => out.split("\0").filter(Boolean)));
 
   /**
-   * Tracked files git is told not to check (assume-unchanged, or skip-worktree yet checked out) whose working bytes differ
-   * from `base`. git's diff trusts the flag and never lists them, so their bytes are compared here. An absent skip-worktree
-   * file is a sparse checkout, not a deletion.
+   * Tracked files git is told not to check (assume-unchanged, or skip-worktree yet checked out) whose git patch misdescribes
+   * the working copy: git's diff trusts the flag and diffs the index entry instead, so it never lists a working edit and
+   * lists a staged one even where the working bytes are back at `base`. Such a file's working bytes differ from `base`, or
+   * its index entry does. An absent skip-worktree file is a sparse checkout, not a deletion.
    */
   const unwatched = Effect.fnUntraced(function* unwatched(
     repo: string,
     base: string,
     paths?: readonly string[]
   ) {
-    // ls-files -v tags skip-worktree files S (s when also assume-unchanged) and assume-unchanged files in lower case.
+    // ls-files -v tags skip-worktree files S (s when also assume-unchanged) and assume-unchanged files in lower case; -s adds
+    // each index entry's mode and oid before the tab.
     const flagged = (yield* run(repo, [
       "ls-files",
       "-v",
+      "-s",
       "-z",
       "--",
       ...(paths ?? []),
@@ -368,9 +407,11 @@ const make = Effect.gen(function* make() {
       .flatMap((line) => {
         const tag = line.slice(0, 1);
         const sparse = isSkipWorktree(tag);
+        const tab = line.indexOf("\t");
+        const [mode, oid] = line.slice(2, tab).split(" ");
 
         return sparse || tag !== tag.toUpperCase()
-          ? [{ path: line.slice(2), sparse }]
+          ? [{ indexed: `${mode} ${oid}`, path: line.slice(tab + 1), sparse }]
           : [];
       });
 
@@ -378,7 +419,8 @@ const make = Effect.gen(function* make() {
       return [];
     }
 
-    const baseOids = new Map(
+    // Each record is `mode type oid`, a tab, and the path.
+    const baseEntries = new Map(
       (yield* run(repo, [
         "ls-tree",
         "-z",
@@ -390,32 +432,38 @@ const make = Effect.gen(function* make() {
         .filter(Boolean)
         .map((line) => {
           const tab = line.indexOf("\t");
+          const [mode, , oid] = line.slice(0, tab).split(" ");
 
-          return [line.slice(tab + 1), line.slice(0, tab).split(" ")[2]];
+          return [line.slice(tab + 1), { mode, oid }];
         })
     );
 
     const changed = yield* Effect.filter(
       flagged,
-      ({ path, sparse }) =>
+      ({ indexed, path, sparse }) =>
         // hash-object hashes the file as `git add` would store it; it exits 128 when the file is missing.
         run(repo, ["hash-object", "--", path], [0, 128]).pipe(
           Effect.map((out) => {
             const oid = out.trim();
+            const at = baseEntries.get(path);
 
-            return oid ? oid !== baseOids.get(path) : !sparse;
+            if (!oid) {
+              return !sparse;
+            }
+
+            return oid !== at?.oid || indexed !== `${at.mode} ${at.oid}`;
           })
         ),
       { concurrency: 8 }
     );
 
-    return changed.map((f) => f.path);
+    return [...new Set(changed.map((f) => f.path))];
   });
 
   /**
    * How the working tree differs from `base`, as the post-image the diff describes: every changed path; those `gone` from it,
    * which git's diff deletes even where an ignored working copy remains (a path removed from the index is part of the
-   * post-image only while it is untracked and not ignored); and those `hidden` from git's diff (see unwatched).
+   * post-image only while it is untracked and not ignored); and those whose git patch is `hidden` or misread (see unwatched).
    */
   const changes = Effect.fn("Git.changes")(function* changes(
     repo: string,
@@ -530,6 +578,7 @@ const make = Effect.gen(function* make() {
     pr,
     revParse,
     root,
+    rootOption,
     run,
     untracked,
     worktrees,

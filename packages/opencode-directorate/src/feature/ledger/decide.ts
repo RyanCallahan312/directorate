@@ -17,7 +17,7 @@ import {
   Verdict,
   VerdictKindSchema,
 } from "./entry.ts";
-import type { Ledger } from "./entry.ts";
+import type { EntryId, Ledger } from "./entry.ts";
 
 export const RANK = Schema.Record(SeveritySchema, Schema.Int).make({
   blocking: 0,
@@ -35,7 +35,7 @@ const lastOf = (e: Entry) =>
 const followDuplicate = (
   ledger: Ledger,
   e: Entry | undefined,
-  seen: Set<string>
+  seen: Set<EntryId>
 ): Entry | undefined => {
   if (!e?.isDuplicate) {
     return e;
@@ -131,7 +131,7 @@ const liaisonReachError = (entry: Entry, claim: VerdictClaim) => {
 const duplicateError = (
   entry: Entry,
   agent: Agent,
-  of: string | undefined,
+  of: EntryId | undefined,
   ledger: Ledger
 ) => {
   const target = ledger.entryById(of);
@@ -259,13 +259,17 @@ const reopensDuplicates = Schema.is(
 export const decide = (ledger: Ledger, entry: Entry) => {
   const placed = ledger.entries.map((e) => (e.id === entry.id ? entry : e));
   const { status } = entry;
+  const decided = ledger.withEntries(placed);
 
   if (!reopensDuplicates(status)) {
-    return { ledger: ledger.withEntries(placed), reopened: [] };
+    return { ledger: decided, reopened: [] };
   }
 
-  // After the entry was refuted or resolved, entries merged into it are open questions again.
-  const merged = (d: Entry) => d.isDuplicate && lastOf(d) === entry.id;
+  // After the entry was refuted or resolved, entries merged into it, directly or through a chain, are open questions
+  // again. Chains resolve before any of them reopens, so a reopened link does not strand the duplicates behind it.
+  const merged = (d: Entry) =>
+    d.isDuplicate && resolvedTarget(decided, d)?.id === entry.id;
+
   const reopened = placed.filter(merged).map((d) => d.id);
 
   const entries = placed.map((d) => {

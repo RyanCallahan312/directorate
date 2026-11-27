@@ -2,7 +2,7 @@
 // and for the directorate_configure tool. Settings are checked before they are written: unknown lenses and values fail
 // to decode, and each panel model and thinking level must be one OpenCode can run. A hand-edited file with an unknown
 // key is rejected when read; tool input drops unknown keys, so the tool's result shows exactly what was stored.
-import { Effect, Schema } from "effect";
+import { Effect, Match, Predicate, Schema } from "effect";
 
 import { ignore } from "../../platform/error.ts";
 import { actor, Host, optional, str } from "../../platform/platform.ts";
@@ -13,24 +13,45 @@ import {
   DEFAULT_MODE,
   DEFAULT_REVIEW_SCOPE,
   ModeSchema,
+  PANEL_BUDGET_FACTOR,
 } from "../../workflow/review/request.ts";
 import { DEFAULT_PANEL } from "../dispatch/seat.ts";
 import { LensSchema } from "../ledger/entry.ts";
+import { NO_GLOBAL_FILE, NO_PROJECT_FILE } from "./configure-flow.ts";
 import {
   describe,
   isUnset,
+  SettingsFailureSchema,
   SettingsSchema,
   SettingsScopeSchema,
 } from "./file.ts";
 import type { Settings, SettingsScope } from "./file.ts";
 import { DirectorateRpc } from "./rpc.ts";
-import { SettingsStore, SettingsUnavailable } from "./store.ts";
+import { settingsUnavailable, SettingsStore } from "./store.ts";
+import type {
+  SettingsBusy,
+  SettingsChanged,
+  SettingsUnavailable,
+} from "./store.ts";
 
 /** A settings change the tool refuses: a review agent's, an incomplete write, or models the host does not have. */
 class SettingsRejected extends Schema.TaggedError<
   SettingsRejected,
   { readonly brand: unique symbol }
 >()("SettingsRejected", { message: Schema.String }) {}
+
+/** Why a settings read or write was refused, as the settings RPC reports it. */
+const failureOf = Match.type<
+  SettingsBusy | SettingsChanged | SettingsRejected | SettingsUnavailable
+>().pipe(
+  Match.tag("SettingsBusy", () => SettingsFailureSchema.make("busy")),
+  Match.tag("SettingsChanged", () => SettingsFailureSchema.make("changed")),
+  Match.tag("SettingsRejected", () => SettingsFailureSchema.make("invalid")),
+  Match.tag("SettingsUnavailable", () =>
+    SettingsFailureSchema.make("unavailable")
+  ),
+  Match.exhaustive
+);
 
 const show = (label: string, file: string, s: Settings) =>
   `${label} (${file}): ${isUnset(s) ? "not set" : `\n\`\`\`json\n${JSON.stringify(s, null, 2)}\n\`\`\``}`;
@@ -42,85 +63,78 @@ const ConfigureActionSchema = Schema.Literals(["show", "write"]);
 
 const isWrite = Schema.is(ConfigureActionSchema.pick(["write"]));
 
-const make = Effect.gen(function* make() {
-  const host = yield* Host;
-  const store = yield* SettingsStore;
+/** Both settings files and what they add up to. */
+const load = (directory: string) =>
+  SettingsStore.use((store) => store.load(directory));
 
-  /** Available chat models, as "providerID/modelID" with their thinking levels. */
-  const models = Effect.fn("Directorate.models")(function* models(
-    directory: string
-  ) {
-    const out = yield* host.model
-      .list({ location: { directory }, types: ["chat"] })
-      .pipe(
-        Effect.mapError(
-          (error) =>
-            new SettingsUnavailable({
-              message: `Cannot list models: ${String(error)}`,
-            })
+/** Available chat models, as "providerID/modelID" with their thinking levels. */
+const models = Effect.fn("Directorate.models")(function* models(
+  directory: string
+) {
+  const out = yield* (yield* Host).model
+    .list({ location: { directory }, types: ["chat"] })
+    .pipe(
+      Effect.mapError((error) =>
+        settingsUnavailable(
+          "Cannot list models",
+          Predicate.isError(error) ? error : new Error(String(error))
         )
-      );
-
-    return out.data
-      .filter((m) => m.enabled)
-      .map((m) => ({
-        name: m.name,
-        ref: `${m.providerID}/${m.id}`,
-        variants: m.variants.map((v) => String(v.id)),
-      }));
-  });
-
-  /** Writes one scope's file once every panel seat names an available model and one of its thinking levels. */
-  const save = Effect.fn("Directorate.saveSettings")(function* save(
-    scope: SettingsScope,
-    directory: string,
-    input: Settings,
-    previous?: Settings
-  ) {
-    const seats = input.panel?.models ?? [];
-
-    if (seats.length) {
-      const available = yield* models(directory);
-
-      const bad = seats.flatMap((s) => {
-        const m = available.find((x) => x.ref === s.model);
-
-        if (!m) {
-          return [`${s.model} is not an available chat model`];
-        }
-
-        if (s.variant && !m.variants.includes(s.variant)) {
-          return [
-            `${s.model} has no thinking level "${s.variant}" (it has: ${m.variants.join(", ") || "none"})`,
-          ];
-        }
-
-        return [];
-      });
-
-      if (bad.length) {
-        return yield* new SettingsRejected({
-          message: `Not written: ${bad.join("; ")}.`,
-        });
-      }
-    }
-
-    const { path, effective, removed, settings } = yield* store.write(
-      scope,
-      directory,
-      input,
-      previous
+      )
     );
 
-    return {
-      effective: describe(effective) ?? "Directorate defaults",
-      path,
-      removed,
-      settings,
-    };
-  });
+  return out.data
+    .filter((m) => m.enabled)
+    .map((m) => ({
+      name: m.name,
+      ref: `${m.providerID}/${m.id}`,
+      variants: m.variants.map((v) => String(v.id)),
+    }));
+});
 
-  return { load: store.load, models, save };
+/** Writes one scope's file once every panel seat names an available model and one of its thinking levels. */
+const save = Effect.fn("Directorate.saveSettings")(function* save(
+  scope: SettingsScope,
+  directory: string,
+  input: Settings,
+  previous?: Settings
+) {
+  const seats = input.panel?.models ?? [];
+
+  if (seats.length) {
+    const available = yield* models(directory);
+
+    const bad = seats.flatMap((s) => {
+      const m = available.find((x) => x.ref === s.model);
+
+      if (!m) {
+        return [`${s.model} is not an available chat model`];
+      }
+
+      if (s.variant && !m.variants.includes(s.variant)) {
+        return [
+          `${s.model} has no thinking level "${s.variant}" (it has: ${m.variants.join(", ") || "none"})`,
+        ];
+      }
+
+      return [];
+    });
+
+    if (bad.length) {
+      return yield* new SettingsRejected({
+        message: `Not written: ${bad.join("; ")}.`,
+      });
+    }
+  }
+
+  const { path, effective, removed, settings } =
+    yield* (yield* SettingsStore).write(scope, directory, input, previous);
+
+  return {
+    effective: describe(effective) ?? "Directorate defaults",
+    path,
+    removed,
+    settings,
+  };
 });
 
 export const configureTool = (
@@ -138,7 +152,6 @@ export const configureTool = (
       }
 
       const host = yield* Host;
-      const directorate = yield* make;
 
       const directory =
         (yield* (yield* Sessions).directory(c.sessionID)) ??
@@ -151,16 +164,15 @@ export const configureTool = (
           });
         }
 
-        const out = yield* directorate
-          .save(input.scope, directory, input.settings)
-          .pipe(
-            Effect.mapError(
-              (error) =>
-                new SettingsRejected({
-                  message: `${error.message} Look models up with action "show" and find.`,
-                })
+        const out = yield* save(input.scope, directory, input.settings).pipe(
+          Effect.catchTag("SettingsRejected", (error) =>
+            Effect.fail(
+              new SettingsRejected({
+                message: `${error.message} Look models up with action "show" and find.`,
+              })
             )
-          );
+          )
+        );
 
         const stored = out.removed
           ? `Removed ${out.path}.`
@@ -169,25 +181,20 @@ export const configureTool = (
         return { content: `${stored}\nEffective settings: ${out.effective}.` };
       }
 
-      const now = yield* directorate.load(directory);
+      const now = yield* load(directory);
 
       const lines = [
-        show("Global", now.files.global, now.global),
-        show(
-          "Project",
-          now.files.project ??
-            "none here: this project's .opencode/directorate.json is the global file",
-          now.project
-        ),
+        show("Global", now.files.global ?? NO_GLOBAL_FILE, now.global),
+        show("Project", now.files.project ?? NO_PROJECT_FILE, now.project),
         `Effective: ${describe(now.effective) ?? "Directorate defaults"}.`,
-        `Unset keys keep Directorate defaults: scope ${DEFAULT_REVIEW_SCOPE}; mode ${DEFAULT_MODE}; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets ${ModeSchema.literals.map((m) => DEFAULT_BUDGET[m]).join(", ")} min (${ModeSchema.literals.join(", ")}), half again for panels; no lenses disabled.`,
+        `Unset keys keep Directorate defaults: scope ${DEFAULT_REVIEW_SCOPE}; mode ${DEFAULT_MODE}; panel off, with seats ${DEFAULT_PANEL.join(", ")}; budgets ${ModeSchema.literals.map((m) => DEFAULT_BUDGET[m]).join(", ")} min (${ModeSchema.literals.join(", ")}), ×${PANEL_BUDGET_FACTOR} for panels; no lenses disabled.`,
         `Lenses: ${LensSchema.literals.join(", ")}.`,
       ];
 
       if (input.find !== undefined) {
         const q = input.find.toLowerCase();
 
-        const found = (yield* directorate.models(directory)).filter(
+        const found = (yield* models(directory)).filter(
           (m) =>
             m.ref.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
         );
@@ -246,32 +253,38 @@ export const configureTool = (
 export const configureRpc = Effect.fn("Directorate.configureRpc")(
   function* configureRpc() {
     const host = yield* Host;
-    const directorate = yield* make;
+    const services = yield* Effect.context<Host | SettingsStore>();
     const { directory } = host.location;
     yield* host.rpc
       .register(DirectorateRpc, {
         settings: (_, c) =>
           Effect.gen(function* settings() {
-            const now = yield* directorate.load(directory);
+            const now = yield* load(directory);
 
             return {
               effective: describe(now.effective) ?? "Directorate defaults",
-              files: now.files.project
-                ? { global: now.files.global, project: now.files.project }
-                : { global: now.files.global },
+              files: now.files,
               global: now.global,
-              models: yield* directorate.models(directory),
+              models: yield* models(directory),
               project: now.project,
             };
-          }).pipe(Effect.mapError((e) => c.error("rejected", e.message, {}))),
+          }).pipe(
+            Effect.provideContext(services),
+            Effect.mapError((e) =>
+              c.error("rejected", e.message, { reason: failureOf(e) })
+            )
+          ),
         write: ({ previous, scope, settings }, c) =>
-          directorate.save(scope, directory, settings, previous).pipe(
+          save(scope, directory, settings, previous).pipe(
             Effect.map(({ effective, path, removed }) => ({
               effective,
               path,
               removed,
             })),
-            Effect.mapError((e) => c.error("rejected", e.message, {}))
+            Effect.provideContext(services),
+            Effect.mapError((e) =>
+              c.error("rejected", e.message, { reason: failureOf(e) })
+            )
           ),
       })
       .pipe(

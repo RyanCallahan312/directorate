@@ -5,10 +5,11 @@ import { Command, Plugin } from "@opencode/plugin/gui";
 import type { Context } from "@opencode/plugin/gui";
 
 import {
-  backend,
+  CONFIGURE_DESCRIPTION,
   configureFromHost,
   fromHost,
   isWarning,
+  rpcBackend,
   showToast,
 } from "./feature/settings/configure-client.ts";
 import type { Dialogs } from "./feature/settings/configure-flow.ts";
@@ -47,14 +48,9 @@ export const configureInGui = (ctx: Context): Promise<void> => {
     DirectorateRpc
   );
 
-  const location = session?.location;
-
   return configureFromHost(
     guiDialogs(ctx),
-    backend(
-      fromHost(() => directorate.settings(undefined, { location })),
-      (input) => fromHost(() => directorate.write(input, { location }))
-    ),
+    rpcBackend(directorate, { location: session?.location }),
     ctx.signal
   );
 };
@@ -62,8 +58,7 @@ export const configureInGui = (ctx: Context): Promise<void> => {
 export default Plugin.define({
   setup(ctx) {
     ctx.add(Command, () => ({
-      description:
-        "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+      description: CONFIGURE_DESCRIPTION,
       group: "The Directorate",
       id: "configure",
       keywords: "directorate review panel seats lenses budget settings",

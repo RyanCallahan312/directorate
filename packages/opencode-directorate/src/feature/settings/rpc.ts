@@ -4,19 +4,28 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { Schema } from "effect";
 
-import { SettingsSchema, SettingsScopeSchema } from "./file.ts";
+import {
+  SettingsFailureSchema,
+  SettingsSchema,
+  SettingsScopeSchema,
+} from "./file.ts";
 
 const std = Schema.toStandardSchemaV1;
 
-/** Why the server refused: an unreadable or changed settings file, or a model or thinking level OpenCode cannot run. */
-const rejected = { rejected: std(Schema.Struct({})) };
+/** Why the server refused: an unreadable, busy, or changed settings file, or a model or thinking level OpenCode cannot run. */
+const RejectedSchema = Schema.Struct({
+  /** Absent from servers that predate it. */
+  reason: Schema.optionalKey(SettingsFailureSchema),
+});
+
+const rejected = { rejected: std(RejectedSchema) };
 
 /** What the settings method returns. */
 const SettingsViewSchema = Schema.Struct({
   effective: Schema.String,
-  /** No project file where the project directory holds the global one. */
+  /** No global file without a global config directory; no project file where the project directory holds the global one. */
   files: Schema.Struct({
-    global: Schema.String,
+    global: Schema.optionalKey(Schema.String),
     project: Schema.optionalKey(Schema.String),
   }),
   global: SettingsSchema,

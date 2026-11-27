@@ -20,30 +20,57 @@ const SkillFrontmatterSchema = Schema.Struct({
   name: Skill.Name,
 });
 
-/** A bundled agent or skill file without its YAML frontmatter. */
-class MissingFrontmatter extends Schema.TaggedError<
-  MissingFrontmatter,
+/** A bundled agent or skill file that could not be read, has no YAML frontmatter, or whose frontmatter does not decode. */
+export class BundledFileInvalid extends Schema.TaggedError<
+  BundledFileInvalid,
   { readonly brand: unique symbol }
->()("MissingFrontmatter", { message: Schema.String }) {}
+>()("BundledFileInvalid", { cause: Schema.Defect(), path: Schema.String }) {
+  override get message() {
+    const reason =
+      this.cause instanceof Error ? this.cause.message : String(this.cause);
+
+    return `Invalid bundled file ${this.path}: ${reason}`;
+  }
+}
+
+const invalid = (path: string) => (cause: unknown) =>
+  new BundledFileInvalid({ cause, path });
+
+/** A bundled markdown file's text split into its parsed YAML frontmatter and its trimmed body. */
+export const parseMarkdown = Effect.fnUntraced(function* parseMarkdown(
+  path: string,
+  text: string
+) {
+  const match = /^---\r?\n(?<yaml>[\s\S]*?)\r?\n---\r?\n/u.exec(text);
+  const yaml = match?.groups?.yaml;
+
+  if (!match || yaml === undefined) {
+    return yield* invalid(path)("missing YAML frontmatter");
+  }
+
+  const data = yield* Effect.try({
+    catch: invalid(path),
+    try: () => Yaml.parse(yaml),
+  });
+
+  return { content: text.slice(match[0].length).trim(), data, path };
+});
 
 const readMarkdown = Effect.fn("Directorate.readMarkdown")(
   function* readMarkdown(url: URL) {
     const paths = yield* Path.Path;
-    const path = yield* paths.fromFileUrl(url);
+
+    const path = yield* paths
+      .fromFileUrl(url)
+      .pipe(Effect.mapError(invalid(url.href)));
+
     const fs = yield* FileSystem.FileSystem;
-    const text = yield* fs.readFileString(path);
-    const match = /^---\r?\n(?<yaml>[\s\S]*?)\r?\n---\r?\n/u.exec(text);
-    const yaml = match?.groups?.yaml;
 
-    if (!match || yaml === undefined) {
-      return yield* new MissingFrontmatter({
-        message: `Missing frontmatter: ${path}`,
-      });
-    }
+    const text = yield* fs
+      .readFileString(path)
+      .pipe(Effect.mapError(invalid(path)));
 
-    const data = yield* Effect.try(() => Yaml.parse(yaml));
-
-    return { content: text.slice(match[0].length).trim(), data, path };
+    return yield* parseMarkdown(path, text);
   }
 );
 
@@ -53,13 +80,13 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
 
     const agents = yield* Effect.forEach([...AgentIdSchema.literals], (id) =>
       Effect.gen(function* loadAgent() {
-        const { data, content } = yield* readMarkdown(
+        const { data, content, path } = yield* readMarkdown(
           new URL(`../../../agents/${id}.md`, import.meta.url)
         );
 
         const fields = yield* Schema.decodeUnknownEffect(
           AgentFrontmatterSchema
-        )(data);
+        )(data).pipe(Effect.mapError(invalid(path)));
 
         return { fields, id, system: content };
       })
@@ -71,7 +98,7 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
 
     const { name, description, metadata } = yield* Schema.decodeUnknownEffect(
       SkillFrontmatterSchema
-    )(skill.data);
+    )(skill.data).pipe(Effect.mapError(invalid(skill.path)));
 
     const skillID = Skill.ID.make("directorate-lenses");
 

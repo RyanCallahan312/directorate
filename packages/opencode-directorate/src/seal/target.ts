@@ -12,21 +12,8 @@ export const TargetKindSchema = Schema.Literals([
   "paths",
 ]);
 
-export type TargetKind = typeof TargetKindSchema.Type;
-
-/** The kinds a target resolves to: auto picks one of the others. */
-export const ResolvedKindSchema = TargetKindSchema.pick([
-  "local",
-  "commit",
-  "range",
-  "pr",
-  "paths",
-]);
-
 /** What the review's post-image is: the working tree (snapshotted at sealing) or a commit. */
 export const PostImageSchema = Schema.Literals(["worktree", "commit"]);
-
-export type PostImage = typeof PostImageSchema.Type;
 
 /** A post-image pinned at a commit, rather than the working tree snapshotted at sealing. */
 export const isCommitImage = Schema.is(PostImageSchema.pick(["commit"]));

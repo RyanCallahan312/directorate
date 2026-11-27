@@ -9,6 +9,29 @@ import { Actor } from "../agents/agent.ts";
 const list = Schema.Array;
 const opt = Schema.optional;
 
+/** The one spelling of an entry id, `F` and its 1-based filing number: anchored for a whole value, word-bounded in text. */
+const ENTRY_ID = String.raw`F[1-9]\d*`;
+
+export const EntryIdSchema = Schema.String.check(
+  Schema.isPattern(new RegExp(`^${ENTRY_ID}$`, "u"))
+).pipe(Schema.brand("EntryId"));
+
+export type EntryId = typeof EntryIdSchema.Type;
+
+export const isEntryId = Schema.is(EntryIdSchema);
+
+/** A string as an entry id, or none when it is not one. */
+export const asEntryId = Schema.decodeUnknownOption(EntryIdSchema);
+
+/** The id of the `n`th entry filed in a ledger (1-based). */
+export const nthEntryId = (n: number) => EntryIdSchema.make(`F${n}`);
+
+const ENTRY_IDS_IN_TEXT = new RegExp(String.raw`\b${ENTRY_ID}\b`, "gu");
+
+/** Every entry id written in `text`, in order. */
+export const entryIdsIn = (text: string) =>
+  (text.match(ENTRY_IDS_IN_TEXT) ?? []).filter(isEntryId);
+
 export const SeveritySchema = Schema.Literals([
   "blocking",
   "important",
@@ -20,8 +43,6 @@ export type Severity = typeof SeveritySchema.Type;
 export const isMinor = Schema.is(SeveritySchema.pick(["minor"]));
 
 export const KindSchema = Schema.Literals(["defect", "test-gap", "quality"]);
-
-export type Kind = typeof KindSchema.Type;
 
 /** The review lenses: one playbook each under the directorate-lenses skill's references/. */
 export const LensSchema = Schema.Literals([
@@ -65,8 +86,6 @@ export const EntryStatusSchema = Schema.Literals([
   "resolved",
 ]);
 
-export type EntryStatus = typeof EntryStatusSchema.Type;
-
 const isOpenStatus = Schema.is(EntryStatusSchema.pick(["open"]));
 
 const isConfirmedStatus = Schema.is(EntryStatusSchema.pick(["confirmed"]));
@@ -84,8 +103,6 @@ export const NoteKindSchema = Schema.Literals([
   "assumption",
   "answered",
 ]);
-
-export type NoteKind = typeof NoteKindSchema.Type;
 
 /** The Liaison answered a failed Auditor's question itself. */
 export const isAnswered = Schema.is(NoteKindSchema.pick(["answered"]));
@@ -119,7 +136,7 @@ export class Verdict extends Schema.Class<
   at: Time,
   by: Actor,
   evidence: list(Schema.String),
-  of: opt(Schema.String),
+  of: opt(EntryIdSchema),
   rationale: Schema.String,
   severity: opt(SeveritySchema),
   verdict: VerdictKindSchema,
@@ -130,7 +147,7 @@ export class Carried extends Schema.Class<
   Carried,
   { readonly brand: unique symbol }
 >("directorate/Carried")({
-  id: Schema.String,
+  id: EntryIdSchema,
   status: CarriedStatusSchema,
 }) {
   /** Verified (confirmed) when the earlier review reported, rather than filed and never cleared. */
@@ -152,10 +169,9 @@ export class Entry extends Schema.Class<
   evidence: list(Schema.String),
   fix: opt(Schema.String),
   history: opt(list(Verdict)),
-  id: Schema.String,
+  id: EntryIdSchema,
   kind: KindSchema,
-  /** As stored: any string, though new entries are filed under a lens of `LensSchema`. */
-  lens: Schema.String,
+  lens: LensSchema,
   quote: Schema.String,
   raisedBy: Actor,
   severity: SeveritySchema,
@@ -197,7 +213,7 @@ export class Entry extends Schema.Class<
   }
 
   /** This entry continued in a re-check as `id`, remembering what it was there. */
-  carriedAs(id: string, status: CarriedStatus) {
+  carriedAs(id: EntryId, status: CarriedStatus) {
     return new Entry({
       ...this,
       carried: Carried.make({ id: this.id, status }),
@@ -239,11 +255,11 @@ export class Ledger extends Schema.Class<
 }) {
   /** The id the next filed entry takes. */
   get nextEntryId() {
-    return `F${this.entries.length + 1}`;
+    return nthEntryId(this.entries.length + 1);
   }
 
   /** The entry with this id, if any. */
-  entryById(id: string | undefined) {
+  entryById(id: EntryId | undefined) {
     return this.entries.find((e) => e.id === id);
   }
 

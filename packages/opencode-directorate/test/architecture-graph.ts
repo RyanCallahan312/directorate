@@ -27,15 +27,19 @@ export const PRIMITIVE_MODULES: readonly string[] = [
   "platform/stored.ts",
   "platform/error.ts",
   "platform/utf8.ts",
+  "platform/host-id.ts",
   "seal/record.ts",
+  "seal/seal-id.ts",
   "seal/target.ts",
   "seal/region.ts",
   "seal/coverage.ts",
+  "seal/repo-path.ts",
   "feature/agents/agent.ts",
   "feature/dispatch/lifecycle.ts",
   "feature/dispatch/seat.ts",
   "feature/ledger/entry.ts",
   "feature/ledger/decide.ts",
+  "feature/ledger/show.ts",
   "feature/report/directive.ts",
   "feature/report/gates.ts",
   "feature/report/render.ts",
@@ -111,7 +115,7 @@ const SIDE_EFFECT_IMPORT = /^import\s+"(?<specifier>[^"]+)";?/gmu;
 
 const DYNAMIC_IMPORT = /\bimport\(\s*"(?<specifier>[^"]+)"\s*\)/gu;
 
-const EXPORT_STAR = /^export\s+\*/mu;
+const EXPORT_STAR = /^export\s+(?:type\s+)?\*/mu;
 
 const NAMESPACE_IMPORT =
   /^import\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\*\s+as\s+(?<name>[\w$]+)\s+from\s/gmu;

@@ -1,6 +1,7 @@
 // Stored contracts: seal.json, ledger.json, directorate.json, and ship state outlive the code that wrote them. Each
-// fixture under test/stored/ is in the exact bytes Directorate writes; current fixtures must survive decode → encode
-// unchanged, and legacy fixtures must re-encode to their committed *.expected.json golden, which pins today's behavior.
+// fixture under test/stored/ is in the exact bytes Directorate writes and must survive decode → encode unchanged. A
+// hand-edited directorate.json is normalized when written, so its normalized fixtures re-encode to their committed
+// *.expected.json golden.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -46,38 +47,29 @@ const shipRoundTrip = (text: string) =>
 const contracts = [
   {
     current: ["seal.json"],
-    legacy: [
-      "seal.oldest.json",
-      "seal.legacy-gates.json",
-      "seal.dispatch-bare.json",
-      "seal.dispatch-full.json",
-    ],
     name: "seal.json",
     roundTrip: sealRoundTrip,
     stored: SealJson.to.ast,
   },
   {
     current: ["ledger.json"],
-    legacy: ["ledger.minimal.json", "ledger.loose.json"],
     name: "ledger.json",
     roundTrip: ledgerRoundTrip,
     stored: LedgerJson.to.ast,
   },
   {
     current: ["directorate.json"],
-    legacy: ["directorate.sparse.json", "directorate.empty-sections.json"],
     name: "directorate.json",
+    normalized: ["directorate.sparse.json", "directorate.empty-sections.json"],
     roundTrip: settingsRoundTrip,
     stored: SettingsJson.to.ast,
   },
   {
-    current: ["ship.json", "ship.paused.json"],
-    legacy: [
-      "ship.pre-recovery.json",
-      "ship.minimal.json",
-      "ship.waiting-full.json",
-      "ship.paused-full.json",
-      "ship.complete-full.json",
+    current: [
+      "ship.json",
+      "ship.waiting.json",
+      "ship.paused.json",
+      "ship.complete.json",
     ],
     name: "ship state",
     roundTrip: shipRoundTrip,
@@ -85,16 +77,16 @@ const contracts = [
   },
 ];
 
-const expectedFor = (legacy: string) =>
-  legacy.replace(/\.json$/u, ".expected.json");
+const expectedFor = (normalized: string) =>
+  normalized.replace(/\.json$/u, ".expected.json");
 
 // ---------- completeness: every encoded key path and every shape-changing union member appears in a fixture ----------
 const isJsonObject = Schema.is(Schema.JsonObject);
 const isJsonArray = Schema.is(Schema.Array(Schema.Json));
 
 /**
- * Whether a union member is one of several stored shapes, as in `orLegacyTrue`. Literal sets are one shape, and the
- * `undefined` that `Schema.optional` adds never reaches JSON.
+ * Whether a union member is one of several stored shapes. Literal sets are one shape, and the `undefined` that
+ * `Schema.optional` adds never reaches JSON.
  */
 const isStoredVariant = (union: SchemaAST.Union, member: SchemaAST.AST) => {
   const stored = union.types.filter((type) => !SchemaAST.isUndefined(type));
@@ -199,8 +191,8 @@ for (const contract of contracts) {
     }
   });
 
-  test(`${contract.name}: legacy fixtures re-encode to their golden files byte for byte`, () => {
-    for (const name of contract.legacy) {
+  test(`${contract.name}: normalized fixtures re-encode to their golden files byte for byte`, () => {
+    for (const name of contract.normalized ?? []) {
       const golden = read(expectedFor(name));
       assert.equal(contract.roundTrip(read(name)), golden, name);
       // A golden is itself current: it must survive another round trip unchanged.
@@ -208,7 +200,7 @@ for (const contract of contracts) {
     }
   });
 
-  test(`${contract.name}: the first current fixture sets every encoded field`, () => {
+  test(`${contract.name}: the first fixture sets every encoded field`, () => {
     const encoded = SchemaAST.toEncoded(contract.stored);
     const [first = ""] = contract.current;
 
@@ -230,7 +222,7 @@ for (const contract of contracts) {
     const encoded = SchemaAST.toEncoded(contract.stored);
     const covered = new Set<string>();
 
-    for (const name of [...contract.current, ...contract.legacy]) {
+    for (const name of [...contract.current, ...(contract.normalized ?? [])]) {
       fixturePaths(encoded, "", parseJson(read(name)), covered);
     }
 
@@ -241,6 +233,36 @@ for (const contract of contracts) {
     assert.deepEqual(missing, []);
   });
 }
+
+test("ship state: every step form round-trips byte for byte; any other step string fails to decode", () => {
+  const stored = JSON.parse(read("ship.json"));
+
+  for (const [step, form] of [
+    ["review", "Review"],
+    ["finish", "Finish"],
+    ["resume:directorate-20260102000000-bbbbbb", "Resume"],
+    ["fix:directorate-20260102000000-bbbbbb", "Fix"],
+    ["recheck:directorate-20260102000000-bbbbbb:fp-1", "Recheck"],
+    ["recheck:directorate-20260102000000-bbbbbb:fp:with:colons", "Recheck"],
+  ] as const) {
+    const text = JSON.stringify({ ...stored, step }, undefined, 2);
+
+    assert.equal(shipRoundTrip(text), text, step);
+    assert.equal(Schema.decodeSync(ShipJson)(text).step?._tag, form, step);
+  }
+
+  for (const step of [
+    "fix",
+    // A step whose seal is not a seal id names no seal.
+    "fix:not-a-seal",
+    "recheck:directorate-20260102000000-bbbbbb",
+    "triage:directorate-20260102000000-bbbbbb",
+  ]) {
+    const text = JSON.stringify({ ...stored, step }, undefined, 2);
+
+    assert.throws(() => shipRoundTrip(text), /not a ship step/u, step);
+  }
+});
 
 test("directorate.json: an unknown key is rejected, not dropped", () => {
   assert.throws(() => settingsRoundTrip('{\n  "mdoe": "full"\n}\n'));

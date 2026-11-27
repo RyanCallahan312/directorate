@@ -1,5 +1,14 @@
-import { DateTime, Effect, FileSystem, Path, Result, Schema } from "effect";
+import {
+  DateTime,
+  Effect,
+  FileSystem,
+  Path,
+  Predicate,
+  Result,
+  Schema,
+} from "effect";
 
+import type { SessionId } from "../platform/host-id.ts";
 import {
   Git,
   Host,
@@ -9,14 +18,20 @@ import {
 } from "../platform/platform.ts";
 import { decodeUtf8 } from "../platform/utf8.ts";
 import { isOwnerMark } from "../seal/region.ts";
+import type { SealId } from "../seal/seal-id.ts";
 import { ActiveSeal } from "./active-seal.ts";
 import { ExportFailed, writeArchive } from "./archive.ts";
-import { isRecordFile, Records } from "./repository.ts";
+import {
+  diffName,
+  generationOf,
+  isRecordFile,
+  Records,
+  sealIdOf,
+  snapshotName,
+} from "./repository.ts";
 
 const TIMEOUT = 120_000;
 const SESSION_ID = /^ses[\w-]+$/u;
-const DIFF = /^diff(?:\.g\d+)?\.patch$/u;
-const SNAPSHOT = /^snapshot(?:\.g\d+)?$/u;
 
 const ExportManifest = Schema.fromJsonString(
   Schema.Struct({
@@ -45,7 +60,10 @@ const encodeManifest = Schema.encodeEffect(ExportManifest);
 export const PAGE_SIZE = 50;
 
 export const listExportReviews = Effect.fn("Directorate.listExportReviews")(
-  function* listExportReviews(sessionID: string, before: string | undefined) {
+  function* listExportReviews(
+    sessionID: SessionId,
+    before: string | undefined
+  ) {
     const store = yield* Records;
     const sessions = yield* ActiveSeal;
     const git = yield* Git;
@@ -121,87 +139,90 @@ const copyArtifact: (
     );
   });
 
-const copyReview = Effect.fn("Directorate.copyReview")(function* copyReview(
-  id: string,
-  staging: string
-) {
-  const store = yield* Records;
-  const fs = yield* FileSystem.FileSystem;
-  const paths = yield* Path.Path;
+export const copyReview = Effect.fn("Directorate.copyReview")(
+  function* copyReview(id: SealId, staging: string) {
+    const store = yield* Records;
+    const fs = yield* FileSystem.FileSystem;
+    const paths = yield* Path.Path;
 
-  const source = paths.join(store.root, id);
+    const source = paths.join(store.root, id);
 
-  if (!isDirectory((yield* fs.lstat(source)).type)) {
-    return yield* new ExportFailed({
-      message: `Not a seal directory: ${source}`,
-    });
+    if (!isDirectory((yield* fs.lstat(source)).type)) {
+      return yield* new ExportFailed({
+        message: `Not a seal directory: ${source}`,
+      });
+    }
+
+    const artifacts = paths.join(staging, "seal");
+    yield* fs.makeDirectory(artifacts);
+
+    // Copy the review while locked, but don't hold the writer lock across OpenCode calls or compression.
+    const { seal, files } = yield* store.withLock(
+      id,
+      Effect.gen(function* snapshot() {
+        const saved = yield* store.load(id);
+
+        // Only committed generations: a refresh that failed or was cancelled leaves the next generation's files behind.
+        const names = (yield* fs.readDirectory(source))
+          .filter((name) => {
+            const gen = generationOf(name);
+
+            return gen === undefined ? isRecordFile(name) : gen <= saved.gen;
+          })
+          .toSorted();
+
+        yield* Effect.forEach(
+          names,
+          (name) =>
+            copyArtifact(paths.join(source, name), paths.join(artifacts, name)),
+          { discard: true }
+        );
+
+        return { files: names, seal: saved };
+      })
+    );
+
+    const missingArtifacts = [
+      "ledger.json",
+      diffName(seal.gen),
+      ...(seal.pinsCommit ? [] : [snapshotName(seal.gen)]),
+      ...(seal.reportedAt ? ["report.md"] : []),
+    ].filter((name) => !files.includes(name));
+
+    return {
+      artifacts: files.map((name) => `seal/${name}`),
+      missingArtifacts,
+      reported: Boolean(seal.reportedAt),
+      runsWithoutSession: seal.children
+        .filter((child) => !child.session)
+        .map((child) => child.call),
+      seal: id,
+      sessionIds: [
+        ...new Set(
+          [
+            seal.ownerSession,
+            ...(seal.previousOwnerSessions ?? []),
+            ...seal.children.map((child) => child.session),
+            // Owners' reads are recorded as "owner" (seal/tools.ts); the owner sessions are already listed above.
+            ...seal.regions.flatMap((region) =>
+              region.readBy.flatMap((reader) =>
+                isOwnerMark(reader) ? [] : [reader]
+              )
+            ),
+          ].filter(Predicate.isNotUndefined)
+        ),
+      ],
+    };
   }
-
-  const artifacts = paths.join(staging, "seal");
-  yield* fs.makeDirectory(artifacts);
-
-  // Copy the review while locked, but don't hold the writer lock across OpenCode calls or compression.
-  const { seal, files } = yield* store.withLock(
-    id,
-    Effect.gen(function* snapshot() {
-      const saved = yield* store.load(id);
-
-      const names = (yield* fs.readDirectory(source))
-        .filter(
-          (name) => isRecordFile(name) || DIFF.test(name) || SNAPSHOT.test(name)
-        )
-        .toSorted();
-
-      yield* Effect.forEach(
-        names,
-        (name) =>
-          copyArtifact(paths.join(source, name), paths.join(artifacts, name)),
-        { discard: true }
-      );
-
-      return { files: names, seal: saved };
-    })
-  );
-
-  const missingArtifacts = [
-    "ledger.json",
-    seal.gen ? `diff.g${seal.gen}.patch` : "diff.patch",
-    ...(seal.pinsCommit
-      ? []
-      : [seal.gen ? `snapshot.g${seal.gen}` : "snapshot"]),
-    ...(seal.reportedAt ? ["report.md"] : []),
-  ].filter((name) => !files.includes(name));
-
-  return {
-    artifacts: files.map((name) => `seal/${name}`),
-    missingArtifacts,
-    reported: Boolean(seal.reportedAt),
-    runsWithoutSession: seal.children
-      .filter((child) => !child.session)
-      .map((child) => child.call),
-    seal: id,
-    sessionIds: [
-      ...new Set(
-        [
-          seal.ownerSession,
-          ...(seal.previousOwnerSessions ?? []),
-          ...seal.children.map((child) => child.session),
-          // Owners' reads are recorded as "owner" (seal/tools.ts); the owner sessions are already listed above.
-          ...seal.regions.flatMap((region) =>
-            region.readBy.filter((reader) => !isOwnerMark(reader))
-          ),
-        ].filter((value): value is string => Boolean(value))
-      ),
-    ],
-  };
-});
+);
 
 export const exportReview = Effect.fn("Directorate.exportReview")(
-  function* exportReview(id: string) {
+  function* exportReview(seal: string) {
     const host = yield* Host;
     const store = yield* Records;
     const fs = yield* FileSystem.FileSystem;
     const paths = yield* Path.Path;
+    const id = yield* sealIdOf(seal, "lookup");
     yield* store.load(id);
     const output = paths.resolve(store.root, "exports");
     yield* fs.makeDirectory(output, { mode: 0o700, recursive: true });

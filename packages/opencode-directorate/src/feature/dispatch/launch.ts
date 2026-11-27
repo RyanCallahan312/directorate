@@ -1,15 +1,28 @@
 // Launching: the subagent tool's hooks. A launch is registered before the child runs, so a fast child is never missed,
 // and the subagent's result settles it even if session.created was missed.
 import type { ToolHooks } from "@opencode/plugin/effect/tool";
-import { DateTime, Effect, Match, Option, Predicate, Schema } from "effect";
+import {
+  DateTime,
+  Effect,
+  HashMap,
+  Match,
+  Option,
+  Predicate,
+  Ref,
+  Schema,
+} from "effect";
 
-import { ignore } from "../../platform/error.ts";
+import { ignore, orWarn } from "../../platform/error.ts";
+import { SessionIdSchema } from "../../platform/host-id.ts";
+import type { CallId, SessionId } from "../../platform/host-id.ts";
 import { adapter, Host, isSubagentTool } from "../../platform/platform.ts";
 import { Records } from "../../records/records.ts";
+import { SealIdSchema } from "../../seal/seal-id.ts";
+import type { SealId } from "../../seal/seal-id.ts";
 import { HostEvent, Sessions } from "../../seal/seal.ts";
 import {
   dispatchableNamed,
-  Liaison,
+  DispatchableIdSchema,
   Seat as SeatAgent,
 } from "../agents/agent.ts";
 import {
@@ -31,18 +44,18 @@ import {
 /** An Auditor, Seat, or Compliance launch, as the subagent tool's input; with a sessionID it continues an existing child. */
 const decodeAssignment = Schema.decodeUnknownOption(
   Schema.Struct({
-    agent: Schema.Literals(Liaison.dispatches),
+    agent: DispatchableIdSchema,
     description: Schema.optional(Schema.String),
     model: Schema.optional(Schema.String),
     prompt: Schema.optional(Schema.String),
-    sessionID: Schema.optional(Schema.String),
+    sessionID: Schema.optional(SessionIdSchema),
   })
 );
 
 /** What the subagent tool reports about the child it ran. */
 const decodeChildMeta = Schema.decodeUnknownOption(
   Schema.Struct({
-    sessionID: Schema.optional(Schema.String),
+    sessionID: Schema.optional(SessionIdSchema),
     status: Schema.optional(Schema.String),
   })
 );
@@ -86,11 +99,55 @@ const subagentOutcome = (
   return Running;
 };
 
-export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
+/** The seal and Liaison session a subagent call was launched for. */
+const LaunchSchema = Schema.Struct({
+  parent: SessionIdSchema,
+  seal: SealIdSchema,
+});
+
+/**
+ * Subagent call -> the seal and Liaison session it was launched for, until the subagent tool returns. A report can
+ * close the seal before the launch links to its child session; the late child is stopped, not left running unowned.
+ */
+export const launchRegistry = Effect.gen(function* launchRegistry() {
+  const launches = yield* Ref.make(
+    HashMap.empty<CallId, typeof LaunchSchema.Type>()
+  );
+
+  return {
+    /** A subagent call the Liaison of `parent` made for `seal`, open until `settled`. */
+    launch: (call: CallId, seal: SealId, parent: SessionId) =>
+      Ref.update(launches, HashMap.set(call, { parent, seal })),
+    /** The seal a subagent call was launched for, if it has not settled. */
+    launchedFor: (call: CallId) =>
+      Ref.get(launches).pipe(
+        Effect.map((m) => Option.getOrUndefined(HashMap.get(m, call))?.seal)
+      ),
+    /** Seal ids of the unsettled subagent calls `parent` made. */
+    launchesBy: (parent: SessionId) =>
+      Ref.get(launches).pipe(
+        Effect.map(
+          (m) =>
+            new Set(
+              [...HashMap.values(m)].flatMap((l) =>
+                l.parent === parent ? [l.seal] : []
+              )
+            )
+        )
+      ),
+    settled: (call: CallId) => Ref.update(launches, HashMap.remove(call)),
+  };
+});
+
+export type Launches = Effect.Success<typeof launchRegistry>;
+
+export const registerLaunches = Effect.fnUntraced(function* registerLaunches(
+  launches: Launches
+) {
   const host = yield* Host;
   const sessions = yield* Sessions;
   const store = yield* Records;
-  const { hook } = yield* adapter<Sessions | Records>();
+  const { hook } = yield* adapter<never>();
 
   // ---------- Auditors, Seats, and Compliance ----------
   // Launching: registered before the child runs, so a fast child is never missed. A completed child calling tools again
@@ -105,9 +162,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
           return;
         }
 
-        const seal = yield* store
-          .load(id)
-          .pipe(Effect.orElseSucceed(() => null));
+        const seal = yield* store.find(id);
 
         if (!seal || !resumed(seal, ev.sessionID)) {
           return;
@@ -137,9 +192,10 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       }
 
       const startedAt = yield* DateTime.now;
-      // Assign seats under the seal lock so parallel launches take different models.
-      let launch: Launching | undefined;
-      yield* sessions
+
+      // Assign seats under the seal lock so parallel launches take different models. Only a launch the seal saved is
+      // registered and sent on.
+      const launch = yield* sessions
         .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
           // A follow-up continues a child session: a new run of it, keeping the seat it was launched for.
           const prior = assignment.sessionID
@@ -147,7 +203,7 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             : undefined;
 
           if (assignment.sessionID) {
-            launch = new Launching({
+            const followUp = new Launching({
               agent: assignment.agent,
               call: ev.id,
               description: assignment.description ?? prior?.description,
@@ -159,17 +215,17 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             });
 
             return Effect.succeed({
-              out: undefined,
-              seal: launched(s, launch),
+              out: followUp,
+              seal: launched(s, followUp),
             });
           }
 
           const model =
-            assignment.agent === SeatAgent.id && !assignment.model
+            SeatAgent.is(assignment.agent) && !assignment.model
               ? openSeat(s)
               : undefined;
 
-          launch = new Launching({
+          const fresh = new Launching({
             agent: assignment.agent,
             call: ev.id,
             description: model
@@ -180,31 +236,22 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
             startedAt,
           });
 
-          return Effect.succeed({ out: undefined, seal: launched(s, launch) });
+          return Effect.succeed({ out: fresh, seal: launched(s, fresh) });
         })
-        .pipe(
-          ignore(`could not register ${assignment.agent} in ${seal.id}`, "Warn")
-        );
+        .pipe(orWarn(`could not register ${assignment.agent} in ${seal.id}`));
 
       if (launch) {
-        yield* sessions.launch(ev.id, seal.id, ev.sessionID);
+        yield* launches.launch(ev.id, seal.id, ev.sessionID);
       }
 
       if (launch && Predicate.isObject(ev.input)) {
-        if (launch.followUp) {
-          ev.input = { ...ev.input, prompt: followUpPrompt(launch) };
-        } else if (launch.model) {
-          ev.input = {
-            ...ev.input,
-            description: launchTitle(launch),
-            model: launch.model,
-          };
-        } else {
-          ev.input = {
-            ...ev.input,
-            description: launchTitle(launch),
-          };
-        }
+        ev.input = launch.followUp
+          ? { ...ev.input, prompt: followUpPrompt(launch) }
+          : {
+              ...ev.input,
+              description: launchTitle(launch),
+              ...(launch.model && { model: launch.model }),
+            };
       }
     })
   );
@@ -212,13 +259,11 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
   /** A launch of a seal reported before the launch ran: stop the child it started, which no review owns now. */
   const stopUnowned = Effect.fn("Directorate.stopUnowned")(
     function* stopUnowned(
-      call: string,
-      sealId: string | undefined,
-      session: string | undefined
+      call: CallId,
+      sealId: SealId | undefined,
+      session: SessionId | undefined
     ) {
-      const reported = sealId
-        ? yield* store.load(sealId).pipe(Effect.orElseSucceed(() => null))
-        : null;
+      const reported = sealId ? yield* store.find(sealId) : undefined;
 
       const launch = reported?.reportedAt
         ? reported.children.find((x) => x.call === call && isLaunching(x))
@@ -247,8 +292,8 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
         () => ({ sessionID: undefined, status: undefined })
       );
 
-      const launchedFor = yield* sessions.launchedFor(ev.id);
-      yield* sessions.launchSettled(ev.id);
+      const launchedFor = yield* launches.launchedFor(ev.id);
+      yield* launches.settled(ev.id);
       const seal = yield* sessions.active(ev.sessionID);
 
       // Launched for a review that is no longer this session's, even if the Liaison has sealed another since.
@@ -261,33 +306,31 @@ export const registerLaunches = Effect.fnUntraced(function* registerLaunches() {
       const outcome = subagentOutcome(errored, meta.status, text);
 
       const endedAt = yield* DateTime.now;
-      let child: string | undefined;
-      yield* sessions
-        .mutate(seal.id, HostEvent.make({}), ({ seal: s }) => {
-          const launch = s.children.find((x) => x.call === ev.id);
 
-          // Not an Auditor, Seat, or Compliance of this review.
-          if (!launch) {
-            return Effect.succeed({ out: undefined });
-          }
+      // The child session the saved result names, if any.
+      const child = yield* sessions
+        .mutate(seal.id, HostEvent.make({}), ({ seal: s }) =>
+          Effect.sync(() => {
+            const launch = s.children.find((x) => x.call === ev.id);
 
-          // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
-          // registered, so there is no child, and no failure to report.
-          if (errored && isLaunching(launch)) {
-            return Effect.succeed({
-              out: undefined,
-              seal: withdrawn(s, launch),
-            });
-          }
+            // Not an Auditor, Seat, or Compliance of this review.
+            if (!launch) {
+              return { out: undefined };
+            }
 
-          child = meta.sessionID ?? launch.session;
+            // Rejected before it ran: the subagent tool checks permission (drain, lockdown, rules) after this launch
+            // registered, so there is no child, and no failure to report.
+            if (errored && isLaunching(launch)) {
+              return { out: undefined, seal: withdrawn(s, launch) };
+            }
 
-          return Effect.succeed({
-            out: undefined,
-            seal: returned(s, ev.id, meta.sessionID, outcome, endedAt),
-          });
-        })
-        .pipe(ignore(`could not record subagent result in ${seal.id}`, "Warn"));
+            return {
+              out: meta.sessionID ?? launch.session,
+              seal: returned(s, ev.id, meta.sessionID, outcome, endedAt),
+            };
+          })
+        )
+        .pipe(orWarn(`could not record subagent result in ${seal.id}`));
 
       if (child) {
         yield* sessions.bind(child, seal.id);

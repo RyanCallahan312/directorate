@@ -21,31 +21,33 @@ src/
 ├── tui.ts · gui.ts · rpc.ts package entries (rpc.ts re-exports feature/settings/rpc.ts by name)
 ├── exclusions.ts*          shared kernel: withheld paths, dependency directories, scope matching
 ├── platform/               process and host capabilities, and the OpenCode adapter
-│   ├── platform.ts         entry: nodeLayer, Git, Worktree, Host, ProcessIdentity, host-record readers, tool adapter
-│   ├── stored.ts*          since · orLegacyTrue · Time · Count · sortedFields · invalid
+│   ├── platform.ts         entry: nodeLayer, Git, Worktree, Host, ProcessIdentity, host-record readers, keyed lock, tool adapter
+│   ├── stored.ts*          Time · Count · sortedFields · invalid
 │   ├── error.ts* · utf8.ts* · hash.ts
+│   ├── host-id.ts*         SessionIdSchema · MessageIdSchema · CallIdSchema: the host's ids, mirrored
 │   ├── git.ts · command.ts · worktree.ts · host.ts · process-identity.ts
 │   ├── host-record.ts      activity · turns · locationKey · createdAt · foreign
+│   ├── keyed-lock.ts       one permit per key, such as a session id, evicted when its last user leaves
 │   └── tool.ts             adapter (tools and hooks) · DefineTool · ToolCatalog · actor · error → model text
 ├── records/                review records: where they live, how long they stay, how they leave
-│   ├── records.ts          entry: Records, StateRoot, the ActiveSeal port, export tools and command
+│   ├── records.ts          entry: Records, StateRoot, mutationLocks, the ActiveSeal port, export tools and command
 │   ├── repository.ts · locks.ts · retention.ts · state-root.ts
 │   ├── active-seal.ts      the ActiveSeal port (seal/ provides it)
 │   └── export.ts · export-tools.ts · archive.ts
 ├── seal/                   Containment: the Review aggregate root
 │   ├── seal.ts             entry: Sessions and the door, its writers, openReview, read tools, capture
-│   ├── record.ts* · target.ts* · region.ts* · coverage.ts*
+│   ├── record.ts* · seal-id.ts* · target.ts* · region.ts* · coverage.ts*
 │   ├── sessions.ts         session ↔ seal bindings and the door
-│   └── capture.ts · ends.ts · diff.ts · content.ts · views.ts · tools.ts · repo-path.ts
+│   └── capture.ts · ends.ts · diff.ts · content.ts · views.ts · tools.ts · repo-path.ts*
 ├── feature/
 │   ├── agents/             agents.ts · agent.ts* · registration.ts · access.ts
 │   ├── dispatch/           dispatch.ts · lifecycle.ts* · seat.ts* · events.ts · launch.ts · wait.ts
-│   ├── ledger/             ledger.ts · entry.ts* · decide.ts* · tools.ts
+│   ├── ledger/             ledger.ts · entry.ts* · decide.ts* · show.ts* · tools.ts
 │   ├── report/             report.ts · directive.ts* · gates.ts* · render.ts* · filing.ts
 │   └── settings/           settings.ts · file.ts* · configure-flow.ts* · configure-client.ts* · rpc.ts* · store.ts · configure.ts · prefix.ts
 └── workflow/
     ├── review/             review.ts · window.ts* · custody.ts* · request.ts* · ship-link.ts* · lifecycle.ts · interrupted.ts · tools.ts · command.ts · prefix.ts · watchdog.ts
-    └── ship/               ship.ts · state.ts* · step.ts* · runner.ts
+    └── ship/               ship.ts · state.ts* · step.ts* · runner.ts · evidence.ts · command.ts · storage.ts
 ```
 
 `*` marks a **primitive module** (`PRIMITIVE_MODULES` in `test/architecture-graph.ts`). In each slice directory, the module named for the directory is its **entry**; every other unmarked module is **internal** to the slice. The test fails if this block and the tree disagree: every `.ts` file under `src/` must appear here, and the `*` marks must equal `PRIMITIVE_MODULES`.
@@ -140,7 +142,7 @@ When a lower slice needs something from a higher one, or a feature needs somethi
 | `recovered`: tell a recovered review's caller its Directive | `registerReport` (`feature/report`) | `notifyRecoveredReview` (`workflow/review`) | registration parameter |
 | `autoReport`: file a Directive without the Liaison (abandon, deadline) | `reviewTools` and `watchdog` (`workflow/review`) | `registerReport(…).autoReport` (`feature/report`) | registration parameter |
 | `sealed`: hand each new seal to the ship loop, which may own it | `reviewTools` (`workflow/review`) | `registerShip().sealed` (`workflow/ship`) | registration parameter |
-| `recoverShips`: which ship owns each seal the watchdog recovers | `watchdog` (`workflow/review`) | `registerShip().recoverShips` (`workflow/ship`) | registration parameter |
+| `recoverShips`: recover stalled ships on each watchdog sweep | `watchdog` (`workflow/review`) | `registerShip().recoverShips` (`workflow/ship`) | registration parameter |
 | `before`: a session-event listener ahead of dispatch's own handler | `registerDispatch` (`feature/dispatch`) | `registerShip().sessionEvent` (`workflow/ship`) | registration parameter |
 | `settingsLine`: push the Liaison's `[directorate settings]` line | `sessionPrefix` (`workflow/review`) | `settingsLines().push` (`feature/settings`) | registration parameter |
 
@@ -154,7 +156,7 @@ Not every cross-slice call is a port. `workflow/ship` calls review's `shipStamp`
 
 The Review aggregate root: what is under review, frozen, and who has read which part of it.
 
-- **Owns:** `Seal` (the composed record), the `Containment` field group, and the root invariants; `Target`, `FileEntry`, `Region`, `Anchor`, `Side`; coverage marks and `Disposition`; capture (target ends, diff, snapshot, regions, fingerprints, drift check); sealed content (quote and evidence checks, installed dependencies); paged views; `RepoPath`, `RepoScope`, `LineRef`; `Sessions` (session ↔ seal bindings, the door, and its writers); `openReview`. Provides `ActiveSeal`.
+- **Owns:** `Seal` (the composed record), the `Containment` field group, and the root invariants; `Target`, `FileEntry`, `Region`, `Anchor`, `Side`; coverage marks and `Disposition`; capture (target ends, diff, snapshot, regions, fingerprints, drift check, and `Changes`: what differs since a seal, from `changesSinceSeal` and `changedBetween`); sealed content (quote and evidence checks, installed dependencies, and `linesOf`, which every line split of a file reuses); paged views; `RepoPath`, `RepoScope`, `LineRef`; `SealIdSchema` (`seal-id.ts`), the branded id every stored seal reference uses; `Sessions` (session ↔ seal bindings, the door, and its writers); `openReview`. Provides `ActiveSeal`.
 - **Tools:** `directorate_diff`, `directorate_read`, `directorate_ls`, `directorate_grep`, `directorate_history`, `directorate_coverage`.
 - **Field groups:** Containment, Coverage marks. **Artifacts:** `diff*.patch`, `snapshot*/` (persisted by `records/`).
 
@@ -162,7 +164,7 @@ The Review aggregate root: what is under review, frozen, and who has read which 
 
 What every agent of a kind _is_ and _may do_. Reference data; it stores nothing.
 
-- **Owns:** `AgentIdSchema` and the `Agent` class, with instances `Liaison`, `Auditor`, `Seat`, `Compliance` and one registry (`agentOf`, with `agentNamed` and `dispatchableNamed` for host-supplied names); `Actor`; each agent's per-phase orders and dispatch rights; the ticking budget footer (`budgetLine`) and the cache-stable prompt notice (`budgetNotice`) an agent reads (Window × Agent).
+- **Owns:** `AgentIdSchema` (and `DispatchableIdSchema`, the agents the Liaison dispatches) and the `Agent` class, with instances `Liaison`, `Auditor`, `Seat`, `Compliance` and one registry (`agentOf`, with `agentNamed` and `dispatchableNamed` for host-supplied names, and `Agent.is` to test one name against one agent); `Actor`; each agent's per-phase orders and dispatch rights; the ticking budget footer (`budgetLine`) and the cache-stable prompt notice (`budgetNotice`) an agent reads (Window × Agent).
 - **Hooks:** agent and skill registration from `agents/*.md` and `skills/` (`registerBundled`); `permission.evaluate` (only Directorate agents call review tools, only the Liaison dispatches, no new Auditors or Seats once the budget drains, no new dispatches once it locks); harness withholding and lockdown tool stripping in the session prefix (`withholdHarness`, `lockdown`).
 
 ```ts
@@ -206,8 +208,9 @@ export const Compliance = Agent.make({
 Each Auditor, Seat, or Compliance run the Liaison sends out in _this_ review.
 
 - **Owns:** the `Dispatch` entity as a tagged union (`Launching → Running → Completed | Failed`, and a completed run that works again is `Running` again) and its transitions; seat assignments (`Seat`: model and variant), `ModelRef`, the default panel (`DEFAULT_PANEL`); follow-ups (a follow-up to a finished run is a new run; to a running one, it joins); failures and unanswered questions.
-- **Agents as stored:** a dispatch stores its agent as a string, because older records may hold any name. Where behavior depends on the agent (seat status, unanswered questions, display names), it resolves the string to an `Agent` with `dispatchableNamed`.
+- **Agents:** a dispatch stores the id of the agent it runs (`DispatchableIdSchema`: Auditor, Seat, or Compliance). Where behavior depends on the agent (seat status, unanswered questions, display names), it asks that `Agent` (`Seat.is`, `Auditor.is`, `Compliance.is`).
 - **Tools and hooks:** `directorate_wait`; subagent `execute.before` (assigns the next open seat) and `execute.after`; the **one** ordered session-event consumer, which hands each event to the ship loop's listener first and then applies it to the runs (`session.created` is always handled before a child's terminal events); settling runs after a reload (`settleChildren`).
+- **Launches in flight:** which seal and Liaison session each subagent call was launched for, until the subagent tool returns, so a child that appears after its review was reported is stopped rather than adopted. `registerDispatch` allocates it and hands it to the subagent hooks and the event consumer; it is not part of `Sessions`, which keeps only the session ↔ seal bindings and the door.
 - **Field group:** Dispatches (stored as `children`).
 
 **Agents or dispatch?** If it is true of every Auditor, it belongs in `agents/`. If it is true of _this_ Auditor in _this_ review, it belongs in `dispatch/`. The `directorate_seat` agent is knowledge; a seat assignment (one model on one panel position) is operational.
@@ -216,8 +219,8 @@ Each Auditor, Seat, or Compliance run the Liaison sends out in _this_ review.
 
 Findings and their verification.
 
-- **Owns:** the `Entry` entity; `Verdict`, `Note`, and `Carried` value objects; `Ledger`, the `ledger.json` root, and its codec `LedgerJson`; `Severity`, `Kind`, `Lens`, entry statuses; decision authority as a specification over `Agent` (only the Liaison and Compliance decide; the Liaison decides open minor entries other sessions raised, never affirming the Liaison's own; no session confirms or resolves its own entry; only carried findings resolve, and only Compliance decides a carried verified finding); `reopen` on refresh, carrying entries into a re-check, and reopening duplicates of a refuted or resolved entry.
-- **Shape:** every status carries the same fields, so `Entry` is one branded class with a `status` field rather than a union. Changes are named transitions (`Ledger.filed`, `Ledger.noted`, `Ledger.withEntries`, `Entry.decided`, `Entry.carriedAs`, `decide`, `reopen`) that rebuild through the constructors. Stored fields such as `lens` and actors' agent names stay arbitrary strings.
+- **Owns:** the `Entry` entity and its branded id `EntryId` (`F` and its 1-based filing number, found in text by `entryIdsIn`); `Verdict`, `Note`, and `Carried` value objects; `Ledger`, the `ledger.json` root, and its codec `LedgerJson`; `Severity`, `KindSchema`, `Lens`, entry statuses; decision authority as a specification over `Agent` (only the Liaison and Compliance decide; the Liaison decides open minor entries other sessions raised, never affirming the Liaison's own; no session confirms or resolves its own entry; only carried findings resolve, and only Compliance decides a carried verified finding); `reopen` on refresh, carrying entries into a re-check, and reopening duplicates of a refuted or resolved entry.
+- **Shape:** every status carries the same fields, so `Entry` is one branded class with a `status` field rather than a union. Changes are named transitions (`Ledger.filed`, `Ledger.noted`, `Ledger.withEntries`, `Entry.decided`, `Entry.carriedAs`, `decide`, `reopen`) that rebuild through the constructors. An entry's `lens` is a `Lens`; actors' agent names stay strings, because any agent's tool call has an `Actor`.
 - **Tools:** `directorate_ledger_add`, `directorate_ledger_verdict`, `directorate_ledger_list`, `directorate_note`.
 
 ### `feature/report/`: the Directive
@@ -240,7 +243,7 @@ The protocol gates and the Directive they let through.
 
 Opening, timing, holding, refreshing, and closing a review.
 
-- **Owns:** `Window` and `Phase` (the budget clock: normal, then drain in the last 20% or 6 minutes if longer but never more than half, then locked at the deadline; per-mode minutes; the 1.5× panel factor; the takeover restart at half the budget, at least 5 minutes; a re-check's default of half its mode's minutes, at least 10; each phase's header and its name in refusals); `Custody` and its `Recovery` wake; `ReviewRequest`, `Mode`, `ReviewScope`, and the scope → target-kind table; create, refresh, and re-check (`createSeal`, `refreshSeal`, `recheckSeal`); the per-session start lock; resume, takeover, and abandon; the watchdog sweep and recovery wake; the Ship link stamp (`shipStamp`).
+- **Owns:** `Window` and `Phase` (the budget clock: normal, then drain in the last 20% or 6 minutes if longer but never more than half, then locked at the deadline; per-mode minutes; the 1.5× panel factor; the takeover restart at half the budget, at least 5 minutes; a re-check's default of half its mode's minutes, at least 10; each phase's header and its name in refusals); `Custody` and its `Recovery` wake; `ReviewRequest`, `Mode`, `ReviewScope`, and the scope → target-kind table; create, refresh, and re-check (`createSeal`, `refreshSeal`, `recheckSeal`); the per-session start lock; resume, takeover, and abandon; the watchdog sweep and recovery wake; the Ship link stamp (`shipStamp`) and `ShipIdSchema` (`ship-link.ts`), the ship's branded UUID.
 - **Tools, commands, and hooks:** `directorate_seal`, `directorate_refresh`, `/directorate-review`; the session prefix hook (`sessionPrefix`).
 - **Field groups:** Window, Custody, and the Ship link on the ship's behalf (see [`workflow/ship/`](#workflowship-the-ship-loop)).
 
@@ -250,24 +253,26 @@ The budget belongs to the review, not to agents: its length varies per review (m
 
 Review, fix, and re-check until the Directive is clean or the loop pauses.
 
-- **Owns:** ship state as a tagged union (`Waiting`, `Active`, `Paused`, `Complete`) decoded from its stored `status` shape, with its transitions; the next-step policy and its decisions (`Proceed`, `Pause`, `Conclude`), read from the saved Directive and never from the model's reply; the 6-review and 30-round limits; the kickoff text.
+- **Owns:** ship state as a tagged union (`Waiting`, `Active`, `Paused`, `Complete`) decoded from its stored `status` shape, with its named transitions in `state.ts` (`started`, `enqueued`, `admitting`, `admitted`, `planned`, `planRendered`, `unplanned`, `delivered`, `noticeQueued`, `awaited`, `woken`, `hostFailed`, `consumed`, `settled`, `claimed`, `traced`, `attached`, `observed`, `rewound`, `paused`, `unqueued`, `resumed`, `proceeding`, `stopped`, `completed`), which the runner calls instead of choosing fields itself, and the step it records as a typed union (`ReviewStep`, `FixStep`, `RecheckStep`, `FinishStep`, `ResumeStep`) stored as its text, where a string no form reads fails to decode; the per-session ship lock, shared by every plugin instance in the process; the next-step policy and its decisions (`Proceed`, `Pause`, `Conclude`), read from the saved Directive and never from the model's reply; the 6-review and 30-round limits; the kickoff text.
 - **Commands and hooks:** `/directorate-ship`; its own `context` and `experimental.idle` session hooks; a session-event listener that dispatch's one ordered consumer calls before its own handler; auto-resume after reload or restart.
 - **Storage:** `ship:<sessionID>` in OpenCode plugin storage. Ship is its own aggregate.
 
-**The Ship link.** A seal's `ship` field names the ship that owns the review. Ship never writes the seal. When ship attaches a new seal, it calls review's `shipStamp` (`workflow/review/lifecycle.ts`, exported from the review entry) with its id. `shipStamp` performs the write through the door with the `ShipLink` writer and the `shipped` transition (`workflow/review/ship-link.ts`). The watchdog also stamps an older seal it finds owned by a ship, with `shipped` under the `Watchdog` writer.
+The runner (`runner.ts`) holds the hooks and the loop's effects. What the host's records prove about the ship's inputs (Ship's mark, completion notices, provenance, compaction, and why recovery waits or stops) is pure and lives in `evidence.ts`; the command's parsing, its errors, and the status text in `command.ts`; reading and writing the stored record in `storage.ts`.
+
+**The Ship link.** A seal's `ship` field names the ship that owns the review. Ship never writes the seal. When ship attaches a new seal, it calls review's `shipStamp` (`workflow/review/lifecycle.ts`, exported from the review entry) with its id. `shipStamp` performs the write through the door with the `ShipLink` writer and the `shipped` transition (`workflow/review/ship-link.ts`).
 
 ### `records/`: Records
 
 Where review records live, how long they stay, and how they leave.
 
-- **Owns:** the review-record repository `Records` (`seal.json`, `ledger.json`, `report.md`, patches, snapshots), typed with codecs from the owners' primitives; `StateRoot`; `mutation.lock` and the ship locks; atomic writes; 31-day retention; listing; the unredacted export ZIP, its manifest, and transcript collection; the `ActiveSeal` port.
+- **Owns:** the review-record repository `Records` (`seal.json`, `ledger.json`, `report.md`, patches, snapshots), typed with codecs from the owners' primitives; `StateRoot`; the cross-process lock (`mutationLocks`: a holder record, reclaimed when its process is gone or it is stale) behind `mutation.lock`, the ship locks, and `SettingsStore`'s `directorate.json.lock`; atomic writes, and the ledger-and-seal pair commit through `commit.json`; 31-day retention, which evicts a review only under its lock after re-checking its record files' age; listing, with `Records.find` for a seal that may be missing or damaged (it reads as none) where `load` would fail; the unredacted export ZIP of the committed generations, its manifest, and transcript collection; the `ActiveSeal` port.
 - **Tools and commands:** `directorate_export`, `directorate_export_list`, `/directorate-export`.
 
 ### `platform/`: seams and the OpenCode adapter
 
 Process and host capabilities with no review policy.
 
-- **Owns:** `Git` (and the command runner), `Worktree`, `Host`, `ProcessIdentity`, and `nodeLayer`; host-record readers (`activity`, `turns`, `locationKey`, `createdAt`, `foreign`); the tool and hook adapter (`adapter`, `DefineTool`, the `ToolCatalog`, `actor`, which decodes a tool call's agent and session into an `Actor`) and mapping slice errors to the text the model sees; `recover` and `ignore`; UTF-8 and SHA-256 helpers; stored-schema helpers (`since`, `orLegacyTrue`, `Time`, `Count`, `sortedFields`).
+- **Owns:** `Git` (and the command runner, with `Git.rootOption` telling a directory outside any repository from a failing git), `Worktree`, `Host`, `ProcessIdentity`, and `nodeLayer`; host-record readers (`activity`, `turns`, `locationKey`, `createdAt`, `foreign`); the in-process keyed lock (`keyedLock`, `keyedLockUnsafe`: one permit per key, dropped when its last holder or waiter leaves) behind review's per-session start lock and ship's per-session lock; the tool and hook adapter (`adapter`, `DefineTool`, the `ToolCatalog`, `actor`, which decodes a tool call's agent and session into an `Actor`) and mapping slice errors to the text the model sees; `recover` and `ignore`; UTF-8 and SHA-256 helpers; stored-schema helpers (`Time`, `Count`, `sortedFields`); the host's ids mirrored as primitives (`SessionIdSchema`, `MessageIdSchema`, `CallIdSchema` in `host-id.ts`), whose types are the host's `Session.ID`, `SessionMessage.ID`, and `Tool.CallID`, so host records flow in without conversion and every other string becomes one by decoding.
 - **Not the only place host types are read.** Other slices read host events and session records in their own entries and internal modules. What `platform/` guarantees is narrower: tool calls reach slices as an `Actor`, and host types never reach a primitive.
 
 ### `exclusions.ts`: withholding
@@ -288,7 +293,7 @@ mutate(sealId, writer, transition) =>
     const admitted = admit(seal, writer); // AdmissionSchema: write, read (run, save nothing), or skip (do not run)
     if (skips(admitted)) return;
     const revision = transition({ seal, ledger, checkpoint }); // ledger loads only if the transition asks
-    if (writes(admitted)) persist(revision); // only the parts the revision returns
+    if (writes(admitted)) persist(revision); // only the parts the revision returns; a ledger with its seal commits as one pair
     return revision.out;
   });
 read(sealId, toolCall, body); // under the lock, the same guards as a ToolCall; writes nothing
@@ -301,7 +306,6 @@ openReview(id, attempt); // a review that does not exist yet: its first seal and
 | --- | --- | --- | --- |
 | `ToolCall` | a tool call by an `Actor` | guards below | refused (`SealReported`), or with `reported: "shown"`, run and nothing saved |
 | `HostEvent` | the ordered session-event consumer, subagent hooks, settling runs after a reload | written | left alone silently |
-| `Watchdog` | the deadline sweep, stamping a ship on an older seal | written | left alone silently |
 | `RecoveryWake` | the watchdog waking a stalled Liaison (uninterruptible once loaded) | written | left alone silently |
 | `AutoReport` | filing without the Liaison (abandon, deadline) | written | left alone silently |
 | `ShipLink` | `shipStamp` stamping the ship's id | written | written |
@@ -336,8 +340,8 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
       ...StoredWindow.fields, // workflow/review
       ...Custody.fields, // workflow/review
       ...Protocol.fields, // feature/report
-      children: since(list(DispatchFromStored), []), // feature/dispatch
-      ship: opt(Schema.String), // the Ship link
+      children: list(DispatchFromStored), // feature/dispatch
+      ship: opt(ShipIdSchema), // the Ship link
     })
     // Spreading StoredWindow's fields drops its check; the root re-applies it.
   ).check(windowCheck)
@@ -364,7 +368,7 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
 | Custody | `workflow/review` | `owner` `ownerSession` `previousOwnerSessions` `resumedAt` `halted` `abandoned` `host` `pid` `recovery` | `started` (through `Seal.open`), `resumedBy`, `halted`, `abandoned`, `waking`, `woken` (`workflow/review/custody.ts`) |
 | Dispatches | `feature/dispatch` | `children` | `launched`, `withdrawn`, `claimed`, `enqueued`, `inboxSettled`, `finished`, `resumed`, `returned`, and `update` (`feature/dispatch/lifecycle.ts`); `followUpRecovered` rebuilds one run for `update` when runs settle after a reload |
 | Protocol & Directive | `feature/report` | `gates` `directive` `reportedAt` `autoReported` `freshnessUnverified` `staleFiles` | `pushedBack`, `freshnessChecked`, `directiveFiled`, `driftCleared` (`feature/report/directive.ts`); refresh composes `driftCleared` |
-| Ship link | `workflow/review`, for `workflow/ship` | `ship` | `shipped` (`workflow/review/ship-link.ts`), from `shipStamp` (`ShipLink` writer) or the watchdog (`Watchdog` writer), with the id the ship hands it |
+| Ship link | `workflow/review`, for `workflow/ship` | `ship` | `shipped` (`workflow/review/ship-link.ts`), from `shipStamp` (`ShipLink` writer), with the id the ship hands it |
 
 ### Artifacts
 
@@ -374,14 +378,15 @@ export class Seal extends Schema.Class<Seal, { readonly brand: unique symbol }>(
 | `ledger.json` | `feature/ledger` | `records`, under the seal's lock |
 | `diff.patch`, `diff.g<N>.patch`, `snapshot/`, `snapshot.g<N>/` | `seal` | `records` |
 | `report.md` | `feature/report` | `records`, once |
+| `commit.json`: a ledger and seal pair until both files are replaced; reads prefer it, the next lock holder finishes it | `records` | `records`, under the seal's lock |
 | `mutation.lock`, directory layout, 31-day retention | `records` | `records` |
 | `exports/*.zip` | `records` | `records`; never pruned with the seal |
 | `ship:<sessionID>` | `workflow/ship` | `workflow/ship`, in plugin storage |
-| `directorate.json` | `feature/settings` | `feature/settings` |
+| `directorate.json` | `feature/settings` | `feature/settings`, under records' lock (`directorate.json.lock`) |
 
 ### Names, copy, defaults, and errors
 
-- **Names.** Agent ids live on `Agent`. Tool names live with the tool that registers them. Neither is ever renamed: both are stored and host-facing.
+- **Names.** Agent ids live on `Agent`. Tool names live with the tool that registers them, once: the adapter hands each tool body the name it registered under, and the body builds its `ToolCall` from it. Neither is ever renamed: both are stored and host-facing.
 - **Copy.** Phase headers (`DIRECTORATE // WINDOW`, `EVACUATION`, `LOCKDOWN`) and each phase's name in refusals live with `Phase` in `workflow/review/window.ts`; each agent's per-phase orders live on its `Agent`; each tool's description and gate text live with their slice.
 - **Defaults.** Owners publish defaults: minutes per mode and the panel factor (`DEFAULT_BUDGET`, `PANEL_BUDGET_FACTOR`) and the default mode and scope (`DEFAULT_MODE`, `DEFAULT_REVIEW_SCOPE`) in `review`, the default seats (`DEFAULT_PANEL`) in `dispatch`. Settings only resolves precedence.
 - **Errors.** Each slice defines branded `Schema.TaggedError`s for its expected failures, each with the `message` the model reads. The tool adapter in `platform/` maps them to tool output; there is no shared `ReviewError`.
@@ -430,7 +435,7 @@ The mechanics are in [`src/AGENTS.md`](src/AGENTS.md). The architectural choices
 
 - **Value objects** are immutable, compared by value, and rebuilt on change: `Agent`, `Window`, `Target`, `Seat`, `Verdict`, `Note`. They are branded `Schema.Class`es.
 - **Entities** have identity and a lifecycle: `Seal`, `Region`, `Dispatch`, `Entry`, ship state.
-- **Stored lifecycles are tagged unions over one field set.** `Dispatch` (`Launching`, `Running`, `Completed`, `Failed`) and ship state (`Waiting`, `Active`, `Paused`, `Complete`) are unions of branded `Schema.TaggedClass`es. Every state shares one field set, because a stored record keeps whatever any version wrote and a round trip must be lossless; what each state actually sets is up to its transitions. Changes are named transitions that build the next state through its class. A transition that does not apply returns no change (dispatch transitions return `undefined`) or rebuilds the same state, rather than raising an invalid-transition error.
+- **Stored lifecycles are tagged unions over one field set.** `Dispatch` (`Launching`, `Running`, `Completed`, `Failed`) and ship state (`Waiting`, `Active`, `Paused`, `Complete`) are unions of branded `Schema.TaggedClass`es. Every state shares one field set, so a stored record round-trips losslessly whatever state it is in; what each state actually sets is up to its transitions. Changes are named transitions that build the next state through its class. A transition that does not apply returns no change (dispatch transitions return `undefined`) or rebuilds the same state, rather than raising an invalid-transition error.
 - **Stored unions keep stored shapes.** Both are stored with a `status` field, not `_tag`, and decode from and encode to that shape with `Schema.decodeTo` (`DispatchFromStored` from `StoredDispatch`, `ShipStateFromStored` from `StoredShipState`).
 - **One class when the shape does not change.** Every `Entry` status carries the same fields, so `Entry` is one class with a `status` field.
 - **Stored field groups and codecs are named for the stored shape.** `Containment`, `Custody`, `StoredWindow`, `Protocol`, `StoredDispatch`, and `StoredShipState` are non-class schemas without the `Schema` suffix, on purpose: each is a fixed piece of a stored contract, not a domain type.
@@ -476,7 +481,7 @@ Folder and type names use the operational words that stored files, tool names, a
   - the only files directly in `src/` are the root modules and `AGENTS.md`;
   - no slice module uses `export *` or re-exports a namespace;
   - the [Layout](#layout) block lists exactly the modules under `src/`, and its `*` marks equal `PRIMITIVE_MODULES`.
-- **`test/contracts.test.ts`** checks the stored contracts. Current and legacy fixtures under `test/stored/` for `seal.json`, `ledger.json`, `directorate.json`, and ship state round-trip byte for byte. Legacy fixtures re-encode to their `*.expected.json` goldens. The first current fixture sets every encoded field, and the fixtures together cover every shape-changing union member. A `Seal` whose Window breaks `windowCheck` fails to decode, so the check survives composition.
+- **`test/contracts.test.ts`** checks the stored contracts. Fixtures under `test/stored/` for `seal.json`, `ledger.json`, `directorate.json`, and each ship state round-trip byte for byte. Hand-edited `directorate.json` fixtures re-encode to their normalized `*.expected.json` goldens. The first fixture of each contract sets every encoded field, and the fixtures together cover every shape-changing union member. A `Seal` whose Window breaks `windowCheck` fails to decode, so the check survives composition.
 - **`test/surface.test.ts`** checks the host-facing surface against `test/stored/surface.json`: tools in order with their input JSON Schemas, commands, agents, skills, RPC, hooks, and event subscriptions.
 
 Lint guards three modeling rules of [`src/AGENTS.md`](src/AGENTS.md) for everything under `src/`. The rules live in `tools/oxlint/directorate/` at the repository root and are enabled in the root `oxlint.config.ts`:
@@ -493,7 +498,7 @@ What is **not** mechanically checked:
 ## Where new code goes
 
 - **A new tool:** in the slice that owns what it changes, registered from that slice's tool registration and added to the tool list in `index.ts` (its position is part of the prompt prefix). Declare its `lockdown` agents. Write through `Sessions.mutate` with a `ToolCall`, and update `test/stored/surface.json`.
-- **A new stored field on the seal:** in the owning field group (`Containment` in `seal/record.ts`, under `Pins` if the review sets it at sealing or `Captured` if capture writes it; `StoredWindow`, `Custody`, `Protocol`, or `StoredDispatch`), optional or with `since` so older seals decode. Change it only through that owner's transitions and its `with<Group>` method, and add it to `test/stored/seal.json` (the first current fixture must set every encoded field).
+- **A new stored field on the seal:** in the owning field group (`Containment` in `seal/record.ts`, under `Pins` if the review sets it at sealing or `Captured` if capture writes it; `StoredWindow`, `Custody`, `Protocol`, or `StoredDispatch`), optional, or with a decoding default (`Schema.withDecodingDefaultKey`) so seals already written decode. Change it only through that owner's transitions and its `with<Group>` method, and add it to `test/stored/seal.json` (the first fixture of each contract must set every encoded field).
 - **A new host hook:** in the slice that owns the behavior, registered from its entry. If it needs a higher slice or a sibling, take a registration parameter and wire it in `index.ts`. Work on the session prefix goes into `sessionPrefix`'s order, not a new prefix hook. Update `test/stored/surface.json`.
 - **A new setting:** in `SettingsSchema` (`feature/settings/file.ts`, a GUI-safe primitive). The owning slice publishes its default; settings only resolves precedence. Add fixtures under `test/stored/`.
 - **A new agent rule:** on `Agent` in `feature/agents/agent.ts`, as data (`orders`, `dispatches`, `launchableIn`) or a method, with permission checks in `feature/agents/access.ts`. Never keep a name-keyed table beside it.

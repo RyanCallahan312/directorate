@@ -1,35 +1,57 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DateTime } from "effect";
+import { DateTime, Schema } from "effect";
 
-import { Actor, Seat } from "../src/feature/agents/agent.ts";
+import { Actor } from "../src/feature/agents/agent.ts";
 import { Completed } from "../src/feature/dispatch/lifecycle.ts";
 import {
   Carried,
   Entry,
+  EntryIdSchema,
   Ledger,
   Verdict,
 } from "../src/feature/ledger/entry.ts";
-import { Directive, Gates } from "../src/feature/report/directive.ts";
+import { Directive } from "../src/feature/report/directive.ts";
+import { CallIdSchema, SessionIdSchema } from "../src/platform/host-id.ts";
 import { Seal } from "../src/seal/record.ts";
 import { Anchor, FileEntry, Region } from "../src/seal/region.ts";
+import { SealIdSchema } from "../src/seal/seal-id.ts";
 import { Target } from "../src/seal/target.ts";
+import { ShipIdSchema } from "../src/workflow/review/ship-link.ts";
+import { StepFromStored } from "../src/workflow/ship/state.ts";
 import {
   decideShip,
   ShipDecisionSchema,
   shipKickoff,
 } from "../src/workflow/ship/step.ts";
+import { bareSeal } from "./fixtures.ts";
 
-/** A decision as these assertions read it: the ship status it leads to, the step it records, and its reason and text. */
-const decide = (...args: Parameters<typeof decideShip>) => {
-  const decision = decideShip(...args);
+const stepText = Schema.encodeSync(StepFromStored);
+const stepOf = Schema.decodeSync(StepFromStored);
+
+type Progress = Omit<Parameters<typeof decideShip>[0], "step"> & {
+  readonly step?: string;
+};
+
+/**
+ * A decision as these assertions read it: the ship status it leads to, the step it records as stored, and its reason
+ * and text. The ship's last step is given as stored, too.
+ */
+const decide = (
+  { step, ...progress }: Progress,
+  observation: Parameters<typeof decideShip>[1]
+) => {
+  const decision = decideShip(
+    { ...progress, step: step === undefined ? undefined : stepOf(step) },
+    observation
+  );
 
   return {
     ...ShipDecisionSchema.match(decision, {
       Conclude: () => ({ status: "complete", step: undefined }),
       Pause: () => ({ status: "paused", step: undefined }),
-      Proceed: ({ step }) => ({ status: "active", step }),
+      Proceed: ({ step: next }) => ({ status: "active", step: stepText(next) }),
     }),
     reason: decision.reason,
     text: decision.text,
@@ -37,7 +59,7 @@ const decide = (...args: Parameters<typeof decideShip>) => {
 };
 
 const state = {
-  id: "8e651aab-1f61-43d4-8a2d-9890bdb86d2b",
+  id: ShipIdSchema.make("8e651aab-1f61-43d4-8a2d-9890bdb86d2b"),
   request: "",
   reviewsAtResume: 0,
   rounds: 0,
@@ -45,13 +67,12 @@ const state = {
 
 const at = DateTime.makeUnsafe(0);
 
-const seal = Seal.make({
-  baseSha: "base",
+const liaison = SessionIdSchema.make("ses_liaison");
+
+const seal = bareSeal({
   budgetMinutes: 20,
-  children: [],
   createdAt: at,
   deadline: DateTime.makeUnsafe(20 * 60_000),
-  deleted: [],
   description: "working tree changes",
   directive: Directive.make({ reasons: [], status: "complete" }),
   files: [
@@ -63,15 +84,9 @@ const seal = Seal.make({
     }),
   ],
   fingerprint: "original",
-  gates: Gates.make({}),
-  gen: 0,
-  headSha: "head",
-  id: "directorate-example",
-  mode: "default",
-  owner: "directorate_liaison",
-  ownerSession: "ses_liaison",
+  id: SealIdSchema.make("directorate-20260101000000-eeeeee"),
+  ownerSession: liaison,
   postImage: "worktree",
-  refreshes: 0,
   regions: [
     Region.make({
       file: "src/file.ts",
@@ -88,7 +103,8 @@ const seal = Seal.make({
   target: Target.make({ kind: "local" }),
 });
 
-const entry = (id: string, overrides: Partial<Entry> = {}) =>
+/** An entry titled after `name`, filed as F1 unless `overrides` says otherwise. */
+const entry = (name: string, overrides: Partial<Entry> = {}) =>
   Entry.make({
     anchor: Anchor.make({
       endLine: 12,
@@ -99,15 +115,15 @@ const entry = (id: string, overrides: Partial<Entry> = {}) =>
     consequence: "The result is incorrect",
     createdAt: at,
     evidence: [],
-    fix: `Suggestion for ${id}`,
-    id,
+    fix: `Suggestion for ${name}`,
+    id: EntryIdSchema.make("F1"),
     kind: "defect",
     lens: "correctness",
     quote: "return value",
-    raisedBy: Actor.make({ agent: seal.owner, session: seal.ownerSession }),
+    raisedBy: Actor.make({ agent: seal.owner, session: liaison }),
     severity: "minor",
     status: "confirmed",
-    title: `Title for ${id}`,
+    title: `Title for ${name}`,
     trigger: "The input is absent",
     verdicts: [],
     ...overrides,
@@ -159,7 +175,7 @@ test("unfinished review resumes the Liaison and exact seal only once without pro
     decision.text,
     /same directorate_liaison session \(ses_liaison\)/u
   );
-  assert.match(decision.text, /resume: "directorate-example"/u);
+  assert.match(decision.text, /resume: "directorate-20260101000000-eeeeee"/u);
   assert.ok(!decision.text.includes(state.id));
   assert.match(decision.text, /Do not start another review/u);
   assert.match(decision.text, /wait for the plugin to direct the next step/u);
@@ -177,7 +193,10 @@ test("empty initial targets and unreadable reported reviews never report complet
     });
 
     assert.equal(result.status, "paused");
-    assert.match(result.reason, /directorate-example.*nothing to review/u);
+    assert.match(
+      result.reason,
+      /directorate-20260101000000-eeeeee.*nothing to review/u
+    );
   }
 
   for (const [observation, cause] of [
@@ -187,7 +206,7 @@ test("empty initial targets and unreadable reported reviews never report complet
   ] as const) {
     const result = decide(state, observation);
     assert.equal(result.status, "paused");
-    assert.match(result.reason, /directorate-example/u);
+    assert.match(result.reason, /directorate-20260101000000-eeeeee/u);
     assert.match(result.text, cause);
   }
 });
@@ -196,7 +215,7 @@ test("an empty recheck still decides carried findings and can complete after res
   const recheck = Seal.make({
     ...seal,
     files: [],
-    id: "directorate-next",
+    id: SealIdSchema.make("directorate-20260102000000-ffffff"),
     recheckOf: seal.id,
     regions: [],
   });
@@ -215,7 +234,10 @@ test("an empty recheck still decides carried findings and can complete after res
   assert.match(unfinished.text, /wait for the plugin to direct the next step/u);
 
   const resolved = entry("carried", {
-    carried: Carried.make({ id: "F1", status: "confirmed" }),
+    carried: Carried.make({
+      id: EntryIdSchema.make("F1"),
+      status: "confirmed",
+    }),
     status: "resolved",
   });
 
@@ -254,7 +276,7 @@ test("changed target rechecks the exact seal before looking at its findings or o
     changed.text,
     /same directorate_liaison session \(ses_liaison\)/u
   );
-  assert.match(changed.text, /recheck: "directorate-example"/u);
+  assert.match(changed.text, /recheck: "directorate-20260101000000-eeeeee"/u);
   assert.ok(!changed.text.includes(state.id));
   assert.match(
     changed.text,
@@ -301,7 +323,7 @@ test("missing panel Seats require a new panel review even with drift or confirme
     assert.equal(paused.step, undefined);
     assert.match(
       paused.reason,
-      /directorate-example.*panel review is incomplete.*provider\/seat/u
+      /directorate-20260101000000-eeeeee.*panel review is incomplete.*provider\/seat/u
     );
     assert.match(
       paused.text,
@@ -313,17 +335,17 @@ test("missing panel Seats require a new panel review even with drift or confirme
     ...panelSeal,
     children: [
       new Completed({
-        agent: Seat.id,
-        call: "call",
+        agent: "directorate_seat",
+        call: CallIdSchema.make("call"),
         model,
         prompt: "Review",
-        session: "ses_seat",
+        session: SessionIdSchema.make("ses_seat"),
         startedAt: at,
       }),
     ],
     directive: seal.directive,
     regions: seal.regions.map((r) =>
-      Region.make({ ...r, readBy: ["ses_seat"] })
+      Region.make({ ...r, readBy: [SessionIdSchema.make("ses_seat")] })
     ),
   });
 
@@ -439,13 +461,14 @@ test("fixed commits cannot show fixes; PR fixes need a fetched PR head", () => {
 
 test("incomplete reviews get one finish recheck, carrying reasons and outstanding leads", () => {
   const duplicate = entry("unsettled-duplicate", {
+    id: EntryIdSchema.make("F2"),
     status: "duplicate",
     verdicts: [
       Verdict.make({
         at,
         by: entry("lead").raisedBy,
         evidence: [],
-        of: "lead",
+        of: EntryIdSchema.make("F1"),
         rationale: "same issue",
         verdict: "duplicate",
       }),
@@ -472,7 +495,7 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
     const finish = decide(state, observation);
     assert.equal(finish.status, "active");
     assert.equal(finish.step, "finish");
-    assert.match(finish.text, /recheck: "directorate-example"/u);
+    assert.match(finish.text, /recheck: "directorate-20260101000000-eeeeee"/u);
     assert.match(finish.text, /wait for the plugin to direct the next step/u);
     assert.match(finish.text, /Title for lead/u);
     assert.match(finish.text, /Title for unsettled-duplicate/u);
@@ -485,14 +508,14 @@ test("incomplete reviews get one finish recheck, carrying reasons and outstandin
       ...observation,
       seal: Seal.make({
         ...observation.seal,
-        id: "directorate-next",
+        id: SealIdSchema.make("directorate-20260102000000-ffffff"),
         recheckOf: seal.id,
       }),
     };
 
     const paused = decide({ ...state, step: finish.step }, another);
     assert.equal(paused.status, "paused");
-    assert.match(paused.reason, /directorate-next/u);
+    assert.match(paused.reason, /directorate-20260102000000-ffffff/u);
   }
 });
 
@@ -507,7 +530,10 @@ test("only complete and fresh reports without confirmed findings or unresolved l
 
   assert.equal(decision.status, "complete");
   assert.equal(decision.step, undefined);
-  assert.match(decision.reason, /directorate-example.*complete and current/u);
+  assert.match(
+    decision.reason,
+    /directorate-20260101000000-eeeeee.*complete and current/u
+  );
 
   for (const status of ["stale", "partial"] as const) {
     const incomplete = decide(state, {

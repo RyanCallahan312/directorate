@@ -2,13 +2,15 @@
 // reviews. Either way the report is rendered and saved once, and the seal is reported from then on.
 import { Clock, DateTime, Effect, Result, Schema } from "effect";
 
+import type { SessionId } from "../../platform/host-id.ts";
 import { actor, optional, str } from "../../platform/platform.ts";
 import type { DefineTool, Host } from "../../platform/platform.ts";
-import { Records } from "../../records/records.ts";
+import { Records, sealIdOf } from "../../records/records.ts";
 import { Seal } from "../../seal/record.ts";
+import type { SealId } from "../../seal/seal-id.ts";
 import {
   AutoReport,
-  changedSinceSeal,
+  changesSinceSeal,
   currentFingerprint,
   FreshnessUnchecked,
   Sessions,
@@ -27,16 +29,8 @@ import {
   isComplete,
   pushedBack,
 } from "./directive.ts";
-import type { Freshness, Remembered } from "./directive.ts";
-import {
-  coverageGate,
-  dossierGate,
-  driftGate,
-  personnelGate,
-  pushesBack,
-  seatsGate,
-} from "./gates.ts";
-import type { Hold } from "./gates.ts";
+import type { Freshness } from "./directive.ts";
+import { heldAfterFreshness, heldBeforeFreshness } from "./gates.ts";
 import { renderReport, ReportSchema } from "./render.ts";
 
 /** A freshness check's outcome: the target's current ends, or why they could not be told. */
@@ -72,7 +66,7 @@ const freshness = (seal: Seal, cur: CurrentCheck) =>
     onSuccess: (c) =>
       c.fingerprint === seal.fingerprint
         ? Effect.succeed<Freshness>({})
-        : changedSinceSeal(seal, c).pipe(
+        : changesSinceSeal(seal, c).pipe(
             Effect.timeoutOrElse({
               duration: 20_000,
               orElse: () =>
@@ -87,8 +81,8 @@ const freshness = (seal: Seal, cur: CurrentCheck) =>
                 stale: ["(changes not enumerated)"],
                 unverified: e.message,
               }),
-              onSuccess: (changed): Freshness => ({
-                stale: changed.length ? changed : ["(fingerprint changed)"],
+              onSuccess: ({ listed }): Freshness => ({
+                stale: listed.length ? listed : ["(fingerprint changed)"],
               }),
             })
           ),
@@ -141,7 +135,7 @@ export const finalize = Effect.fn("Directorate.finalize")(function* finalize(
  * review the watchdog woke that the Liaison filed it.
  */
 export const registerReport = Effect.fnUntraced(function* registerReport(
-  filed: (sealId: string) => void,
+  filed: (sealId: SealId) => void,
   recovered: (seal: Seal, md: string) => Effect.Effect<void, never, Host>
 ) {
   const store = yield* Records;
@@ -149,9 +143,9 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
 
   /** Reported, without the Liaison: abandoned for a new review, or past the deadline and its grace period. */
   const autoReport = Effect.fn("Directorate.autoReport")(function* autoReport(
-    id: string,
+    id: SealId,
     reason: string,
-    abandonedBy?: string
+    abandonedBy?: SessionId
   ) {
     const saved = yield* sessions.mutate(id, AutoReport.make({}), (review) =>
       Effect.gen(function* fileUnattended() {
@@ -192,23 +186,21 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
   });
 
   const reportTool = (
-    tool: DefineTool<
-      Sessions | Host | Effect.Services<ReturnType<typeof finalize>>
-    >
+    tool: DefineTool<Host | Effect.Services<ReturnType<typeof finalize>>>
   ) => {
     // Reported: each gate pushes back once per new gap; locked budgets pass every gate.
     tool({
       description:
         "Issue the final Directorate Directive. Protocol gates push back once for each new gap (unread regions, missing Seats, subagents still running, containment drift, unverified entries); calling again proceeds and records the gap. Renders the directive from the dossier: only verified entries become findings. Output the returned markdown verbatim.",
-      *execute(input, c) {
+      *execute(input, c, name) {
         const filing = yield* sessions.mutate(
-          input.seal,
+          yield* sealIdOf(input.seal, "door"),
           ToolCall.make({
             actor: actor(c),
             callers: "owner",
             lockdown: "exempt",
             reported: "shown",
-            tool: "directorate_report",
+            tool: name,
           }),
           (review) =>
             Effect.gen(function* issueDirective() {
@@ -228,48 +220,31 @@ export const registerReport = Effect.fnUntraced(function* registerReport(
               const { phase } = yield* budget(seal.window);
 
               /** The gate's gaps are remembered on the seal; the Liaison reads why, and calling again proceeds. */
-              const pushBack = (gates: Remembered, message: string) => ({
+              const pushBack = ({
+                message,
+                remembered,
+              }: NonNullable<ReturnType<typeof heldBeforeFreshness>>) => ({
                 out: Result.fail(new ProtocolHold({ message })),
-                seal: pushedBack(seal, gates),
+                seal: pushedBack(seal, remembered),
               });
 
-              /** A gate pushes back once for each new id it has not already pushed back on. */
-              const once = (gate: Hold) => {
-                const remembered = pushesBack(seal, phase, gate);
-
-                return remembered
-                  ? pushBack(remembered, gate.message)
-                  : undefined;
-              };
-
-              const held =
-                once(coverageGate(seal)) ??
-                once(seatsGate(seal, phase)) ??
-                once(personnelGate(seal));
+              const held = heldBeforeFreshness(seal, phase);
 
               if (held) {
-                return held;
+                return pushBack(held);
               }
 
               const cur = yield* Effect.result(currentFingerprint(seal));
 
-              const drift = Result.isSuccess(cur)
-                ? driftGate(
-                    seal,
-                    phase,
-                    cur.success.fingerprint,
-                    cur.success.unfetched
-                  )
-                : undefined;
+              const heldAfter = heldAfterFreshness(
+                seal,
+                ledger,
+                phase,
+                Result.isSuccess(cur) ? cur.success : undefined
+              );
 
-              if (Result.isSuccess(cur) && drift) {
-                return pushBack({ freshness: cur.success.fingerprint }, drift);
-              }
-
-              const dossierHeld = once(dossierGate(ledger));
-
-              if (dossierHeld) {
-                return dossierHeld;
+              if (heldAfter) {
+                return pushBack(heldAfter);
               }
 
               const reported = yield* finalize(

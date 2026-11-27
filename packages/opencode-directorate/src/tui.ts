@@ -3,9 +3,10 @@
 import type { Plugin } from "@opencode/plugin/tui";
 
 import {
-  backend,
+  CONFIGURE_DESCRIPTION,
   configureFromHost,
   fromHost,
+  rpcBackend,
   showToast,
 } from "./feature/settings/configure-client.ts";
 import type { Dialogs } from "./feature/settings/configure-flow.ts";
@@ -54,8 +55,7 @@ const plugin: Plugin.Definition = {
       // command would never complete. The host's own slash commands are global too.
       commands: [
         {
-          description:
-            "Default review scope and mode, Directorate Seats (panel models) and thinking levels, time budgets, and disabled lenses",
+          description: CONFIGURE_DESCRIPTION,
           group: "The Directorate",
           id: "directorate.configure",
           palette: true,
@@ -63,15 +63,9 @@ const plugin: Plugin.Definition = {
             const location =
               context.location ?? context.data.location.default();
 
-            const directorate = context.client.rpc(DirectorateRpc);
-
             return configureFromHost(
               tuiDialogs(context),
-              backend(
-                fromHost(() => directorate.settings(undefined, { location })),
-                (input) =>
-                  fromHost(() => directorate.write(input, { location }))
-              )
+              rpcBackend(context.client.rpc(DirectorateRpc), { location })
             );
           },
           slash: { name: "directorate-configure" },
