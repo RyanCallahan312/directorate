@@ -521,7 +521,7 @@ const harness = async (
           })
         ),
     },
-    app: { version: "2.4.1" },
+    app: { version: "2.4.2" },
     command: {
       transform: (register: (editor: CommandEditor) => void) =>
         Effect.sync(() => {

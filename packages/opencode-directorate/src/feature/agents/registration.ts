@@ -108,7 +108,7 @@ export const registerBundled = Effect.fn("Directorate.registerBundled")(
           continue;
         }
 
-        // On OpenCode 2.4.1, update creates an agent when the ID is missing.
+        // OpenCode's editor.update creates an agent when the ID is missing.
         editor.update(id, (agent) => {
           Object.assign(agent, fields, {
             permissions: fields.permissions.map((rule) => ({ ...rule })),

@@ -121,7 +121,7 @@ export const captureSurface = async () => {
           return registration;
         }).pipe(Effect.orDie),
     },
-    app: { version: "2.4.1" },
+    app: { version: "2.4.2" },
     command: {
       transform: (
         register: (editor: {

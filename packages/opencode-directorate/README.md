@@ -34,11 +34,11 @@ npm install --global @rc312/opencode-directorate@0.1.2
 package="$(npm root --global)/@rc312/opencode-directorate"
 ```
 
-Use OpenCode 2.4.1, the version the plugin targets. Then follow the configuration below.
+Use the OpenCode version declared in the installed package's `@opencode/plugin` peer dependency. Then follow the configuration below.
 
 ## Install from a checkout
 
-From the workspace root, run `bun install --frozen-lockfile` and `bun run build`, then set `package="$PWD/packages/opencode-directorate"`.
+This checkout targets OpenCode 2.4.2. From the workspace root, run `bun install --frozen-lockfile` and `bun run build`, then set `package="$PWD/packages/opencode-directorate"`.
 
 ### Configure OpenCode
 
