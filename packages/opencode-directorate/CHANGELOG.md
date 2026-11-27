@@ -1,5 +1,11 @@
 # @rc312/opencode-directorate
 
+## 0.1.3
+
+### Patch Changes
+
+- bfa02e6: Support OpenCode 2.4.2 with the host's Effect 4.1.0 runtime.
+
 ## 0.1.2
 
 ### Patch Changes
