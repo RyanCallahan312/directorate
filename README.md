@@ -38,7 +38,7 @@ npm pack --workspace @rc312/opencode-directorate
 Install the resulting `.tgz` in a scratch environment and verify it loads in OpenCode. With an npm account authorized to publish the package, publish that same artifact:
 
 ```sh
-npm publish ./rc312-opencode-directorate-0.1.2.tgz --access public
+npm publish ./rc312-opencode-directorate-0.1.3.tgz --access public
 ```
 
 Use the tarball name that matches the version you packed.
