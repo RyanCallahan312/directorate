@@ -1,0 +1,22 @@
+{
+  "lenses": {
+    "disabled": ["security", "performance", "ops", "docs", "ux"]
+  },
+  "panel": {
+    "enabled": true,
+    "models": [
+      {
+        "model": "github-copilot/gemini-4-neon",
+        "variant": "high"
+      },
+      {
+        "model": "openai/gpt-6.2-sol",
+        "variant": "high"
+      },
+      {
+        "model": "claude-agent/opus",
+        "variant": "medium"
+      }
+    ]
+  }
+}

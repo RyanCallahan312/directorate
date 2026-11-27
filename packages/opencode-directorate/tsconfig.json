@@ -15,6 +15,7 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "ignoreEffectSuggestionsInTscExitCode": false,
         "allowedExperimentalApis": ["effect/encoding/Zip"],
         "allowedUnstableApis": [
           "effect/ByteSize#toNumber",
