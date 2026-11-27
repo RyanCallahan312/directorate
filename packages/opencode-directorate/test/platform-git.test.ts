@@ -32,10 +32,8 @@ test("rootOption is the work tree's top from inside it", async () => {
   const sub = join(dir, "sub");
   mkdirSync(sub);
 
-  assert.deepEqual(
-    await run(Git.use((git) => git.rootOption(sub))),
-    Option.some(dir)
-  );
+  const root = await run(Git.use((git) => git.rootOption(sub)));
+  assert.deepEqual(root.pipe(Option.map(nodePath.normalize)), Option.some(dir));
 });
 
 test("rootOption fails for anything but a missing repository", async () => {

@@ -198,7 +198,10 @@ export const captureSurface = async () => {
             skills.push({
               ...fields,
               content: digest(content),
-              path: path.relative(packageRoot, fields.path),
+              path: path
+                .relative(packageRoot, fields.path)
+                .split(path.sep)
+                .join("/"),
             });
           }
 

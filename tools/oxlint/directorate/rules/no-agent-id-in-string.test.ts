@@ -53,6 +53,11 @@ tester.run("directorate/no-agent-id-in-string", noAgentIdInStringRule, {
       filename: "src/feature/agents/agent.ts",
       options,
     },
+    {
+      code: 'const id = "directorate_liaison";',
+      filename: "src\\feature\\agents\\agent.ts",
+      options,
+    },
     'const text = "Only directorate_liaison runs a review.";',
   ],
 });

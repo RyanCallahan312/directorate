@@ -20,7 +20,7 @@ export const noAgentIdInStringRule = defineRule({
       if (
         text === null ||
         options === undefined ||
-        context.filename.endsWith(options.owner)
+        context.filename.replaceAll("\\", "/").endsWith(options.owner)
       ) {
         return;
       }
